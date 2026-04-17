@@ -5,6 +5,7 @@ import asyncio
 import zipfile
 import time
 import httpx
+import re
 from pathlib import Path
 from core.logger import get_logger
 from core.bus import bus
@@ -22,6 +23,8 @@ class PluginService:
         # Cache für Marketplace-Daten (URL -> Daten)
         self._marketplace_cache = []
         self._cache_timestamp = 0
+        self._tag_cache = {}
+        self._tag_cache_timestamp = {}
         self._cache_ttl = 900  # 15 Minuten Cache-Dauer
 
     def _extract_repo_info(self, github_url: str):
@@ -40,11 +43,23 @@ class PluginService:
             "Accept": "application/vnd.github.v3+json"
         }
         token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            try:
+                from core.services import vault_instance
+                if vault_instance.is_connected:
+                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(path="core/settings", mount_point="lyndrix")
+                    token = resp['data']['data'].get('github_token')
+            except Exception: pass
+            
         if token:
             headers["Authorization"] = f"token {token}"
         return headers
 
-    async def get_plugin_versions(self, github_url: str):
+    async def get_plugin_versions(self, github_url: str, force_refresh: bool = False):
+        if not force_refresh and github_url in self._tag_cache:
+            if time.time() - self._tag_cache_timestamp.get(github_url, 0) < self._cache_ttl:
+                return self._tag_cache[github_url]
+
         try:
             user, repo = self._extract_repo_info(github_url)
         except ValueError:
@@ -56,12 +71,22 @@ class PluginService:
                 resp = await client.get(api_url)
                 if resp.status_code == 200:
                     tags = resp.json()
-                    return [t['name'] for t in tags]
+                    raw_tags = [t['name'] for t in tags]
+                    def parse_v(t):
+                        c = t.lstrip('v')
+                        parts = []
+                        for p in re.split(r'[^0-9]+', c):
+                            if p: parts.append(int(p))
+                        return parts
+                    tag_list = sorted(raw_tags, key=parse_v, reverse=True)
+                    self._tag_cache[github_url] = tag_list
+                    self._tag_cache_timestamp[github_url] = time.time()
+                    return tag_list
         except Exception as e:
             log.error(f"Failed to fetch tags for {github_url}: {e}")
         return []
 
-    async def install_plugin(self, github_url: str, version: str = "latest"):
+    async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False):
         """Downloads, extracts and registers a new plugin from GitHub."""
         user, repo = self._extract_repo_info(github_url)
         
@@ -71,12 +96,17 @@ class PluginService:
         zip_path = self.plugin_dir / f"{repo}.zip"
         extracted_dir = None
         
-        log.info(f"INSTALL: Requesting plugin '{repo}' version '{version}' from {github_url}")
+        action_name = "UPGRADE" if upgrade else "INSTALL"
+        log.info(f"{action_name}: Requesting plugin '{repo}' version '{version}' from {github_url}")
         bus.emit("plugin:install_started", {"repo": repo, "version": version})
 
         if plugin_path.exists():
-            log.warning(f"CONFLICT: Plugin directory '{safe_repo_name}' already exists. Operation aborted")
-            return False
+            if upgrade:
+                log.info(f"UPGRADE: Removing old directory {plugin_path}")
+                shutil.rmtree(plugin_path)
+            else:
+                log.warning(f"CONFLICT: Plugin directory '{safe_repo_name}' already exists. Operation aborted")
+                return False
 
         try:
             async with httpx.AsyncClient(follow_redirects=True, headers=self._get_headers()) as client:
@@ -187,10 +217,10 @@ class PluginService:
             log.error(f"ERROR: Failed to delete plugin files: {e}", exc_info=True)
             return False
 
-    async def fetch_marketplace_data(self):
+    async def fetch_marketplace_data(self, force_refresh: bool = False):
         """Liest die plugin-list.txt und holt Metadaten von GitHub."""
         # Cache-Check: Wenn Daten noch frisch sind, API-Anrufe sparen
-        if self._marketplace_cache and (time.time() - self._cache_timestamp < self._cache_ttl):
+        if not force_refresh and self._marketplace_cache and (time.time() - self._cache_timestamp < self._cache_ttl):
             log.debug("MARKETPLACE: Loading from cache")
             return self._marketplace_cache
 

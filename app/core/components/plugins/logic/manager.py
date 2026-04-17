@@ -301,7 +301,6 @@ class ModuleManager:
         if manifest.ui_route:
             log.info(f"TEARDOWN: Removing UI route '{manifest.ui_route}' for '{module_id}'")
             try:
-                ui.remove_page(manifest.ui_route)
                 fastapi_app.routes = [route for route in fastapi_app.routes if route.path != manifest.ui_route]
             except Exception as e:
                 log.error(f"TEARDOWN_ERROR: Failed to remove UI for '{module_id}': {e}")

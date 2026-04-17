@@ -13,6 +13,8 @@ from core.components.plugins.ui.plugins_ui import render_plugin_manager
 # 3. Manager importieren, um echte Plugins zu laden
 from core.components.plugins.logic.manager import module_manager
 
+from core.services import vault_instance
+
 log = get_logger("UI:Settings")
 
 async def render_settings_page():
@@ -44,7 +46,38 @@ async def render_settings_page():
             with ui.tab_panel(tab_system).classes('p-0 gap-6'):
                 with ui.card().classes(UIStyles.CARD_GLASS + ' w-full p-6'):
                     ui.label('Grundeinstellungen').classes(UIStyles.TITLE_H3 + ' mb-4')
-                    ui.input('System Name', value='Lyndrix Core').classes('w-full max-w-md').props('outlined dark')
+                    ui.input('System Name', value='Lyndrix Core').classes('w-full max-w-md mb-4').props('outlined dark')
+                    
+                    ui.separator().classes('my-4 bg-zinc-800')
+                    
+                    ui.label('API Konfiguration').classes(UIStyles.TITLE_H3 + ' mb-2')
+                    ui.label('Ein GitHub Token verhindert Rate-Limits beim Laden des Marketplaces.').classes(UIStyles.TEXT_MUTED + ' text-sm mb-4')
+                    
+                    current_token = ""
+                    if vault_instance.is_connected:
+                        try:
+                            resp = vault_instance.client.secrets.kv.v2.read_secret_version(path="core/settings", mount_point="lyndrix")
+                            current_token = resp['data']['data'].get('github_token', '')
+                        except Exception: pass
+                    
+                    gh_token_input = ui.input('GitHub API Token', value=current_token, password=True).classes('w-full max-w-md').props('outlined dark')
+                    
+                    def save_system_settings():
+                        if vault_instance.is_connected:
+                            try:
+                                current_data = {}
+                                try:
+                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(path="core/settings", mount_point="lyndrix")
+                                    current_data = resp['data']['data']
+                                except Exception: pass
+                                
+                                current_data['github_token'] = gh_token_input.value
+                                vault_instance.client.secrets.kv.v2.create_or_update_secret(path="core/settings", mount_point="lyndrix", secret=current_data)
+                                ui.notify('Systemeinstellungen gespeichert', type='positive')
+                            except Exception as e:
+                                ui.notify(f'Fehler beim Speichern: {e}', type='negative')
+                                
+                    ui.button('Speichern', on_click=save_system_settings, icon='save').classes('mt-4').props('color=primary unelevated')
 
             # 3. PLUGINS (DYNAMISCH)
             with ui.tab_panel(tab_plugins).classes('p-0 gap-6'):
