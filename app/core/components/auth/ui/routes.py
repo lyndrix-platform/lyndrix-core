@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from nicegui import ui, app
+from urllib.parse import quote
 
 from core.logger import get_logger
 from .login_ui import render_login_page
@@ -91,4 +92,5 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             return RedirectResponse('/login?error=auth_failed')
 
         # Hand off to the NiceGUI /auth/complete page to set the session
-        return RedirectResponse(f'/auth/complete?state={state}')
+        safe_state = quote(state, safe='')
+        return RedirectResponse(f'/auth/complete?state={safe_state}')
