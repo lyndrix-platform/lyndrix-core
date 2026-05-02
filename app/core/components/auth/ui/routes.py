@@ -75,7 +75,7 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
 
         if error:
             log.warning(f"AUTH:OIDC: Provider returned error '{error}': {error_description}")
-            return RedirectResponse(f'/login?error=sso_error&detail={error}')
+            return RedirectResponse('/login?error=sso_error')
 
         if not code or not state:
             log.warning("AUTH:OIDC: Callback reached without code or state parameter.")
