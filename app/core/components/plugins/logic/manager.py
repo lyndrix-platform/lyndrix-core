@@ -280,7 +280,7 @@ class ModuleManager:
         enabled_plugin_ids = []
 
         with db_instance.SessionLocal() as session:
-            for module_id, entry in self.registry.items():
+            for module_id, entry in list(self.registry.items()):
                 if entry["manifest"].type == "CORE":
                     continue
 

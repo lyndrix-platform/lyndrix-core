@@ -4,9 +4,12 @@ from core.bus import bus
 from core.logger import get_logger
 from core.components.database.logic.db_service import Base, db_instance
 from .hashing import hash_password, verify_password
-from .models import User
+from .models import User, Group  # Group import ensures table is created
 
 log = get_logger("Core:AuthService")
+
+# Re-export so callers can do: from core.components.auth.logic.auth_service import User
+__all__ = ["AuthService", "auth_service", "User", "Group"]
 
 # Environment-backed bootstrap credentials
 ADMIN_USERNAME = os.getenv("LYNDRIX_ADMIN_USER", "admin")
@@ -28,11 +31,103 @@ class AuthService:
         try:
             Base.metadata.create_all(bind=db_instance.engine)
             log.debug("DB: IAM tables checked/created.")
+            self._migrate_schema()
             self._seed_users()
+            self._initialize_providers()
             log.info("SUCCESS: IAM Service ready.")
             bus.emit("iam:ready")
         except Exception as e:
             log.error(f"ERROR: IAM Service initialization failed: {e}", exc_info=True)
+
+    def _migrate_schema(self):
+        """
+        Idempotent column migrations for the users table.
+        create_all() never alters existing tables, so we handle new columns here.
+        Each ALTER is wrapped individually so a single failure doesn't block boot.
+        """
+        migrations = [
+            # (table, column, column_def)
+            ("users", "groups",             "JSON NULL"),
+            ("users", "extra_permissions",  "JSON NULL"),
+            ("groups", "ldap_mappings",     "JSON NULL"),
+        ]
+        with db_instance.engine.connect() as conn:
+            for table, column, col_def in migrations:
+                try:
+                    conn.execute(
+                        __import__("sqlalchemy").text(
+                            f"ALTER TABLE `{table}` ADD COLUMN `{column}` {col_def}"
+                        )
+                    )
+                    conn.commit()
+                    log.info(f"MIGRATE: Added column `{table}.{column}`.")
+                except Exception as e:
+                    err = str(e)
+                    if "Duplicate column name" in err or "already exists" in err:
+                        pass  # column already present — nothing to do
+                    else:
+                        log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
+
+    def _initialize_providers(self):
+        """Register all configured authentication providers with the provider registry."""
+        from .auth_config import auth_config_service, PROVIDER_CHAIN_SPEC
+        from .providers.registry import provider_registry
+        from .providers.local import LocalProvider
+        from .providers.ldap import LDAPProvider
+        from .providers.oidc import OIDCProvider
+
+        vault_data = auth_config_service.load_vault_data()
+        providers_str, _ = auth_config_service.get_effective(PROVIDER_CHAIN_SPEC, vault_data)
+        active = [p.strip() for p in providers_str.split(",") if p.strip()]
+
+        if "local" in active:
+            provider_registry.register(LocalProvider())
+
+        if "ldap" in active:
+            kwargs = auth_config_service.build_ldap_kwargs(vault_data)
+            if kwargs["url"]:
+                provider_registry.register(LDAPProvider(**kwargs))
+            else:
+                log.warning("AUTH: 'ldap' in provider chain but no URL configured — skipped.")
+
+        if "oidc" in active:
+            kwargs = auth_config_service.build_oidc_kwargs(vault_data)
+            if kwargs["issuer"]:
+                provider_registry.register(OIDCProvider(**kwargs))
+            else:
+                log.warning("AUTH: 'oidc' in provider chain but no issuer configured — skipped.")
+
+        log.info(
+            f"AUTH: Provider chain initialized: "
+            f"{[p.provider_id for p in provider_registry.get_all()]}"
+        )
+
+    def reinitialize_providers(self) -> None:
+        """
+        Clear and re-register all auth providers from current config.
+        Safe to call at runtime from the Settings UI after config changes.
+        Any in-progress SSO state is discarded.
+        """
+        from .providers.registry import provider_registry
+        provider_registry.clear()
+        self._initialize_providers()
+        log.info("AUTH: Providers reinitialized successfully.")
+
+    @staticmethod
+    def _vault_override(vault_key: str, env_value: str, vault_instance) -> str:
+        """Return the Vault-stored value if available, otherwise fall back to the env value."""
+        if not vault_instance.is_connected:
+            return env_value
+        try:
+            resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                path="core/auth", mount_point="lyndrix"
+            )
+            vault_val = resp["data"]["data"].get(vault_key)
+            if vault_val:
+                return str(vault_val)
+        except Exception:
+            pass
+        return env_value
 
     def _seed_users(self):
         """Seeds admin and bot accounts from environment or defaults."""

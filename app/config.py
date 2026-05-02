@@ -60,6 +60,47 @@ class Settings(BaseSettings):
     # Whether to auto-update plugins to latest on reboot
     LYNDRIX_PLUGINS_AUTO_UPDATE: bool = False
 
+    # --- AUTH PROVIDERS ---
+    # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
+    # Custom plugin providers must also be listed here to be registered at startup.
+    LYNDRIX_AUTH_PROVIDERS: str = "local"
+
+    # --- LDAP ---
+    # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
+    LYNDRIX_LDAP_URL: Optional[str] = None
+    # Service account used to search the directory
+    LYNDRIX_LDAP_BIND_DN: Optional[str] = None
+    # Stored in Vault under lyndrix/core/auth → ldap_bind_password (env var as fallback)
+    LYNDRIX_LDAP_BIND_PASSWORD: Optional[str] = None
+    LYNDRIX_LDAP_BASE_DN: Optional[str] = None
+    # LDAP search filter — {username} is replaced with the sanitized input
+    LYNDRIX_LDAP_USER_FILTER: str = "(uid={username})"
+    # Attribute containing group DNs; use 'memberOf' (AD) or 'memberof' (OpenLDAP)
+    LYNDRIX_LDAP_GROUP_ATTR: str = "memberOf"
+    # JSON mapping from group DN to list of Lyndrix roles
+    # e.g. '{"cn=admins,dc=example,dc=com": ["admin", "superadmin"]}'
+    LYNDRIX_LDAP_ROLE_MAPPING: Optional[str] = None
+    # Roles assigned to every successfully authenticated LDAP user
+    LYNDRIX_LDAP_DEFAULT_ROLES: str = "user"
+    LYNDRIX_LDAP_TLS_VERIFY: bool = True
+
+    # --- OIDC / OAuth2 (Authentik, Keycloak, Azure AD, …) ---
+    # Issuer URL — for Authentik: https://<host>/application/o/<app-slug>
+    LYNDRIX_OIDC_ISSUER: Optional[str] = None
+    LYNDRIX_OIDC_CLIENT_ID: Optional[str] = None
+    # Stored in Vault under lyndrix/core/auth → oidc_client_secret (env var as fallback)
+    LYNDRIX_OIDC_CLIENT_SECRET: Optional[str] = None
+    # Must match the redirect URI configured in your OIDC provider
+    # e.g. https://lyndrix.example.com/auth/callback/oidc
+    LYNDRIX_OIDC_REDIRECT_URI: Optional[str] = None
+    LYNDRIX_OIDC_SCOPES: str = "openid profile email"
+    # Userinfo claim that contains the list of groups/roles
+    LYNDRIX_OIDC_ROLE_CLAIM: str = "groups"
+    # Comma-separated group names that grant admin + superadmin roles
+    LYNDRIX_OIDC_ADMIN_GROUPS: Optional[str] = None
+    # Label shown on the SSO login button, e.g. "Authentik" or "Corporate SSO"
+    LYNDRIX_OIDC_DISPLAY_NAME: str = "SSO"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"
@@ -116,6 +157,37 @@ class Settings(BaseSettings):
                 _config_log.warning("SECURITY: DB_PASSWORD is using development default! Set a secure value for production.")
             if self.LYNDRIX_ADMIN_PASSWORD == "lyndrix":
                 _config_log.warning("SECURITY: LYNDRIX_ADMIN_PASSWORD is using default. Set a secure value for production.")
+
+    # ------------------------------------------------------------------
+    # Auth provider helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def active_auth_providers(self) -> List[str]:
+        """Ordered list of provider IDs derived from LYNDRIX_AUTH_PROVIDERS."""
+        return [p.strip() for p in self.LYNDRIX_AUTH_PROVIDERS.split(",") if p.strip()]
+
+    @property
+    def ldap_role_mapping(self) -> Dict[str, List[str]]:
+        """Parse LYNDRIX_LDAP_ROLE_MAPPING JSON into a dict."""
+        if not self.LYNDRIX_LDAP_ROLE_MAPPING:
+            return {}
+        try:
+            import json
+            return json.loads(self.LYNDRIX_LDAP_ROLE_MAPPING)
+        except Exception:
+            _config_log.warning("CONFIG: LYNDRIX_LDAP_ROLE_MAPPING is not valid JSON — ignored.")
+            return {}
+
+    @property
+    def ldap_default_roles(self) -> List[str]:
+        return [r.strip() for r in self.LYNDRIX_LDAP_DEFAULT_ROLES.split(",") if r.strip()]
+
+    @property
+    def oidc_admin_groups(self) -> List[str]:
+        if not self.LYNDRIX_OIDC_ADMIN_GROUPS:
+            return []
+        return [g.strip() for g in self.LYNDRIX_OIDC_ADMIN_GROUPS.split(",") if g.strip()]
 
     def get(self, env_var: str, vault_key: str = None, default: str = None) -> str:
         """
