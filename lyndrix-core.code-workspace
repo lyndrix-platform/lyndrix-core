@@ -35,6 +35,10 @@
 		{
 			"name": "lyndrix-state-monitoring",
 			"path": "../lyndrix-state-monitoring"
+		},
+		{
+			"name": "lyndrix-external-services",
+			"path": "../lyndrix-external-services"
 		}
 	],
 	"settings": {

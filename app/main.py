@@ -12,7 +12,7 @@ from core.logger import setup_logging, get_logger
 from core.services import vault_instance, db_instance, auth_service, boot_service
 
 # --- Route Registrations ---
-from core.components.auth.ui.routes import register_auth_routes
+from core.components.auth.ui.routes import register_auth_routes, register_oidc_fastapi_routes
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
@@ -88,6 +88,7 @@ def entry_point():
 # ==========================================
 
 register_auth_routes()
+register_oidc_fastapi_routes(app)
 register_settings_routes()
 register_vault_routes()
 register_dashboard_routes()

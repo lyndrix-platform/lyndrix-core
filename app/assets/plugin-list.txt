@@ -4,3 +4,4 @@ https://github.com/marvin1309/lyndrix-docker-manager
 https://github.com/marvin1309/lyndrix-iac-orchestrator
 https://github.com/marvin1309/lyndrix-git-manager
 https://github.com/marvin1309/lyndrix-state-monitoring
+https://github.com/marvin1309/lyndrix-external-services

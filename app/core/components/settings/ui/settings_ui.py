@@ -9,6 +9,9 @@ from ui.theme import UIStyles
 from version import __version__, __codename__, __release_date__, get_uptime
 
 from core.components.auth.ui.auth_cards import render_user_settings_card
+from core.components.auth.ui.auth_settings_card import render_auth_settings_card
+from core.components.auth.ui.groups_card import render_groups_card
+from core.components.auth.ui.permissions_card import render_permissions_card
 from core.components.plugins.ui.plugins_ui import render_plugin_manager
 from core.components.plugins.logic.manager import module_manager
 from core.services import vault_instance, db_instance
@@ -39,10 +42,13 @@ async def render_settings_page():
 
         # ── Tabs ────────────────────────────────────────────────────────────
         with ui.tabs().classes(UIStyles.TAB_BAR) as tabs:
-            tab_profile = ui.tab('Profil',   icon='person')
-            tab_system  = ui.tab('System',   icon='tune')
-            tab_plugins = ui.tab('Plugins',  icon='extension')
-            tab_info    = ui.tab('Info',     icon='info')
+            tab_profile  = ui.tab('Profil',          icon='person')
+            tab_system   = ui.tab('System',          icon='tune')
+            tab_auth     = ui.tab('Auth',            icon='security')
+            tab_groups   = ui.tab('Gruppen',         icon='group')
+            tab_perms    = ui.tab('Berechtigungen',  icon='verified_user')
+            tab_plugins  = ui.tab('Plugins',         icon='extension')
+            tab_info     = ui.tab('Info',            icon='info')
 
         with ui.tab_panels(tabs, value=tab_profile).classes('w-full bg-transparent p-0 mt-4'):
 
@@ -149,6 +155,18 @@ async def render_settings_page():
                                     ui.icon('lock' if vault_ok else 'lock_open', size='14px')
                                     ui.label('Vault verbunden' if vault_ok else 'Vault offline').classes('text-xs')
 
+            # ── AUTH ─────────────────────────────────────────────────────────
+            with ui.tab_panel(tab_auth).classes('p-0'):
+                await render_auth_settings_card()
+
+            # ── GRUPPEN ──────────────────────────────────────────────────────
+            with ui.tab_panel(tab_groups).classes('p-0'):
+                await render_groups_card()
+
+            # ── BERECHTIGUNGEN ────────────────────────────────────────────────
+            with ui.tab_panel(tab_perms).classes('p-0'):
+                await render_permissions_card()
+
             # ── PLUGINS ─────────────────────────────────────────────────────
             with ui.tab_panel(tab_plugins).classes('p-0'):
                 render_plugin_manager()
@@ -248,3 +266,5 @@ async def render_settings_page():
                                     with ui.row().classes('items-center gap-3'):
                                         ui.label(detail).classes('text-xs font-mono text-zinc-600 truncate max-w-xs')
                                         ui.label('Online' if connected else 'Offline').classes(f'text-sm font-bold {s_cls}')
+
+

@@ -16,6 +16,7 @@ services:
       - ../../lyndrix-git-manager:/app/plugins/git_manager
 #      - ../../lyndrix-meeting-bingo:/app/plugins/meeting_bingo
       - ../../lyndrix-state-monitoring:/app/plugins/state_monitoring
+      - ../../lyndrix-external-services:/app/plugins/external_services
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env.dev
