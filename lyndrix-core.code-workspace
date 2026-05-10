@@ -39,6 +39,14 @@
 		{
 			"name": "lyndrix-external-services",
 			"path": "../lyndrix-external-services"
+		},
+		{
+			"name": "lyndrix-plugin-collection",
+			"path": "../lyndrix-plugin-collection"
+		},
+		{
+			"name": "lyndrix-server-manager",
+			"path": "../lyndrix-server-manager"
 		}
 	],
 	"settings": {

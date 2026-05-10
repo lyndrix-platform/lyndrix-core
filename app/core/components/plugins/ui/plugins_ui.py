@@ -216,7 +216,7 @@ def render_plugins_page():
         settings_dialog.open()
 
     async def check_all_updates():
-        _safe_notify('Prufe Marketplace-Daten neu...', 'ongoing')
+        notif = ui.notification('Prufe Marketplace-Daten neu...', spinner=True, timeout=0, type='ongoing', close_button=False)
         try:
             await load_installed()
             await load_shop(force_refresh=True)
@@ -224,8 +224,14 @@ def render_plugins_page():
             if not _is_deleted_slot_error(exc):
                 raise
             log.info('Plugins UI: skipped marketplace refresh after client teardown')
+            notif.dismiss()
             return
-        _safe_notify('Update-Prufung abgeschlossen.', 'positive')
+        except Exception as exc:
+            notif.dismiss()
+            _safe_notify(f'Fehler beim Aktualisieren: {exc}', 'negative')
+            return
+        notif.dismiss()
+        _safe_notify('Marketplace aktualisiert.', 'positive')
 
     with ui.column().classes('w-full max-w-7xl gap-6 mx-auto'):
         with ui.row().classes('w-full justify-between items-center'):

@@ -2,6 +2,7 @@ from nicegui import ui, app
 
 from ui.theme import UIStyles
 from core.logger import get_logger
+from core.i18n import t
 
 log = get_logger("UI:AuthCards")
 
@@ -72,8 +73,8 @@ def render_user_settings_card():
                 with ui.row().classes('w-full items-center gap-3 p-5'):
                     ui.icon('info', size='18px').classes('text-zinc-500 shrink-0')
                     ui.label(
-                        f'Passwortänderung wird von deinem Auth-Provider "{provider}" verwaltet. '
-                        'Ändere dein Passwort dort.'
+                        t('Passwortänderung wird von deinem Auth-Provider "%{provider}" verwaltet. '
+                          'Ändere dein Passwort dort.', provider=provider)
                     ).classes('text-sm text-zinc-500')
 
         # ── Direct permissions ───────────────────────────────────────────────
@@ -83,7 +84,7 @@ def render_user_settings_card():
                 with ui.column().classes('w-full flex-grow p-5 gap-2'):
                     with ui.row().classes('items-center gap-2'):
                         ui.icon('verified_user', size='18px').classes('text-teal-400')
-                        ui.label('Direkt zugewiesene Berechtigungen').classes(UIStyles.TITLE_H3)
+                        ui.label(t('Direkt zugewiesene Berechtigungen')).classes(UIStyles.TITLE_H3)
                     with ui.row().classes('flex-wrap gap-1 mt-1'):
                         for perm in extra_perms:
                             ui.label(perm).classes(
@@ -96,7 +97,7 @@ def render_user_settings_card():
             async def logout():
                 app.storage.user.clear()
                 ui.navigate.to('/login')
-            ui.button('Abmelden', icon='logout', on_click=logout).props(
+            ui.button(t('Abmelden'), icon='logout', on_click=logout).props(
                 'outline color=negative size=sm'
             )
 
@@ -111,7 +112,7 @@ def _render_password_change_card(username: str) -> None:
         with ui.column().classes('w-full flex-grow p-5 gap-3'):
             with ui.row().classes('items-center gap-2 mb-1'):
                 ui.icon('lock_reset', size='18px').classes('text-sky-400')
-                ui.label('Passwort ändern').classes('text-base font-bold text-zinc-100')
+                ui.label(t('Passwort ändern')).classes('text-base font-bold text-zinc-100')
 
             warn = user_service.env_override_warning(username)
             if warn:
@@ -123,13 +124,13 @@ def _render_password_change_card(username: str) -> None:
                     ui.label(warn).classes('text-xs text-amber-400/80')
 
             cur_pw  = ui.input(
-                'Aktuelles Passwort', password=True, password_toggle_button=True
+                t('Aktuelles Passwort'), password=True, password_toggle_button=True
             ).props('outlined dark dense autocomplete=current-password').classes('w-full max-w-sm')
             new_pw  = ui.input(
-                'Neues Passwort', password=True, password_toggle_button=True
+                t('Neues Passwort'), password=True, password_toggle_button=True
             ).props('outlined dark dense autocomplete=new-password').classes('w-full max-w-sm')
             conf_pw = ui.input(
-                'Neues Passwort bestätigen', password=True, password_toggle_button=True
+                t('Neues Passwort bestätigen'), password=True, password_toggle_button=True
             ).props('outlined dark dense autocomplete=new-password').classes('w-full max-w-sm')
 
             status_label = ui.label('').classes('text-xs')
@@ -139,7 +140,7 @@ def _render_password_change_card(username: str) -> None:
                     status_label.classes(
                         add='text-red-400', remove='text-emerald-400 text-zinc-500'
                     )
-                    status_label.set_text('Passwörter stimmen nicht überein.')
+                    status_label.set_text(t('Passwörter stimmen nicht überein.'))
                     return
                 ok, msg = user_service.change_password(
                     username, cur_pw.value, new_pw.value
@@ -157,6 +158,6 @@ def _render_password_change_card(username: str) -> None:
                     )
                 status_label.set_text(msg)
 
-            ui.button('Passwort ändern', icon='save', on_click=do_change).props(
+            ui.button(t('Passwort ändern'), icon='save', on_click=do_change).props(
                 'unelevated size=sm color=primary'
             )

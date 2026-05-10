@@ -1,0 +1,33 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "plugins": "Plugin-Verwaltung",
+    "settings": "Einstellungen"
+  },
+  "header": {
+    "refresh_ui": "UI neu laden",
+    "logout": "Abmelden",
+    "system_owner": "System-Besitzer",
+    "language": "Sprache",
+    "theme": "Design"
+  },
+  "common": {
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "close": "Schließen",
+    "confirm": "Bestätigen",
+    "refresh": "Aktualisieren",
+    "search": "Suchen",
+    "loading": "Lädt...",
+    "error": "Ein Fehler ist aufgetreten",
+    "no_items": "Keine Einträge gefunden",
+    "unknown": "Unbekannt",
+    "active": "Aktiv",
+    "disabled": "Deaktiviert",
+    "by": "von"
+  },
+  "nav_sections": {
+    "services": "Dienste",
+    "system": "System"
+  }
+}

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from nicegui import ui, app
+from core.i18n import t
 from urllib.parse import quote
 
 from core.logger import get_logger
@@ -38,7 +39,7 @@ def register_auth_routes():
         result = oidc_provider.consume_result(state)
         if not result:
             log.warning(f"AUTH: /auth/complete — no pending result for state '{state[:8]}…'.")
-            ui.notify('SSO-Anmeldung fehlgeschlagen oder abgelaufen.', type='negative')
+            ui.notify(t('SSO-Anmeldung fehlgeschlagen oder abgelaufen.'), type='negative')
             ui.navigate.to('/login')
             return
 

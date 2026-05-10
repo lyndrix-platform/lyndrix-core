@@ -8,6 +8,7 @@ from config import settings
 from ui.theme import apply_theme, UIStyles
 from ui.maintenance import attach_maintenance_overlay
 from core.logger import get_logger
+from core.i18n import t, set_locale, get_locale
 from core.bus import bus
 from core.components.plugins.logic.manager import module_manager
 from core.components.notifications.notification_widget import render_notification_bell
@@ -202,13 +203,30 @@ def main_layout(page_title: str):
                                         ui.label("System Owner").classes('text-[10px] text-slate-500 uppercase tracking-widest')
                                 
                                 with ui.column().classes('w-full p-2 gap-1'):
+                                    # --- Language switcher ---
+                                    supported = [s.strip() for s in settings.SUPPORTED_LOCALES.split(',') if s.strip()]
+                                    locale_labels = {'en': '🇬🇧 English', 'de': '🇩🇪 Deutsch'}
+                                    current_locale = get_locale()
+
+                                    def on_locale_change(e):
+                                        set_locale(e.value)
+                                        ui.run_javascript('window.location.reload()')
+
+                                    ui.select(
+                                        options={loc: locale_labels.get(loc, loc.upper()) for loc in supported},
+                                        value=current_locale,
+                                        on_change=on_locale_change,
+                                    ).props('dense outlined dark borderless').classes('w-full text-xs mb-1')
+
+                                    ui.separator().classes('bg-zinc-800 my-1')
+
                                     with ui.button(on_click=trigger_reload).props('flat dense').classes('w-full justify-start px-3 py-2 text-slate-300 hover:bg-zinc-800 hover:text-white rounded transition-colors'):
                                         ui.icon('refresh', size='16px').classes('mr-2 text-slate-400')
-                                        ui.label('Refresh UI').classes('text-xs font-bold capitalize')
+                                        ui.label(t('core.header.refresh_ui')).classes('text-xs font-bold capitalize')
                                     
                                     with ui.button(on_click=logout).props('flat dense').classes('w-full justify-start px-3 py-2 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded transition-colors mt-1'):
                                         ui.icon('logout', size='16px').classes('mr-2')
-                                        ui.label('Logout').classes('text-xs font-bold capitalize')
+                                        ui.label(t('core.header.logout')).classes('text-xs font-bold capitalize')
 
             # --- SIDEBAR ---
             with ui.left_drawer(value=False).classes(UIStyles.SIDEBAR) as left_drawer:

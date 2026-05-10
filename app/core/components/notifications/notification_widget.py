@@ -1,6 +1,7 @@
 from nicegui import ui
 from .notification_service import notification_service
 from ui.theme import UIStyles
+from core.i18n import t
 
 def render_notification_bell(user_id: str = "admin"):
     last_state_hash = None
@@ -10,10 +11,10 @@ def render_notification_bell(user_id: str = "admin"):
         
         with ui.menu().classes(f'w-80 max-h-[500px] p-0 flex flex-col {UIStyles.MENU_CONTAINER}') as menu:
             with ui.row().classes('w-full justify-between items-center p-3 border-b border-zinc-800 bg-zinc-900 shrink-0'):
-                ui.label("Alerts & Tasks").classes('text-sm font-bold text-slate-200 tracking-wide')
-                ui.button('Clear All', on_click=lambda: [notification_service.remove_notification(n['id']) for n in notification_service.get_unread_for_user(user_id)]).props('flat dense size=xs color=zinc-400')
+                ui.label(t('notifications.title')).classes('text-sm font-bold text-slate-200 tracking-wide')
+                ui.button(t('notifications.clear_all'), on_click=lambda: [notification_service.remove_notification(n['id']) for n in notification_service.get_unread_for_user(user_id)]).props('flat dense size=xs color=zinc-400')
             
-            list_container = ui.column().classes('w-full p-2 gap-2 overflow-y-auto flex-nowrap')
+            list_container = ui.column().classes('w-full p-2 gap-2 overflow-y-auto flex-nowrap flex-1 min-h-0')
 
     def update_ui():
         nonlocal last_state_hash
@@ -35,7 +36,7 @@ def render_notification_bell(user_id: str = "admin"):
         list_container.clear()
         with list_container:
             if count == 0:
-                ui.label("System is quiet. No active alerts.").classes('text-xs text-zinc-500 p-4 text-center w-full')
+                ui.label(t('notifications.quiet')).classes('text-xs text-zinc-500 p-4 text-center w-full')
                 
             for n in unread[:15]:
                 # Styling based on state type
@@ -62,8 +63,8 @@ def render_notification_bell(user_id: str = "admin"):
                             ui.label(n['message']).classes('text-[11px] text-slate-300 mt-0.5 break-words leading-snug line-clamp-2')
                             
                         with ui.column().classes('shrink-0 gap-0 -mt-1'):
-                            ui.button(icon='notifications_paused', on_click=lambda _, nid=n['id']: notification_service.mark_as_read(nid)).props('flat round dense size=xs color=zinc-500').tooltip("Mute Alert")
-                            ui.button(icon='close', on_click=lambda _, nid=n['id']: notification_service.remove_notification(nid)).props('flat round dense size=xs color=zinc-500').tooltip("Remove Alert")
+                            ui.button(icon='notifications_paused', on_click=lambda _, nid=n['id']: notification_service.mark_as_read(nid)).props('flat round dense size=xs color=zinc-500').tooltip(t('notifications.mute'))
+                            ui.button(icon='close', on_click=lambda _, nid=n['id']: notification_service.remove_notification(nid)).props('flat round dense size=xs color=zinc-500').tooltip(t('notifications.dismiss'))
 
     ui.timer(2.0, update_ui)
     return btn

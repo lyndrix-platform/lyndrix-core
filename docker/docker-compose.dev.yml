@@ -13,10 +13,11 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh
       - ../../lyndrix-iac-orchestrator:/app/plugins/iac_orchestrator
       - ../../lyndrix-discord-notifier:/app/plugins/discord_notifier
-      - ../../lyndrix-git-manager:/app/plugins/git_manager
+#      - ../../lyndrix-git-manager:/app/plugins/git_manager
 #      - ../../lyndrix-meeting-bingo:/app/plugins/meeting_bingo
       - ../../lyndrix-state-monitoring:/app/plugins/state_monitoring
       - ../../lyndrix-external-services:/app/plugins/external_services
+      - ../../lyndrix-server-manager:/app/plugins/server_manager
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env.dev
@@ -29,7 +30,7 @@ services:
       vault:
         condition: service_started
   db:
-    image: mariadb:10.11
+    image: mariadb:12.2.2
     container_name: lyndrix-db-dev
     # Wir laden die env_file, aber überschreiben die kritischen Werte
     # im environment-Block für maximale Sicherheit

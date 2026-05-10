@@ -1,0 +1,33 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "plugins": "Plugin Manager",
+    "settings": "Settings"
+  },
+  "header": {
+    "refresh_ui": "Refresh UI",
+    "logout": "Logout",
+    "system_owner": "System Owner",
+    "language": "Language",
+    "theme": "Theme"
+  },
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close",
+    "confirm": "Confirm",
+    "refresh": "Refresh",
+    "search": "Search",
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "no_items": "No items found",
+    "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "by": "by"
+  },
+  "nav_sections": {
+    "services": "Services",
+    "system": "System"
+  }
+}
