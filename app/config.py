@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     LYNDRIX_ADMIN_EMAIL: str = "admin@lyndrix.local"
     LYNDRIX_BOT_USER: str = "bot"
     LYNDRIX_BOT_PASSWORD: str = "lyndrix-bot"
+    # TODO: reject these bootstrap defaults outside dev instead of only warning at runtime.
 
     # --- VAULT ---
     VAULT_URL: str = "http://vault:8200"

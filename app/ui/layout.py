@@ -138,6 +138,8 @@ def main_layout(page_title: str):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
             _register_ui_refresh_subscription()
+
+            # TODO: enforce auth/role checks centrally for protected routes instead of relying on page-level redirects.
             
             theme_pref = _safe_user_value('theme_pref', 'dark')
             apply_theme(theme_pref) 

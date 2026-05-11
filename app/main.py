@@ -78,6 +78,7 @@ def entry_point():
         return
 
     # 3. System is ready
+    # TODO: apply a centralized auth/authorization gate for protected pages like /dashboard, /settings, and /plugins.
     if _safe_is_authenticated():
         ui.navigate.to('/dashboard')
     else:

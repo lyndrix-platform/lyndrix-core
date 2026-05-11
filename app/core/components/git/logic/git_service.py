@@ -74,6 +74,7 @@ def _init_local(path: Path, repo_id: str) -> None:
 
 def _sync_https(url: str, token: str | None, path: Path, repo_id: str) -> None:
     Repo, _ = _lazy_git()
+    # TODO: stop embedding access tokens in remote URLs; use a credential helper or header-based auth.
     auth_url = url.replace("https://", f"https://oauth2:{token}@") if token else url
     if not (path / ".git").exists():
         log.info(f"[GIT:{repo_id}] Cloning HTTPS repository from {url}…")
@@ -96,6 +97,7 @@ def _sync_ssh(url: str, private_key: str, path: Path, repo_id: str) -> None:
         os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
         env = os.environ.copy()
+        # TODO: enforce known_hosts verification instead of disabling host-key checks.
         env["GIT_SSH_COMMAND"] = (
             f"ssh -i {key_path} -o StrictHostKeyChecking=no -o BatchMode=yes"
         )
