@@ -1,0 +1,63 @@
+{
+  "title": "Plugin Management",
+  "subtitle": "Installed modules react instantly. Marketplace data is loaded from the plugin collection.",
+  "check_updates": "Check for Updates",
+  "tabs": {
+    "installed": "Installed",
+    "marketplace": "Marketplace"
+  },
+  "installed": {
+    "title": "Installed Modules",
+    "empty": "No plugins installed.",
+    "load_versions": "Load available versions",
+    "install_version": "Install selected version",
+    "logs": "View Logs",
+    "settings": "Configuration",
+    "uninstall": "Quick uninstall",
+    "reload": "Reload Plugin",
+    "logs_title": "Logs",
+    "no_logs": "No logs found.",
+    "toggle_active": "Plugin Active"
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "empty": "No plugins found in marketplace.",
+    "search_placeholder": "Search plugins...",
+    "install": "Install",
+    "update": "Change version",
+    "open_readme": "Open Readme",
+    "cached": "Cached / Fallback"
+  },
+  "status": {
+    "active": "Active",
+    "disabled": "Disabled",
+    "blocked": "Blocked",
+    "initializing": "Loading",
+    "unknown": "Unknown"
+  },
+  "source": {
+    "core": "Core",
+    "marketplace": "Marketplace",
+    "local": "Local"
+  },
+  "notify": {
+    "checking": "Checking marketplace data...",
+    "checked": "Marketplace refreshed.",
+    "check_failed": "Error during refresh: %{error}",
+    "installing": "Installing %{name} (%{version})...",
+    "installed": "%{name} installed and activated.",
+    "install_failed": "Installation of %{name} failed.",
+    "updating": "Updating %{name} to %{version}...",
+    "updated": "%{name} updated.",
+    "update_failed": "Update of %{name} failed.",
+    "uninstalling": "Uninstalling %{name}...",
+    "uninstalled": "%{name} uninstalled.",
+    "uninstall_failed": "Uninstall of %{name} failed.",
+    "no_uninstall_core": "Core modules cannot be uninstalled.",
+    "reloading": "Reloading %{name}...",
+    "reloaded": "Reload complete.",
+    "reload_failed": "Error during reload: %{error}",
+    "activated": "%{name} activated.",
+    "deactivated": "%{name} deactivated."
+  }
+}

@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     # Label shown on the SSO login button, e.g. "Authentik" or "Corporate SSO"
     LYNDRIX_OIDC_DISPLAY_NAME: str = "SSO"
 
+    # --- INTERNATIONALISATION ---
+    # BCP-47 language tag used when no user preference is stored.
+    DEFAULT_LOCALE: str = "en"
+    # Comma-separated list of supported locales.  Only locales in this list
+    # are offered in the language switcher.
+    SUPPORTED_LOCALES: str = "en,de"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"

@@ -12,6 +12,7 @@ from core.components.database.logic.db_service import db_instance
 from .models import ModuleManifest, PluginState
 from .context import ModuleContext
 from config import settings
+from core.i18n import register_plugin_locales
 
 log = get_logger("Core:ModuleManager")
 
@@ -153,6 +154,11 @@ class ModuleManager:
                 return False
 
             ctx = ModuleContext(manifest)
+
+            # Register plugin locale files so t() works with this plugin's namespace.
+            if is_plugin:
+                plugin_dir_path = Path(self.base_path) / "plugins" / module_name
+                register_plugin_locales(plugin_dir_path)
 
             # Register as initializing/parked
             self.registry[manifest.id] = {

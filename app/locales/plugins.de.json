@@ -1,0 +1,63 @@
+{
+  "title": "Plugin-Verwaltung",
+  "subtitle": "Installierte Module reagieren sofort. Marketplace-Daten werden aus der Plugin-Kollektion geladen.",
+  "check_updates": "Updates suchen",
+  "tabs": {
+    "installed": "Installiert",
+    "marketplace": "Marketplace"
+  },
+  "installed": {
+    "title": "Installierte Module",
+    "empty": "Keine Plugins installiert.",
+    "load_versions": "Verfügbare Versionen laden",
+    "install_version": "Ausgewählte Version installieren",
+    "logs": "Logs anzeigen",
+    "settings": "Konfiguration",
+    "uninstall": "Schnell deinstallieren",
+    "reload": "Plugin neu laden",
+    "logs_title": "Logs",
+    "no_logs": "Keine Logs gefunden.",
+    "toggle_active": "Plugin aktiv"
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "empty": "Keine Plugins im Marketplace gefunden.",
+    "search_placeholder": "Plugins suchen...",
+    "install": "Installieren",
+    "update": "Version ändern",
+    "open_readme": "Readme öffnen",
+    "cached": "Zwischengespeichert / Fallback"
+  },
+  "status": {
+    "active": "Aktiv",
+    "disabled": "Deaktiviert",
+    "blocked": "Blockiert",
+    "initializing": "Wird geladen",
+    "unknown": "Unbekannt"
+  },
+  "source": {
+    "core": "Kern",
+    "marketplace": "Marketplace",
+    "local": "Lokal"
+  },
+  "notify": {
+    "checking": "Marketplace-Daten werden neu geladen...",
+    "checked": "Marketplace aktualisiert.",
+    "check_failed": "Fehler beim Aktualisieren: %{error}",
+    "installing": "%{name} (%{version}) wird installiert...",
+    "installed": "%{name} installiert und aktiviert.",
+    "install_failed": "Installation von %{name} fehlgeschlagen.",
+    "updating": "%{name} wird auf %{version} aktualisiert...",
+    "updated": "%{name} aktualisiert.",
+    "update_failed": "Aktualisierung von %{name} fehlgeschlagen.",
+    "uninstalling": "%{name} wird deinstalliert...",
+    "uninstalled": "%{name} deinstalliert.",
+    "uninstall_failed": "Deinstallation von %{name} fehlgeschlagen.",
+    "no_uninstall_core": "Kernmodule können nicht deinstalliert werden.",
+    "reloading": "%{name} wird neu geladen...",
+    "reloaded": "Neu laden abgeschlossen.",
+    "reload_failed": "Fehler beim Neu laden: %{error}",
+    "activated": "%{name} aktiviert.",
+    "deactivated": "%{name} deaktiviert."
+  }
+}

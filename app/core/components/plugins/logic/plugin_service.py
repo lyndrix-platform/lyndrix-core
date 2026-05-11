@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import shutil
@@ -5,6 +6,7 @@ import asyncio
 import zipfile
 import time
 import tempfile
+import subprocess
 import httpx
 import re
 from pathlib import Path
@@ -12,6 +14,24 @@ from core.logger import get_logger
 from core.bus import bus
 
 log = get_logger("Core:PluginService")
+
+# --- Plugin collection source config ---
+# The collection is cloned locally by the git-manager plugin.
+# git-manager stores repos under /data/storage/git_repos/{repo_id}.
+COLLECTION_REPO_URL = "https://github.com/marvin1309/lyndrix-plugin-collection.git"
+COLLECTION_REPO_ID = "lyndrix-plugin-collection"
+COLLECTION_LOCAL_PATH = Path("/data/storage/git_repos") / COLLECTION_REPO_ID
+COLLECTION_JSON_PATH = COLLECTION_LOCAL_PATH / "plugin-directory" / "plugins.json"
+
+# HTTP fallback (used when the local clone is not yet available).
+# Override via PLUGIN_COLLECTION_URL env var.
+COLLECTION_FALLBACK_URL = os.environ.get(
+    "PLUGIN_COLLECTION_URL",
+    "https://raw.githubusercontent.com/marvin1309/lyndrix-plugin-collection/main/plugin-directory/plugins.json",
+)
+
+# How often to check for new commits on main (seconds).
+COLLECTION_POLL_INTERVAL = int(os.environ.get("PLUGIN_COLLECTION_POLL_INTERVAL", "900"))  # 15 min
 
 class PluginService:
     def __init__(self):
@@ -21,7 +41,7 @@ class PluginService:
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
         self.github_api_base = "https://api.github.com/repos"
         
-        # Cache für Marketplace-Daten (URL -> Daten)
+        # Cache für Marketplace-Daten
         self._marketplace_cache = []
         self._cache_timestamp = 0
         self._tag_cache = {}
@@ -29,6 +49,9 @@ class PluginService:
         self._cache_ttl = 900  # 15 Minuten Cache-Dauer
         self._repo_cache = {}
         self._repo_cache_timestamp = {}
+        # Tracks the last known remote HEAD commit to avoid unnecessary git pulls.
+        self._last_known_head: str | None = None
+        self._watcher_task: asyncio.Task | None = None
 
     def _extract_repo_info(self, github_url: str):
         parts = github_url.rstrip("/").split("/")
@@ -54,9 +77,92 @@ class PluginService:
         if not list_file.exists():
             return []
         with open(list_file, "r", encoding="utf-8") as handle:
-            return [line.strip() for line in handle.readlines() if line.strip()]
+            return [line.strip() for line in handle.readlines() if line.strip() and not line.startswith("#")]
 
-    def get_marketplace_source_map(self):
+    def _get_remote_head(self) -> str | None:
+        """Run git ls-remote to get the current HEAD of the collection repo.
+        This is a lightweight network check — no clone or fetch needed.
+        Returns the commit SHA, or None on failure.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", COLLECTION_REPO_URL, "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.split()[0]
+        except Exception as exc:
+            log.debug(f"COLLECTION: ls-remote check failed: {exc}")
+        return None
+
+    def _request_git_sync(self):
+        """Emit git:sync so the git-manager plugin clones/pulls the collection."""
+        log.info("COLLECTION: Requesting git-manager to sync plugin collection...")
+        bus.emit("git:sync", {
+            "repo_id": COLLECTION_REPO_ID,
+            "url": COLLECTION_REPO_URL,
+            "auth_type": "none",  # public repo — no token needed
+        })
+
+    def start_collection_watcher(self):
+        """Start a background task that polls for new commits and syncs when needed.
+        Call this once from the plugins component setup().
+        """
+        if self._watcher_task and not self._watcher_task.done():
+            return
+        self._watcher_task = bus.create_tracked_task(
+            self._collection_watcher_loop(), name="plugin_collection_watcher"
+        )
+        log.info(f"COLLECTION: Watcher started (poll interval: {COLLECTION_POLL_INTERVAL}s).")
+
+    async def _collection_watcher_loop(self):
+        """Periodically check the remote HEAD and sync only when it has changed.
+        The initial sync is triggered by on_boot_complete() once all plugins
+        (including git-manager) are active. This loop only handles periodic polling.
+        """
+        while True:
+            await asyncio.sleep(COLLECTION_POLL_INTERVAL)
+            try:
+                remote_head = await asyncio.get_event_loop().run_in_executor(
+                    None, self._get_remote_head
+                )
+                if remote_head and remote_head != self._last_known_head:
+                    log.info(
+                        f"COLLECTION: New commit detected ({remote_head[:8]}). Requesting sync."
+                    )
+                    self._request_git_sync()
+                    self._last_known_head = remote_head
+                else:
+                    log.debug("COLLECTION: No new commits, skipping sync.")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(f"COLLECTION: Watcher iteration failed: {exc}")
+
+    def on_boot_complete(self, payload: dict = None):
+        """Trigger the initial git sync once all plugins (including git-manager) are active."""
+        log.info("COLLECTION: Boot complete — requesting initial collection sync.")
+        self._request_git_sync()
+
+    def on_git_status_update(self, payload: dict):
+        """Called when git-manager emits git:status_update.
+        Invalidates the marketplace cache so the next fetch reads fresh data.
+        """
+        if payload.get("repo_id") != COLLECTION_REPO_ID:
+            return
+        if payload.get("status") == "synced":
+            log.info("COLLECTION: git-manager sync complete — invalidating marketplace cache.")
+            self._marketplace_cache = []
+            self._cache_timestamp = 0
+
+    def get_marketplace_source_map(self) -> dict:
+        """Returns a sync map of normalized repo name -> url.
+        Uses the in-memory cache populated by fetch_marketplace_data.
+        Falls back to the local plugin-list.txt if the cache is empty.
+        """
+        if self._marketplace_cache:
+            return {p["repo_safe"]: p["url"] for p in self._marketplace_cache}
+        # Fallback: parse local txt file synchronously (e.g. before first async refresh)
         repo_map = {}
         for url in self._read_marketplace_urls():
             try:
@@ -67,73 +173,36 @@ class PluginService:
                 continue
         return repo_map
 
-    def _fallback_marketplace_entry(self, url: str):
-        try:
-            user, repo = self._extract_repo_info(url)
-        except ValueError:
-            user, repo = "Unknown", url.rstrip("/").split("/")[-1]
-
+    def _collection_entry_to_marketplace(self, entry: dict) -> dict:
+        """Convert a plugins.json entry from lyndrix-plugin-collection to marketplace format."""
+        html_url = entry.get("html_url", "")
+        name = entry.get("name", "")
+        full_name = entry.get("full_name", "")
+        author = full_name.split("/")[0] if "/" in full_name else "Unknown"
+        repo_safe = self._normalize_repo_name(name)
         return {
-            "name": repo.replace("-", " ").title(),
-            "description": "Marketplace-Metadaten werden geladen oder sind derzeit nicht verfugbar.",
-            "stars": 0,
-            "url": url,
-            "clone_url": url,
-            "author": user,
-            "repo_safe": self._normalize_repo_name(repo),
-            "repo_aliases": sorted(self._repo_aliases(repo)),
+            "name": name.replace("-", " ").title(),
+            "description": entry.get("description") or "No description available.",
+            "stars": entry.get("stargazers_count", 0),
+            "url": html_url,
+            "clone_url": entry.get("clone_url", html_url),
+            "author": author,
+            "repo_safe": repo_safe,
+            "repo_aliases": sorted(self._repo_aliases(name)),
             "tags": ["latest"],
-            "metadata_source": "fallback",
+            "topics": entry.get("topics", []),
+            "archived": entry.get("archived", False),
+            "metadata_source": "collection",
         }
 
-    async def _fetch_repo_metadata(self, client: httpx.AsyncClient, url: str, semaphore: asyncio.Semaphore):
-        fallback = self._fallback_marketplace_entry(url)
-        repo_safe = fallback["repo_safe"]
-        cache_age = time.time() - self._repo_cache_timestamp.get(repo_safe, 0)
-        if repo_safe in self._repo_cache and cache_age < self._cache_ttl:
-            return dict(self._repo_cache[repo_safe])
-
-        try:
-            user, repo = self._extract_repo_info(url)
-            api_url = f"{self.github_api_base}/{user}/{repo}"
-            async with semaphore:
-                resp = await client.get(api_url, timeout=10.0)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                result = {
-                    "name": data.get("name") or fallback["name"],
-                    "description": data.get("description") or "Keine Beschreibung verfugbar.",
-                    "stars": data.get("stargazers_count", 0),
-                    "url": data.get("html_url") or url,
-                    "clone_url": url,
-                    "author": data.get("owner", {}).get("login", user),
-                    "repo_safe": repo_safe,
-                    "repo_aliases": sorted(self._repo_aliases(repo)),
-                    "tags": ["latest"],
-                    "metadata_source": "github",
-                }
-                self._repo_cache[repo_safe] = result
-                self._repo_cache_timestamp[repo_safe] = time.time()
-                return dict(result)
-
-            if resp.status_code == 403:
-                log.warning(f"MARKETPLACE: Rate limit hit for {repo}. Using fallback data.")
-            else:
-                log.warning(f"MARKETPLACE: Failed to fetch info for {url}: HTTP {resp.status_code}")
-        except Exception as e:
-            log.warning(f"MARKETPLACE: Failed to fetch info for {url}: {e}")
-
-        self._repo_cache[repo_safe] = fallback
-        self._repo_cache_timestamp[repo_safe] = time.time()
-        return dict(fallback)
-
-    def _get_headers(self):
-        """Erstellt die Header für GitHub API Anfragen."""
+    def _get_headers(self, include_auth: bool = True) -> dict:
+        """Build request headers. Set include_auth=False for public CDN URLs."""
         headers = {
             "User-Agent": "Lyndrix-Core/1.0",
             "Accept": "application/vnd.github.v3+json"
         }
+        if not include_auth:
+            return headers
         token = os.environ.get("GITHUB_TOKEN")
         if not token:
             try:
@@ -345,27 +414,44 @@ class PluginService:
             return False
 
     async def fetch_marketplace_data(self, force_refresh: bool = False):
-        """Liest die plugin-list.txt und holt Metadaten von GitHub."""
-        # Cache-Check: Wenn Daten noch frisch sind, API-Anrufe sparen
+        """Load plugin list from the local git clone (preferred) or fall back to HTTP.
+        The local clone is kept up to date by the collection watcher / git-manager.
+        """
         if not force_refresh and self._marketplace_cache and (time.time() - self._cache_timestamp < self._cache_ttl):
             log.debug("MARKETPLACE: Loading from cache")
-            return [dict(plugin) for plugin in self._marketplace_cache]
+            return [dict(p) for p in self._marketplace_cache]
 
-        urls = self._read_marketplace_urls()
-        if not urls:
-            return []
+        data = None
 
-        async with httpx.AsyncClient(headers=self._get_headers(), follow_redirects=True) as client:
-            semaphore = asyncio.Semaphore(4)
-            plugins = await asyncio.gather(
-                *(self._fetch_repo_metadata(client, url, semaphore) for url in urls)
-            )
-        
-        # Cache aktualisieren
+        # 1. Prefer the local git clone — fast, no network, no tokens.
+        if COLLECTION_JSON_PATH.exists():
+            try:
+                data = json.loads(COLLECTION_JSON_PATH.read_text(encoding="utf-8"))
+                log.debug(f"MARKETPLACE: Loaded collection from local clone ({COLLECTION_JSON_PATH})")
+            except Exception as exc:
+                log.warning(f"MARKETPLACE: Failed to read local collection JSON: {exc}")
+
+        # 2. Fall back to HTTP if the clone isn't available yet.
+        if data is None:
+            log.info(f"MARKETPLACE: Local clone not ready, falling back to HTTP ({COLLECTION_FALLBACK_URL})")
+            try:
+                # Public raw.githubusercontent.com URL — no auth headers needed.
+                async with httpx.AsyncClient(headers=self._get_headers(include_auth=False), follow_redirects=True) as client:
+                    resp = await client.get(COLLECTION_FALLBACK_URL, timeout=10.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as exc:
+                log.warning(f"MARKETPLACE: HTTP fallback also failed: {exc}")
+                return [dict(p) for p in self._marketplace_cache]
+
+        raw_plugins = data.get("plugins", [])
+        plugins = [self._collection_entry_to_marketplace(entry) for entry in raw_plugins]
+
         if plugins:
             self._marketplace_cache = plugins
             self._cache_timestamp = time.time()
-            
-        return [dict(plugin) for plugin in plugins]
+            log.info(f"MARKETPLACE: Loaded {len(plugins)} plugin(s) from collection index.")
+
+        return [dict(p) for p in plugins]
 
 plugin_service = PluginService()

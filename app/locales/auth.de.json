@@ -1,0 +1,14 @@
+{
+  "login": {
+    "title": "Anmelden",
+    "username": "Benutzername",
+    "password": "Passwort",
+    "submit": "Anmelden",
+    "remember": "Angemeldet bleiben",
+    "failed": "Ungültige Anmeldedaten. Bitte erneut versuchen.",
+    "locked": "Konto gesperrt.",
+    "provider_local": "Lokal (Datenbank)",
+    "provider_ldap": "LDAP / Active Directory",
+    "provider_oidc": "SSO"
+  }
+}
