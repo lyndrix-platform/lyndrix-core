@@ -24,6 +24,7 @@ def register_auth_routes():
         Reads the pending AuthResult from the OIDC provider, sets the NiceGUI session,
         and forwards the user to /dashboard.
         """
+        # TODO: bind OIDC state/result to the browser session nonce and verify the full flow, not state alone.
         from core.components.auth.logic.providers.registry import provider_registry
 
         if not state:
@@ -73,6 +74,7 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
         (e.g. Authentik → Application → Redirect URIs):
           https://<lyndrix-host>/auth/callback/oidc
         """
+                # TODO: keep the callback and discovery flow tied to a session-bound nonce / PKCE verifier.
         from core.components.auth.logic.providers.registry import provider_registry
 
         if error:

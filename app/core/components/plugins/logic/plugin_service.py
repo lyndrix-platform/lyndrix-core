@@ -306,6 +306,7 @@ class PluginService:
             # 3. Safe Extraction into Staging (ZIP Slip protected)
             log.info("FILESYSTEM: Extracting archive into hidden staging area...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # TODO: require signed/allowlisted plugin sources before extraction and install.
                 root_folder = zip_ref.namelist()[0].split('/')[0]
                 # Validate all paths stay within staging_base
                 for member in zip_ref.namelist():
@@ -369,6 +370,8 @@ class PluginService:
                 if stripped.startswith('/') or stripped.startswith('..'):
                     log.error(f"SECURITY: Blocked suspicious requirement entry: {stripped}")
                     return
+
+        # TODO: require hash-pinned requirements and isolate dependency installs in a sandboxed runtime.
 
         log.info(f"DEPENDENCIES: Installing requirements for {plugin_path.name} into private vendor directory...")
         vendor_dir = plugin_path / "vendor"

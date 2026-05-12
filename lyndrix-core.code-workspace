@@ -9,10 +9,6 @@
 			"path": "../lyndrix-iac-orchestrator"
 		},
 		{
-			"name": "lyndrix-git-manager",
-			"path": "../lyndrix-git-manager"
-		},
-		{
 			"name": "lyndrix-discord-notifier",
 			"path": "../lyndrix-discord-notifier"
 		},
@@ -47,6 +43,13 @@
 		{
 			"name": "lyndrix-server-manager",
 			"path": "../lyndrix-server-manager"
+		},
+		{
+			"name": "lyndrix-docker-manager",
+			"path": "../lyndrix-docker-manager"
+		},
+		{
+			"path": "../../iac-environment/helper-skripts-and-tools"
 		}
 	],
 	"settings": {

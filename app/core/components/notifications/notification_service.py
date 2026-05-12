@@ -81,7 +81,7 @@ class NotificationService:
         if broadcast and payload.get("toast", True) and type_ != "ongoing":
             self.broadcast_toast(message, type_)
 
-        if self.ctx:
+        if self.ctx and payload.get("emit_outbound", True):
             self.ctx.emit("notification:outbound", notif)
 
         self._save()

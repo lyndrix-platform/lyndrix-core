@@ -64,9 +64,8 @@ class OIDCProvider(AuthProvider):
         self._discovery: Optional[dict] = None
         self._discovery_fetched_at: float = 0.0
 
-        # State store: {state_token: issued_at_timestamp}
+        # TODO: bind OIDC state/result storage to a browser session nonce and PKCE verifier.
         self._pending_states: dict[str, float] = {}
-        # Result store: {state_token: AuthResult} — populated after code exchange
         self._pending_results: dict[str, AuthResult] = {}
 
     # ------------------------------------------------------------------

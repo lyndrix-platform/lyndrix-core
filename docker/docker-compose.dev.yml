@@ -18,6 +18,7 @@ services:
       - ../../lyndrix-state-monitoring:/app/plugins/state_monitoring
       - ../../lyndrix-external-services:/app/plugins/external_services
       - ../../lyndrix-server-manager:/app/plugins/server_manager
+      - ../../lyndrix-docker-manager:/app/plugins/docker_manager
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env.dev

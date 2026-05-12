@@ -16,6 +16,7 @@ from core.components.auth.ui.routes import register_auth_routes, register_oidc_f
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
+from core.components.notifications.api import register_notification_fastapi_routes
 
 # --- Global UI ---
 from ui.theme import apply_theme
@@ -78,6 +79,7 @@ def entry_point():
         return
 
     # 3. System is ready
+    # TODO: apply a centralized auth/authorization gate for protected pages like /dashboard, /settings, and /plugins.
     if _safe_is_authenticated():
         ui.navigate.to('/dashboard')
     else:
@@ -92,6 +94,7 @@ register_oidc_fastapi_routes(app)
 register_settings_routes()
 register_vault_routes()
 register_dashboard_routes()
+register_notification_fastapi_routes(app)
 
 @app.on_event("startup")
 async def startup_event():
