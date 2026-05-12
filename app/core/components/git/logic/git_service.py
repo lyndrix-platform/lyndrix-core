@@ -28,7 +28,9 @@ Payload for git:commit_push
 import asyncio
 import os
 import stat
+import shutil
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 from core.bus import bus
@@ -76,14 +78,65 @@ def _sync_https(url: str, token: str | None, path: Path, repo_id: str) -> None:
     Repo, _ = _lazy_git()
     # TODO: stop embedding access tokens in remote URLs; use a credential helper or header-based auth.
     auth_url = url.replace("https://", f"https://oauth2:{token}@") if token else url
-    if not (path / ".git").exists():
-        log.info(f"[GIT:{repo_id}] Cloning HTTPS repository from {url}…")
-        Repo.clone_from(auth_url, str(path))
-        log.info(f"[GIT:{repo_id}] HTTPS clone completed.")
-    else:
-        log.info(f"[GIT:{repo_id}] Pulling latest HTTPS changes…")
-        Repo(str(path)).remotes.origin.pull()
-        log.info(f"[GIT:{repo_id}] HTTPS pull completed.")
+
+    def _force_sync_existing_repo() -> None:
+        repo = Repo(str(path))
+        log.info(f"[GIT:{repo_id}] Fetching latest HTTPS changes…")
+        repo.git.fetch("--prune", "origin")
+
+        # In automation we prefer deterministic remote state over local history merges.
+        branch_name = "main"
+        try:
+            branch_name = repo.active_branch.name
+        except Exception:
+            try:
+                origin_head = repo.git.symbolic_ref("refs/remotes/origin/HEAD")
+                branch_name = origin_head.rsplit("/", 1)[-1]
+            except Exception:
+                branch_name = "main"
+
+        target_ref = f"origin/{branch_name}"
+        repo.git.reset("--hard", target_ref)
+        log.info(f"[GIT:{repo_id}] HTTPS sync completed (reset to {target_ref}).")
+
+    for attempt in range(2):
+        has_git_dir = (path / ".git").exists()
+        try:
+            if has_git_dir:
+                _force_sync_existing_repo()
+                return
+
+            if any(path.iterdir()):
+                log.warning(
+                    f"[GIT:{repo_id}] Repo directory exists without .git metadata. "
+                    "Resetting directory before clone."
+                )
+                shutil.rmtree(path, ignore_errors=True)
+                path.mkdir(parents=True, exist_ok=True)
+
+            log.info(f"[GIT:{repo_id}] Cloning HTTPS repository from {url}…")
+            Repo.clone_from(auth_url, str(path))
+            log.info(f"[GIT:{repo_id}] HTTPS clone completed.")
+            return
+        except Exception as exc:
+            err = str(exc)
+
+            # Another worker may have completed the clone while this worker was running.
+            if (path / ".git").exists():
+                _force_sync_existing_repo()
+                return
+
+            race_detected = (
+                "already exists and is not an empty directory" in err
+                or "cannot copy" in err
+            )
+            if race_detected and attempt == 0:
+                log.warning(f"[GIT:{repo_id}] Clone race detected. Retrying with clean directory.")
+                shutil.rmtree(path, ignore_errors=True)
+                path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            raise
 
 
 def _sync_ssh(url: str, private_key: str, path: Path, repo_id: str) -> None:
@@ -125,6 +178,11 @@ def _commit_and_push(
 ) -> str:
     """Stage all changes, commit and optionally push.  Returns a status string."""
     Repo, Actor = _lazy_git()
+    index_lock = path / ".git" / "index.lock"
+    if index_lock.exists():
+        log.warning(f"[GIT:{repo_id}] Removing stale git index lock: {index_lock}")
+        index_lock.unlink(missing_ok=True)
+
     repo = Repo(str(path))
     repo.git.add(A=True)
 
@@ -151,6 +209,7 @@ def _commit_and_push(
 class GitService:
     def __init__(self, base_dir: Path = _DEFAULT_BASE) -> None:
         self.base_dir = base_dir
+        self._repo_locks = defaultdict(asyncio.Lock)
         _ensure_base(self.base_dir)
         log.debug(f"[GIT:INIT] Base storage: {self.base_dir}")
 
@@ -161,6 +220,9 @@ class GitService:
     def _repo_path(self, repo_id: str) -> Path:
         return self.base_dir / repo_id
 
+    def _repo_lock(self, repo_id: str) -> asyncio.Lock:
+        return self._repo_locks[repo_id]
+
     async def handle_sync(self, payload: dict) -> None:
         repo_id: str = payload.get("repo_id", "")
         if not repo_id:
@@ -170,30 +232,33 @@ class GitService:
         url: str | None = payload.get("url")
         auth_type: str = payload.get("auth_type", "none")
         secret: str | None = payload.get("secret_value")
+        request_id: str | None = payload.get("request_id")
         path = self._repo_path(repo_id)
         path.mkdir(parents=True, exist_ok=True)
 
         log.info(f"[GIT:SYNC] Starting sync for '{repo_id}' (auth_type={auth_type})")
 
-        try:
-            if not url:
-                await asyncio.to_thread(_init_local, path, repo_id)
-            elif auth_type == "ssh":
-                if not secret:
-                    raise ValueError("auth_type=ssh requires secret_value (private key)")
-                await asyncio.to_thread(_sync_ssh, url, secret, path, repo_id)
-            else:
-                await asyncio.to_thread(_sync_https, url, secret, path, repo_id)
+        async with self._repo_lock(repo_id):
+            try:
+                if not url:
+                    await asyncio.to_thread(_init_local, path, repo_id)
+                elif auth_type == "ssh":
+                    if not secret:
+                        raise ValueError("auth_type=ssh requires secret_value (private key)")
+                    await asyncio.to_thread(_sync_ssh, url, secret, path, repo_id)
+                else:
+                    await asyncio.to_thread(_sync_https, url, secret, path, repo_id)
 
-            log.info(f"[GIT:SYNC] '{repo_id}' completed successfully.")
-            bus.emit("git:status_update", {"repo_id": repo_id, "status": "synced"})
-        except Exception as exc:
-            log.error(f"[GIT:SYNC] Error syncing '{repo_id}': {exc}", exc_info=True)
-            bus.emit("git:status_update", {
-                "repo_id": repo_id,
-                "status": "error",
-                "error": str(exc),
-            })
+                log.info(f"[GIT:SYNC] '{repo_id}' completed successfully.")
+                bus.emit("git:status_update", {"repo_id": repo_id, "status": "synced", "request_id": request_id})
+            except Exception as exc:
+                log.error(f"[GIT:SYNC] Error syncing '{repo_id}': {exc}", exc_info=True)
+                bus.emit("git:status_update", {
+                    "repo_id": repo_id,
+                    "status": "error",
+                    "request_id": request_id,
+                    "error": str(exc),
+                })
 
     async def handle_commit_push(self, payload: dict) -> None:
         repo_id: str = payload.get("repo_id", "")
@@ -203,23 +268,26 @@ class GitService:
 
         message: str = payload.get("message", "Update via Lyndrix IaC GUI")
         is_local: bool = payload.get("is_local", False)
+        request_id: str | None = payload.get("request_id")
         path = self._repo_path(repo_id)
 
         log.info(f"[GIT:COMMIT] Starting commit/push for '{repo_id}' (is_local={is_local})")
 
-        try:
-            result = await asyncio.to_thread(
-                _commit_and_push, repo_id, message, path, is_local
-            )
-            log.info(f"[GIT:COMMIT] '{repo_id}' finished with result: {result}")
-            bus.emit("git:status_update", {"repo_id": repo_id, "status": result})
-        except Exception as exc:
-            log.error(f"[GIT:COMMIT] Error committing '{repo_id}': {exc}", exc_info=True)
-            bus.emit("git:status_update", {
-                "repo_id": repo_id,
-                "status": "error",
-                "error": str(exc),
-            })
+        async with self._repo_lock(repo_id):
+            try:
+                result = await asyncio.to_thread(
+                    _commit_and_push, repo_id, message, path, is_local
+                )
+                log.info(f"[GIT:COMMIT] '{repo_id}' finished with result: {result}")
+                bus.emit("git:status_update", {"repo_id": repo_id, "status": result, "request_id": request_id})
+            except Exception as exc:
+                log.error(f"[GIT:COMMIT] Error committing '{repo_id}': {exc}", exc_info=True)
+                bus.emit("git:status_update", {
+                    "repo_id": repo_id,
+                    "status": "error",
+                    "request_id": request_id,
+                    "error": str(exc),
+                })
 
 
 # Module-level singleton — subscribes to the bus on import.
