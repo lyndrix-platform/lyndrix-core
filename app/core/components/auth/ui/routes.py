@@ -1,14 +1,16 @@
+import secrets
+
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from nicegui import ui
 from core.i18n import t
-from urllib.parse import quote
 
 from core.logger import get_logger
 from .login_ui import render_login_page
 from core.session import update_user_session
 
 log = get_logger("Core:AuthRoutes")
+_OIDC_HANDOFFS: dict[str, str] = {}
 
 
 def register_auth_routes():
@@ -19,7 +21,7 @@ def register_auth_routes():
         render_login_page()
 
     @ui.page("/auth/complete")
-    async def auth_complete(state: str = ""):
+    async def auth_complete(handoff: str = ""):
         """
         Landing page after a successful OIDC redirect.
         Reads the pending AuthResult from the OIDC provider, sets the NiceGUI session,
@@ -27,7 +29,14 @@ def register_auth_routes():
         """
         from core.components.auth.logic.providers.registry import provider_registry
 
+        if not handoff:
+            ui.navigate.to("/login")
+            return
+        state = _OIDC_HANDOFFS.pop(handoff, "")
         if not state:
+            ui.notify(
+                t("SSO-Anmeldung fehlgeschlagen oder abgelaufen."), type="negative"
+            )
             ui.navigate.to("/login")
             return
 
@@ -106,6 +115,7 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
         if not result:
             return RedirectResponse("/login?error=auth_failed")
 
-        # Hand off to the NiceGUI /auth/complete page to set the session
-        safe_state = quote(state, safe="")
-        return RedirectResponse(f"/auth/complete?state={safe_state}")
+        # Hand off to the NiceGUI /auth/complete page without echoing user-provided state.
+        handoff = secrets.token_urlsafe(24)
+        _OIDC_HANDOFFS[handoff] = state
+        return RedirectResponse(f"/auth/complete?handoff={handoff}")

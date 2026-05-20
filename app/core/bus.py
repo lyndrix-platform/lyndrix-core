@@ -7,6 +7,7 @@ from core.logger import get_logger
 class GlobalEventBus:
     def __init__(self):
         self.subscribers: Dict[str, List[Callable]] = {}
+        self._subscriber_keys: Dict[str, Set[str]] = {}
         self.log = get_logger("Core:EventBus")
         self._active_tasks: Set[asyncio.Task] = set()
         # Topics that should not spam INFO logs
@@ -46,12 +47,19 @@ class GlobalEventBus:
         def decorator(callback):
             if topic not in self.subscribers:
                 self.subscribers[topic] = []
-            if callback in self.subscribers[topic]:
+                self._subscriber_keys[topic] = set()
+
+            callback_key = (
+                f"{getattr(callback, '__module__', 'unknown')}:"
+                f"{getattr(callback, '__qualname__', callback.__name__)}"
+            )
+            if callback_key in self._subscriber_keys[topic]:
                 self.log.debug(
                     f"SUBSCRIBE: Ignored duplicate subscriber for {topic} ({callback.__name__})"
                 )
                 return callback
             self.subscribers[topic].append(callback)
+            self._subscriber_keys[topic].add(callback_key)
             self.log.debug(f"SUBSCRIBE: Registered for: {topic} ({callback.__name__})")
             return callback
 
