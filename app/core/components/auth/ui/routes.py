@@ -1,4 +1,5 @@
 import secrets
+import threading
 import time
 
 from fastapi import FastAPI
@@ -13,17 +14,19 @@ from core.session import update_user_session
 log = get_logger("Core:AuthRoutes")
 _OIDC_HANDOFF_TTL_SECONDS = 300
 _OIDC_HANDOFFS: dict[str, tuple[str, float]] = {}
+_OIDC_HANDOFFS_LOCK = threading.Lock()
 
 
 def _cleanup_handoffs():
     now = time.monotonic()
-    expired = [
-        token
-        for token, (_, issued_at) in _OIDC_HANDOFFS.items()
-        if now - issued_at > _OIDC_HANDOFF_TTL_SECONDS
-    ]
-    for token in expired:
-        _OIDC_HANDOFFS.pop(token, None)
+    with _OIDC_HANDOFFS_LOCK:
+        expired = [
+            token
+            for token, (_, issued_at) in _OIDC_HANDOFFS.items()
+            if now - issued_at > _OIDC_HANDOFF_TTL_SECONDS
+        ]
+        for token in expired:
+            _OIDC_HANDOFFS.pop(token, None)
 
 
 def register_auth_routes():
@@ -46,7 +49,8 @@ def register_auth_routes():
             ui.navigate.to("/login")
             return
         _cleanup_handoffs()
-        state, _ = _OIDC_HANDOFFS.pop(handoff, ("", 0.0))
+        with _OIDC_HANDOFFS_LOCK:
+            state, _ = _OIDC_HANDOFFS.pop(handoff, ("", 0.0))
         if not state:
             ui.notify(
                 t("SSO-Anmeldung fehlgeschlagen oder abgelaufen."), type="negative"
@@ -132,5 +136,6 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
         # Hand off to the NiceGUI /auth/complete page without echoing user-provided state.
         _cleanup_handoffs()
         handoff = secrets.token_urlsafe(24)
-        _OIDC_HANDOFFS[handoff] = (state, time.monotonic())
+        with _OIDC_HANDOFFS_LOCK:
+            _OIDC_HANDOFFS[handoff] = (state, time.monotonic())
         return RedirectResponse(f"/auth/complete?handoff={handoff}")
