@@ -11,7 +11,7 @@ from .login_ui import render_login_page
 from core.session import update_user_session
 
 log = get_logger("Core:AuthRoutes")
-_HANDOFF_TTL_SECONDS = 300
+_OIDC_HANDOFF_TTL_SECONDS = 300
 _OIDC_HANDOFFS: dict[str, tuple[str, float]] = {}
 
 
@@ -20,7 +20,7 @@ def _cleanup_handoffs():
     expired = [
         token
         for token, (_, issued_at) in _OIDC_HANDOFFS.items()
-        if now - issued_at > _HANDOFF_TTL_SECONDS
+        if now - issued_at > _OIDC_HANDOFF_TTL_SECONDS
     ]
     for token in expired:
         _OIDC_HANDOFFS.pop(token, None)
