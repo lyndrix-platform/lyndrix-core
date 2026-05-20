@@ -46,4 +46,3 @@ def clear_user_session() -> bool:
 
 def is_authenticated() -> bool:
     return bool(get_user_value("authenticated", False))
-
