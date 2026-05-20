@@ -58,7 +58,6 @@ def render_login_page():
                     )
                     ui.navigate.to("/dashboard")
                 else:
-                    user_input.set_value("")
                     pass_input.set_value("")
                     ui.notify(
                         t("Anmeldung fehlgeschlagen: Falscher User oder Passwort"),

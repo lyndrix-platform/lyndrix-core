@@ -1,4 +1,5 @@
 import secrets
+import time
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
@@ -10,7 +11,19 @@ from .login_ui import render_login_page
 from core.session import update_user_session
 
 log = get_logger("Core:AuthRoutes")
-_OIDC_HANDOFFS: dict[str, str] = {}
+_HANDOFF_TTL_SECONDS = 300
+_OIDC_HANDOFFS: dict[str, tuple[str, float]] = {}
+
+
+def _cleanup_handoffs():
+    now = time.monotonic()
+    expired = [
+        token
+        for token, (_, issued_at) in _OIDC_HANDOFFS.items()
+        if now - issued_at > _HANDOFF_TTL_SECONDS
+    ]
+    for token in expired:
+        _OIDC_HANDOFFS.pop(token, None)
 
 
 def register_auth_routes():
@@ -32,7 +45,8 @@ def register_auth_routes():
         if not handoff:
             ui.navigate.to("/login")
             return
-        state = _OIDC_HANDOFFS.pop(handoff, "")
+        _cleanup_handoffs()
+        state, _ = _OIDC_HANDOFFS.pop(handoff, ("", 0.0))
         if not state:
             ui.notify(
                 t("SSO-Anmeldung fehlgeschlagen oder abgelaufen."), type="negative"
@@ -116,6 +130,7 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             return RedirectResponse("/login?error=auth_failed")
 
         # Hand off to the NiceGUI /auth/complete page without echoing user-provided state.
+        _cleanup_handoffs()
         handoff = secrets.token_urlsafe(24)
-        _OIDC_HANDOFFS[handoff] = state
+        _OIDC_HANDOFFS[handoff] = (state, time.monotonic())
         return RedirectResponse(f"/auth/complete?handoff={handoff}")
