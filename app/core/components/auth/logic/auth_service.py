@@ -131,6 +131,7 @@ class AuthService:
 
     def _seed_users(self):
         """Seeds admin and bot accounts from environment or defaults."""
+        # TODO: fail startup outside dev when default bootstrap credentials are still active.
         if not db_instance.SessionLocal:
             log.warning("SEED: Aborted, SessionLocal not ready.")
             return

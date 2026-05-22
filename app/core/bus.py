@@ -79,6 +79,7 @@ class GlobalEventBus:
                 f"EVENT: {topic} | Data: {self._summarize_payload(topic, payload)}"
             )
         else:
+            # TODO: redact sensitive keys by default for all event payloads before logging.
             self.log.info(f"EVENT: {topic} | Data: {payload}")
 
         if topic in self.subscribers:

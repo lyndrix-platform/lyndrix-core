@@ -43,6 +43,7 @@ def register_auth_routes():
         Reads the pending AuthResult from the OIDC provider, sets the NiceGUI session,
         and forwards the user to /dashboard.
         """
+        # TODO: bind OIDC state/result to the browser session nonce and verify the full flow, not state alone.
         from core.components.auth.logic.providers.registry import provider_registry
 
         if not handoff:

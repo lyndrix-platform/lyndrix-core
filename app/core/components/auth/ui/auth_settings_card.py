@@ -258,6 +258,7 @@ async def render_auth_settings_card() -> None:
 
                 async def test_ldap():
                     from core.components.auth.logic.providers.ldap import LDAPProvider
+                    # TODO: restrict test targets and require admin-only access to reduce SSRF exposure.
                     # Build a temporary provider from the current form values (or
                     # effective config) — no need for ldap to be in the active chain.
                     current_vd = auth_config_service.load_vault_data()
@@ -341,6 +342,7 @@ async def render_auth_settings_card() -> None:
 
                 async def test_oidc():
                     from core.components.auth.logic.providers.oidc import OIDCProvider
+                    # TODO: restrict discovery against allowlisted issuers and keep callback state session-bound.
                     # Build a temporary provider from the current form values.
                     current_vd = auth_config_service.load_vault_data()
                     form_vals = collect_values(oidc_inputs)

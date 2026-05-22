@@ -25,6 +25,8 @@ class LocalProvider(AuthProvider):
         from core.components.auth.logic.models import User
         from core.components.auth.logic.hashing import verify_password
 
+        # TODO: add throttling / backoff for repeated login attempts before calling the password verifier.
+
         if not db_instance.SessionLocal:
             log.error("AUTH:Local: Database session unavailable.")
             return None
