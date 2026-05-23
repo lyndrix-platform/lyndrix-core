@@ -35,9 +35,7 @@ async def render_permissions_card() -> None:
         ):
             ui.icon('info_outline', size='18px').classes('text-zinc-500 shrink-0 mt-0.5')
             ui.label(
-                t('Berechtigungen werden automatisch aus aktiven Modulen und Plugins geladen. '
-                  'Gruppen-Zuweisungen wirken beim nächsten Login. '
-                  'Direkte Nutzer-Zuweisungen gelten sofort (nach erneutem Login).')
+                t('auth.permissions.intro')
             ).classes('text-xs text-zinc-500')
 
         # ── Per-category cards ────────────────────────────────────────────────
@@ -97,7 +95,7 @@ def _render_permission_row(
 
             # ── Current group assignments ─────────────────────────────────────
             with ui.column().classes('w-full gap-1'):
-                ui.label(t('Gruppen mit dieser Berechtigung')).classes(
+                ui.label(t('auth.permissions.groups_section')).classes(
                     'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1'
                 )
                 grp_container = ui.row().classes('flex-wrap gap-1')
@@ -107,7 +105,7 @@ def _render_permission_row(
                     _groups = [g for g in group_service.get_all() if perm_id in (g.permissions or [])]
                     with container:
                         if not _groups:
-                            ui.label(t('Keine Gruppe zugewiesen.')).classes(
+                            ui.label(t('auth.permissions.no_groups')).classes(
                                 'text-xs text-zinc-600 italic py-1'
                             )
                         for grp in _groups:
@@ -134,7 +132,7 @@ def _render_permission_row(
                         grp_select = ui.select(
                             options=[g.name for g in group_service.get_all()
                                      if pdef.id not in (g.permissions or [])],
-                            label=t('Gruppe hinzufügen'),
+                            label=t('auth.permissions.add_group'),
                         ).props('outlined dark dense').classes('max-w-xs')
 
                         def _add_grp_perm(perm_id=pdef.id, sel=grp_select, container=grp_container):
@@ -155,11 +153,11 @@ def _render_permission_row(
 
                         ui.button(icon='add', on_click=_add_grp_perm).props(
                             'unelevated size=sm color=teal'
-                        ).tooltip(t('Gruppe diese Berechtigung geben'))
+                        ).tooltip(t('auth.permissions.add_group_tooltip'))
 
             # ── Direct user grants ────────────────────────────────────────────
             with ui.column().classes('w-full gap-1'):
-                ui.label(t('Direkte Nutzer-Zuweisungen')).classes(
+                ui.label(t('auth.permissions.users_section')).classes(
                     'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1'
                 )
                 usr_container = ui.row().classes('flex-wrap gap-1')
@@ -170,7 +168,7 @@ def _render_permission_row(
                               if perm_id in (u.extra_permissions or [])]
                     with container:
                         if not _users:
-                            ui.label(t('Keine direkte Zuweisung.')).classes(
+                            ui.label(t('auth.permissions.no_users')).classes(
                                 'text-xs text-zinc-600 italic py-1'
                             )
                         for usr in _users:
@@ -197,7 +195,7 @@ def _render_permission_row(
                     with ui.row().classes('items-center gap-2 mt-1'):
                         usr_select = ui.select(
                             options=non_granted_users,
-                            label=t('Benutzer direkt hinzufügen'),
+                            label=t('auth.permissions.add_user'),
                         ).props('outlined dark dense').classes('max-w-xs')
 
                         def _add_usr_perm(perm_id=pdef.id, sel=usr_select, container=usr_container):
@@ -213,4 +211,4 @@ def _render_permission_row(
 
                         ui.button(icon='person_add', on_click=_add_usr_perm).props(
                             'unelevated size=sm color=indigo'
-                        ).tooltip(t('Direkte Berechtigung vergeben'))
+                        ).tooltip(t('auth.permissions.add_user_tooltip'))

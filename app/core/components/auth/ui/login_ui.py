@@ -3,28 +3,28 @@ from core.logger import get_logger
 from core.i18n import t
 from core.components.auth.logic.providers.registry import provider_registry
 from core.session import update_user_session
+from ui.theme import UIStyles, apply_theme
 
 log = get_logger("UI:Login")
 
 
 def render_login_page():
-    ui.query("body").style("background-color: #09090b;")
+    apply_theme(page_title="Login")
+    ui.query("body").classes(add=UIStyles.AUTH_PAGE_BG)
 
-    with ui.card().classes(
-        "absolute-center shadow-2xl p-8 rounded-3xl border border-zinc-800 bg-zinc-900 text-zinc-100 w-full max-w-md"
-    ):
+    with ui.card().classes(UIStyles.AUTH_CARD):
         with ui.column().classes("items-center w-full gap-4"):
-            ui.icon("account_circle", size="64px").classes("text-indigo-500 mb-2")
-            ui.label(t("Lyndrix Login")).classes("text-2xl font-bold tracking-tight")
+            ui.icon("account_circle", size="64px").classes(UIStyles.AUTH_HERO_ICON)
+            ui.label(t("auth.login.title")).classes(UIStyles.AUTH_TITLE)
 
             user_input = (
-                ui.input(t("Benutzername"))
-                .props("dark outlined autofocus name=username autocomplete=username")
+                ui.input(t("auth.login.username"))
+                .props(f"{UIStyles.AUTH_INPUT_PROPS} autofocus name=username autocomplete=username")
                 .classes("w-full")
             )
             pass_input = (
-                ui.input(t("Passwort"), password=True, password_toggle_button=True)
-                .props("dark outlined name=password autocomplete=current-password")
+                ui.input(t("auth.login.password"), password=True, password_toggle_button=True)
+                .props(f"{UIStyles.AUTH_INPUT_PROPS} name=password autocomplete=current-password")
                 .classes("w-full")
             )
             pass_input.on("keydown.enter", lambda _: try_login())
@@ -33,7 +33,7 @@ def render_login_page():
                 username = user_input.value.strip()
                 if not username or not pass_input.value:
                     ui.notify(
-                        t("Bitte Benutzername und Passwort eingeben."), type="warning"
+                        t("auth.login.empty_creds"), type="warning"
                     )
                     return
 
@@ -53,30 +53,28 @@ def render_login_page():
                         }
                     )
                     ui.notify(
-                        t("Willkommen zurück, %{name}!", name=result.full_name),
+                        t("auth.login.welcome", name=result.full_name),
                         type="positive",
                     )
                     ui.navigate.to("/dashboard")
                 else:
                     pass_input.set_value("")
                     ui.notify(
-                        t("Anmeldung fehlgeschlagen: Falscher User oder Passwort"),
+                        t("auth.login.failed"),
                         type="negative",
                     )
 
-            ui.button(t("Einloggen"), on_click=try_login).classes(
-                "w-full py-4 bg-indigo-600 rounded-xl font-bold"
-            )
+            ui.button(t("auth.login.submit"), on_click=try_login).classes(
+                UIStyles.AUTH_BUTTON_PRIMARY
+            ).props("unelevated")
 
             # --- SSO / OIDC buttons ---
             sso_providers = provider_registry.get_sso_providers()
             if sso_providers:
                 with ui.row().classes("w-full items-center gap-2 my-1"):
-                    ui.separator().classes("flex-grow bg-zinc-700")
-                    ui.label(t("oder")).classes(
-                        "text-xs text-zinc-500 uppercase tracking-widest shrink-0"
-                    )
-                    ui.separator().classes("flex-grow bg-zinc-700")
+                    ui.separator().classes(UIStyles.AUTH_DIVIDER_LINE)
+                    ui.label(t("auth.login.or")).classes(UIStyles.AUTH_DIVIDER_LABEL)
+                    ui.separator().classes(UIStyles.AUTH_DIVIDER_LINE)
 
                 for provider in sso_providers:
 
@@ -87,21 +85,17 @@ def render_login_page():
                         else:
                             ui.notify(
                                 t(
-                                    'SSO-Anbieter "%{name}" ist derzeit nicht erreichbar.',
+                                    "auth.login.sso_unavailable",
                                     name=p.display_name,
                                 ),
                                 type="warning",
                             )
 
                     ui.button(
-                        t("Anmelden mit %{provider}", provider=provider.display_name),
+                        t("auth.login.sso_with", provider=provider.display_name),
                         icon="login",
                         on_click=sso_login,
-                    ).props("outline").classes(
-                        "w-full rounded-xl font-bold border-zinc-600 text-zinc-200 hover:border-indigo-500 hover:text-indigo-400"
-                    )
+                    ).props("outline").classes(UIStyles.AUTH_BUTTON_SSO)
 
             with ui.row().classes("items-center gap-2 opacity-50 mt-2"):
-                ui.label(t("Standard: admin / lyndrix")).classes(
-                    "text-[10px] uppercase tracking-widest"
-                )
+                ui.label(t("auth.login.default_creds_hint")).classes(UIStyles.AUTH_HINT_TEXT)

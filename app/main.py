@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from nicegui import ui
 
@@ -23,10 +24,12 @@ from core.components.notifications.api import register_notification_fastapi_rout
 # --- Global UI ---
 from ui.theme import apply_theme
 from ui.maintenance import attach_maintenance_overlay
+from version import __version__
 
 setup_logging()
 app = FastAPI()
 log = get_logger("Core:Main")
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
 def _safe_is_authenticated() -> bool:
@@ -41,8 +44,10 @@ async def boot_interceptor(request: Request, call_next):
     allowed_prefixes = [
         "/_nicegui",
         "/static",
+        "/assets",
         "/_pywebview",
         "/favicon.ico",
+        "/site.webmanifest",
         "/setup",
         "/unseal",
     ]
@@ -61,9 +66,25 @@ async def boot_interceptor(request: Request, call_next):
 # ==========================================
 # ROOT ROUTING (Entry Point)
 # ==========================================
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_redirect():
+    return RedirectResponse(
+        url=f"/assets/icons/favicon.ico?v={__version__}",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/site.webmanifest", include_in_schema=False)
+async def manifest_redirect():
+    return RedirectResponse(
+        url=f"/assets/icons/site.webmanifest?v={__version__}",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 @ui.page("/")
 def entry_point():
-    apply_theme()
+    apply_theme(page_title="Home")
 
     if getattr(app.state, "maintenance", {}).get("active", False):
         attach_maintenance_overlay()
@@ -82,7 +103,6 @@ def entry_point():
     if boot_service.is_booting or vault_instance.ui_state == "loading":
         phase = getattr(boot_service, "phase", None)
         phase_label = phase.value.replace("_", " ") if phase else "initializing"
-        ui.query("body").style("background-color: #09090b;")
         with ui.column().classes("w-full h-screen items-center justify-center gap-4"):
             ui.spinner("dots", size="3em", color="white")
             ui.label("Lyndrix Boot Sequence...").classes(

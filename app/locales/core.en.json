@@ -29,5 +29,69 @@
   "nav_sections": {
     "services": "Services",
     "system": "System"
+  },
+  "settings": {
+    "page": {
+      "title": "System Settings",
+      "subtitle": "Lyndrix Core Engine"
+    },
+    "tabs": {
+      "profile": "Profile",
+      "system": "System",
+      "auth": "Auth",
+      "groups": "Groups",
+      "permissions": "Permissions",
+      "plugins": "Plugins",
+      "info": "Info"
+    },
+    "system": {
+      "application": "Application",
+      "app_name": "App Name",
+      "environment": "Environment",
+      "port": "Port",
+      "log_level": "Log Level",
+      "log_level_session": "Log Level (Session)",
+      "log_level_env_hint": "For persistent setting: define LOG_LEVEL environment variable.",
+      "log_level_applied": "Log level set to %{level}",
+      "apply": "Apply",
+      "plugin_reconciliation": "Plugin Reconciliation",
+      "auto_update_on_boot": "Auto-Update on Boot",
+      "desired_plugins_env": "Desired Plugins (env)",
+      "parsed_specs": "Parsed Specs",
+      "api_integration": "API Integration",
+      "github_rate_limit_hint": "A GitHub token raises the rate limit from 60 to 5000 requests/hour.",
+      "github_api_token": "GitHub API Token",
+      "save_token": "Save Token",
+      "token_saved": "Token saved.",
+      "vault_not_connected": "Vault not connected.",
+      "vault_connected": "Vault connected",
+      "vault_offline": "Vault offline",
+      "error": "Error: %{error}",
+      "yes": "Yes",
+      "no": "No",
+      "none_configured": "(none configured)"
+    },
+    "info": {
+      "released": "Released %{date}",
+      "runtime_environment": "Runtime Environment",
+      "python": "Python",
+      "platform": "Platform",
+      "architecture": "Architecture",
+      "node_hostname": "Node / Hostname",
+      "uptime": "Uptime",
+      "system_resources": "System Resources",
+      "cpu": "CPU",
+      "memory": "Memory",
+      "disk_root": "Disk (/)",
+      "module_registry": "Module Registry",
+      "total_registered": "Total Registered",
+      "core": "Core",
+      "plugins": "Plugins",
+      "service_health": "Service Health",
+      "database": "Database",
+      "vault": "Vault",
+      "online": "Online",
+      "offline": "Offline"
+    }
   }
 }

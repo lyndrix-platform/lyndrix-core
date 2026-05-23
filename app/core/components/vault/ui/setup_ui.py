@@ -6,7 +6,7 @@ from core.services import vault_instance
 from ui.maintenance import attach_maintenance_overlay
 
 def render_setup_wizard():
-    apply_theme()
+    apply_theme(page_title="Setup")
     attach_maintenance_overlay() 
     ui.query('body').style('background-color: #09090b;') 
     

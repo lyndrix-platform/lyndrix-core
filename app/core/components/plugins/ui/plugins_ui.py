@@ -2,6 +2,7 @@ import os
 
 from nicegui import ui
 
+from core.i18n import t
 from core.logger import get_logger, log_capture_buffer
 from ui.theme import UIStyles
 
@@ -34,20 +35,20 @@ def _plugin_source_kind(manifest, folder_name: str, source_map: dict) -> str:
 
 def _source_badge(source_kind: str):
     if source_kind == 'core':
-        return 'Core', 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+        return t('plugins.source.core'), 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
     if source_kind == 'marketplace':
-        return 'Marketplace', 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
-    return 'Local', 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'
+        return t('plugins.source.marketplace'), 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+    return t('plugins.source.local'), 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'
 
 
 def _status_badge(status: str):
     mapping = {
-        'active': ('Active', 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'),
-        'disabled': ('Disabled', 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'),
-        'blocked': ('Blocked', 'bg-amber-500/15 text-amber-300 border border-amber-500/30'),
-        'initializing': ('Loading', 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'),
+        'active': (t('plugins.status.active'), 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'),
+        'disabled': (t('plugins.status.disabled'), 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'),
+        'blocked': (t('plugins.status.blocked'), 'bg-amber-500/15 text-amber-300 border border-amber-500/30'),
+        'initializing': (t('plugins.status.initializing'), 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'),
     }
-    return mapping.get(status, ('Unknown', 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'))
+    return mapping.get(status, (t('plugins.status.unknown'), 'bg-zinc-700/40 text-zinc-200 border border-zinc-600/60'))
 
 
 def _is_deleted_slot_error(exc: RuntimeError) -> bool:
@@ -121,7 +122,7 @@ def render_plugins_page():
         manifest = record['manifest']
         folder_name = record['folder_name']
         if manifest.type != 'PLUGIN' or not folder_name:
-            _safe_notify('Core-Module konnen nicht deinstalliert werden.', 'warning')
+            _safe_notify(t('plugins.notify.no_uninstall_core'), 'warning')
             return
 
         if await plugin_service.uninstall_plugin(manifest.id, folder_name):
@@ -132,14 +133,14 @@ def render_plugins_page():
                 if not _is_deleted_slot_error(exc):
                     raise
                 log.info(f"Plugins UI: skipped uninstall refresh for {manifest.name} after client teardown")
-            _safe_notify(f'{manifest.name} wurde deinstalliert.', 'positive')
+            _safe_notify(t('plugins.notify.uninstalled', name=manifest.name), 'positive')
         else:
-            _safe_notify(f'Deinstallation von {manifest.name} fehlgeschlagen.', 'negative')
+            _safe_notify(t('plugins.notify.uninstall_failed', name=manifest.name), 'negative')
 
     def open_logs(manifest):
         with ui.dialog() as log_dialog, ui.card().classes(f'w-full max-w-4xl h-[80vh] {UIStyles.MODAL_CONTAINER}'):
             with ui.row().classes('w-full justify-between items-center mb-4'):
-                ui.label(f'Logs: {manifest.name}').classes('text-xl font-bold font-mono text-emerald-500')
+                ui.label(f"{t('plugins.installed.logs_title')}: {manifest.name}").classes('text-xl font-bold font-mono text-emerald-500')
                 ui.button(icon='close', on_click=log_dialog.close).props('flat round dense')
 
             log_container = ui.scroll_area().classes('w-full flex-grow bg-black/50 rounded-xl p-4 font-mono text-xs')
@@ -148,7 +149,7 @@ def render_plugins_page():
 
             with log_container:
                 if not found_logs:
-                    ui.label('Keine Logs gefunden.').classes('text-zinc-600 italic')
+                    ui.label(t('plugins.installed.no_logs')).classes('text-zinc-600 italic')
                 for _, level, message in found_logs:
                     color = 'text-red-500' if level in ['ERROR', 'CRITICAL'] else 'text-zinc-300'
                     ui.label(message).classes(f'{color} whitespace-pre-wrap mb-1')
@@ -161,7 +162,7 @@ def render_plugins_page():
 
         with ui.dialog() as settings_dialog, ui.card().classes(PLUGIN_DIALOG_CLASSES):
             with ui.row().classes('w-full justify-between items-center mb-4 shrink-0'):
-                ui.label(f'Settings: {manifest.name}').classes('text-xl font-bold font-mono text-emerald-500')
+                ui.label(f"{t('plugins.installed.settings')}: {manifest.name}").classes('text-xl font-bold font-mono text-emerald-500')
                 ui.button(icon='close', on_click=settings_dialog.close).props('flat round dense')
 
             with ui.scroll_area().classes('w-full flex-grow pr-4'):
@@ -169,11 +170,11 @@ def render_plugins_page():
                     def toggle_plugin_inner(event):
                         module_manager.toggle_module(manifest.id, event.value)
                         if event.value:
-                            _safe_notify(f'{manifest.name} aktiviert.', 'positive')
+                            _safe_notify(t('plugins.notify.activated', name=manifest.name), 'positive')
                         else:
-                            _safe_notify(f'{manifest.name} deaktiviert.', 'warning')
+                            _safe_notify(t('plugins.notify.deactivated', name=manifest.name), 'warning')
 
-                    ui.switch('Plugin Aktiviert', value=active, on_change=toggle_plugin_inner).props('color=emerald').classes('w-full')
+                    ui.switch(t('plugins.installed.toggle_active'), value=active, on_change=toggle_plugin_inner).props('color=emerald').classes('w-full')
 
                     entry = module_manager.registry.get(manifest.id)
                     if entry and entry.get('status') == 'active':
@@ -181,42 +182,42 @@ def render_plugins_page():
                         ctx = entry.get('context')
                         if module and hasattr(module, 'render_settings_ui'):
                             ui.separator().classes('bg-zinc-800 my-2')
-                            ui.label('Konfiguration').classes('text-xs font-bold uppercase tracking-widest text-zinc-500')
+                            ui.label(t('plugins.installed.settings')).classes('text-xs font-bold uppercase tracking-widest text-zinc-500')
                             try:
                                 module.render_settings_ui(ctx)
                             except Exception as exc:
-                                ui.label(f'Fehler in Plugin-UI: {exc}').classes('text-red-500 text-xs')
+                                ui.label(t('plugins.notify.reload_failed', error=str(exc))).classes('text-red-500 text-xs')
 
                     ui.separator().classes('bg-zinc-800')
 
                     if manifest.type == 'PLUGIN':
                         async def reload_plugin_inner():
                             try:
-                                _safe_notify(f'Reloade {manifest.name}...', 'ongoing')
+                                _safe_notify(t('plugins.notify.reloading', name=manifest.name), 'ongoing')
                                 await module_manager.reload_module(manifest.id)
                                 try:
                                     await load_installed()
                                     await load_shop()
-                                    _safe_notify('Reload abgeschlossen.', 'positive')
+                                    _safe_notify(t('plugins.notify.reloaded'), 'positive')
                                     settings_dialog.close()
                                 except RuntimeError as exc:
                                     if not _is_deleted_slot_error(exc):
                                         raise
                                     log.info(f"Plugins UI: skipped reload refresh for {manifest.name} after client teardown")
                             except Exception as exc:
-                                _safe_notify(f'Fehler beim Reload: {exc}', 'negative')
+                                _safe_notify(t('plugins.notify.reload_failed', error=str(exc)), 'negative')
 
                         async def delete_plugin_inner():
                             await uninstall_record(record)
                             settings_dialog.close()
 
-                        ui.button('Plugin neu laden', icon='refresh', on_click=reload_plugin_inner).props('outline color=slate').classes('w-full')
-                        ui.button('Deinstallieren', icon='delete', on_click=delete_plugin_inner).props('unelevated color=red').classes('w-full')
+                        ui.button(t('plugins.installed.reload'), icon='refresh', on_click=reload_plugin_inner).props('outline color=slate').classes('w-full')
+                        ui.button(t('plugins.installed.uninstall'), icon='delete', on_click=delete_plugin_inner).props('unelevated color=red').classes('w-full')
 
         settings_dialog.open()
 
     async def check_all_updates():
-        notif = ui.notification('Prufe Marketplace-Daten neu...', spinner=True, timeout=0, type='ongoing', close_button=False)
+        notif = ui.notification(t('plugins.notify.checking'), spinner=True, timeout=0, type='ongoing', close_button=False)
         try:
             await load_installed()
             await load_shop(force_refresh=True)
@@ -228,25 +229,25 @@ def render_plugins_page():
             return
         except Exception as exc:
             notif.dismiss()
-            _safe_notify(f'Fehler beim Aktualisieren: {exc}', 'negative')
+            _safe_notify(t('plugins.notify.check_failed', error=str(exc)), 'negative')
             return
         notif.dismiss()
-        _safe_notify('Marketplace aktualisiert.', 'positive')
+        _safe_notify(t('plugins.notify.checked'), 'positive')
 
     with ui.column().classes('w-full max-w-7xl gap-6 mx-auto'):
         with ui.row().classes('w-full justify-between items-center'):
             with ui.column().classes('gap-0'):
-                ui.label('Plugin Management').classes(UIStyles.TITLE_H2)
-                ui.label('Installierte Module reagieren sofort, Marketplace-Daten laden in kleinen GitHub-freundlichen Batches.').classes(UIStyles.TEXT_MUTED)
-            ui.button('Updates suchen', icon='update', on_click=check_all_updates).props('outline color=slate').tooltip('Aktualisiert Marketplace-Metadaten und Versionen bei Bedarf')
+                ui.label(t('plugins.title')).classes(UIStyles.TITLE_H2)
+                ui.label(t('plugins.subtitle')).classes(UIStyles.TEXT_MUTED)
+            ui.button(t('plugins.check_updates'), icon='update', on_click=check_all_updates).props('outline color=slate').tooltip(t('plugins.notify.checking'))
 
         with ui.tabs().classes(UIStyles.TAB_BAR) as tabs:
-            tab_installed = ui.tab('Installiert', icon='extension')
-            tab_shop = ui.tab('Marketplace', icon='shopping_bag')
+            tab_installed = ui.tab(t('plugins.tabs.installed'), icon='extension')
+            tab_shop = ui.tab(t('plugins.tabs.marketplace'), icon='shopping_bag')
 
         with ui.tab_panels(tabs, value=tab_installed).classes('w-full bg-transparent p-0 mt-4'):
             with ui.tab_panel(tab_installed).classes('p-0'):
-                ui.label('Installierte Module').classes(UIStyles.TITLE_H3 + ' mb-4')
+                ui.label(t('plugins.installed.title')).classes(UIStyles.TITLE_H3 + ' mb-4')
                 installed_container = ui.grid(columns=3).classes('w-full gap-6')
                 with installed_container:
                     ui.spinner('dots', size='lg').classes('col-span-3 mx-auto')
@@ -258,7 +259,7 @@ def render_plugins_page():
 
                     with installed_container:
                         if not records:
-                            ui.label('Keine Plugins installiert.').classes('col-span-3 text-zinc-500 italic p-4')
+                            ui.label(t('plugins.installed.empty')).classes('col-span-3 text-zinc-500 italic p-4')
                             return
 
                         for record in records:
@@ -295,10 +296,10 @@ def render_plugins_page():
                                                 ui.button(
                                                     icon='unfold_more',
                                                     on_click=lambda select=version_select, url=record['source_url'], version=current_version: populate_version_select(select, url, version)
-                                                ).props('flat round size=sm color=slate').tooltip('Verfugbare Versionen laden')
+                                                ).props('flat round size=sm color=slate').tooltip(t('plugins.installed.load_versions'))
 
                                                 async def run_update(select=version_select, url=record['source_url'], name=manifest.name):
-                                                    _safe_notify(f'Installiere {select.value} fur {name}...', 'ongoing')
+                                                    _safe_notify(t('plugins.notify.updating', name=name, version=select.value), 'ongoing')
                                                     if await plugin_service.install_plugin(url, version=select.value, upgrade=True):
                                                         try:
                                                             await load_installed()
@@ -307,23 +308,23 @@ def render_plugins_page():
                                                             if not _is_deleted_slot_error(exc):
                                                                 raise
                                                             log.info(f"Plugins UI: skipped update refresh for {name} after client teardown")
-                                                        _safe_notify(f'{name} aktualisiert.', 'positive')
+                                                        _safe_notify(t('plugins.notify.updated', name=name), 'positive')
                                                     else:
-                                                        _safe_notify(f'Update von {name} fehlgeschlagen.', 'negative')
+                                                        _safe_notify(t('plugins.notify.update_failed', name=name), 'negative')
 
-                                                ui.button(icon='cloud_download', on_click=run_update).props('flat round size=sm color=warning').tooltip('Ausgewahlte Version installieren')
+                                                ui.button(icon='cloud_download', on_click=run_update).props('flat round size=sm color=warning').tooltip(t('plugins.installed.install_version'))
 
                                         with ui.row().classes('items-center gap-1 ml-auto'):
-                                            ui.button(icon='article', on_click=lambda manifest=manifest: open_logs(manifest)).props('flat round size=sm color=slate').tooltip('Logs anzeigen')
-                                            ui.button(icon='settings', on_click=lambda record=record: open_settings(record)).props('flat round size=sm color=slate').tooltip('Konfiguration offnen')
+                                            ui.button(icon='article', on_click=lambda manifest=manifest: open_logs(manifest)).props('flat round size=sm color=slate').tooltip(t('plugins.installed.logs'))
+                                            ui.button(icon='settings', on_click=lambda record=record: open_settings(record)).props('flat round size=sm color=slate').tooltip(t('plugins.installed.settings'))
                                             if manifest.type == 'PLUGIN':
-                                                ui.button(icon='delete', on_click=lambda record=record: uninstall_record(record)).props('flat round size=sm color=red').tooltip('Schnell deinstallieren')
+                                                ui.button(icon='delete', on_click=lambda record=record: uninstall_record(record)).props('flat round size=sm color=red').tooltip(t('plugins.installed.uninstall'))
 
                 ui.timer(0.1, load_installed, once=True)
 
             with ui.tab_panel(tab_shop).classes('p-0'):
-                ui.label('Marketplace').classes(UIStyles.TITLE_H3 + ' mb-4')
-                search = ui.input(placeholder='Plugins suchen...').props('outlined dark dense icon=search').classes('w-full mb-6')
+                ui.label(t('plugins.marketplace.title')).classes(UIStyles.TITLE_H3 + ' mb-4')
+                search = ui.input(placeholder=t('plugins.marketplace.search_placeholder')).props('outlined dark dense icon=search').classes('w-full mb-6')
                 shop_container = ui.grid(columns=3).classes('w-full gap-6')
                 with shop_container:
                     ui.spinner('dots', size='lg').classes('col-span-3 mx-auto')
@@ -349,7 +350,7 @@ def render_plugins_page():
                     shop_container.clear()
                     with shop_container:
                         if not filtered_plugins:
-                            ui.label('Keine Plugins im Marketplace gefunden.').classes('col-span-3 text-center text-zinc-500')
+                            ui.label(t('plugins.marketplace.empty')).classes('col-span-3 text-center text-zinc-500')
                             return
 
                         for plugin in filtered_plugins:
@@ -374,16 +375,16 @@ def render_plugins_page():
                                             with ui.row().classes('items-center gap-1 text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full'):
                                                 ui.icon('star', size='14px')
                                                 ui.label(str(plugin['stars'])).classes('text-xs font-mono')
-                                            ui.button(icon='menu_book', on_click=lambda url=plugin['url']: ui.navigate.to(url, new_tab=True)).props('flat dense size=sm color=slate').tooltip('Readme offnen')
+                                            ui.button(icon='menu_book', on_click=lambda url=plugin['url']: ui.navigate.to(url, new_tab=True)).props('flat dense size=sm color=slate').tooltip(t('plugins.marketplace.open_readme'))
 
                                     with ui.row().classes('items-center gap-2 flex-wrap'):
-                                        ui.label('Marketplace').classes('text-[10px] font-bold px-2 py-1 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30')
+                                        ui.label(t('plugins.source.marketplace')).classes('text-[10px] font-bold px-2 py-1 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30')
                                         if installed_record:
                                             status_label, status_classes = _status_badge(installed_record['entry'].get('status'))
-                                            ui.label('Installiert').classes('text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30')
+                                            ui.label(t('plugins.tabs.installed')).classes('text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30')
                                             ui.label(status_label).classes(f'text-[10px] font-bold px-2 py-1 rounded-full {status_classes}')
                                         if plugin.get('metadata_source') == 'fallback':
-                                            ui.label('Cached/Fallback').classes('text-[10px] font-bold px-2 py-1 rounded-full bg-zinc-700/40 text-zinc-200 border border-zinc-600/60')
+                                            ui.label(t('plugins.marketplace.cached')).classes('text-[10px] font-bold px-2 py-1 rounded-full bg-zinc-700/40 text-zinc-200 border border-zinc-600/60')
 
                                     ui.label(plugin['description']).classes('text-sm text-zinc-400 leading-relaxed min-h-[72px] flex-grow')
 
@@ -397,12 +398,12 @@ def render_plugins_page():
                                             ui.button(
                                                 icon='unfold_more',
                                                 on_click=lambda select=version_select, url=plugin['clone_url'], version=installed_version if installed_record else None: populate_version_select(select, url, version)
-                                            ).props('flat round size=sm color=slate').tooltip('Verfugbare Versionen laden')
+                                            ).props('flat round size=sm color=slate').tooltip(t('plugins.installed.load_versions'))
 
                                         with ui.row().classes('items-center gap-2 ml-auto'):
                                             if installed_record:
                                                 async def upgrade_plugin(select=version_select, url=plugin['clone_url'], name=plugin['name']):
-                                                    _safe_notify(f'Update {name} auf {select.value}...', 'ongoing')
+                                                    _safe_notify(t('plugins.notify.updating', name=name, version=select.value), 'ongoing')
                                                     if await plugin_service.install_plugin(url, version=select.value, upgrade=True):
                                                         try:
                                                             await load_installed()
@@ -411,15 +412,15 @@ def render_plugins_page():
                                                             if not _is_deleted_slot_error(exc):
                                                                 raise
                                                             log.info(f"Plugins UI: skipped marketplace update refresh for {name} after client teardown")
-                                                        _safe_notify(f'{name} aktualisiert.', 'positive')
+                                                        _safe_notify(t('plugins.notify.updated', name=name), 'positive')
                                                     else:
-                                                        _safe_notify(f'Update von {name} fehlgeschlagen.', 'negative')
+                                                        _safe_notify(t('plugins.notify.update_failed', name=name), 'negative')
 
-                                                ui.button(icon='sync', on_click=upgrade_plugin).props('unelevated size=sm color=warning rounded').tooltip('Version andern')
-                                                ui.button(icon='delete', on_click=lambda record=installed_record: uninstall_record(record)).props('unelevated size=sm color=red rounded').tooltip('Schnell deinstallieren')
+                                                ui.button(icon='sync', on_click=upgrade_plugin).props('unelevated size=sm color=warning rounded').tooltip(t('plugins.marketplace.update'))
+                                                ui.button(icon='delete', on_click=lambda record=installed_record: uninstall_record(record)).props('unelevated size=sm color=red rounded').tooltip(t('plugins.installed.uninstall'))
                                             else:
                                                 async def install_plugin_handler(select=version_select, url=plugin['clone_url'], name=plugin['name']):
-                                                    _safe_notify(f'Installiere {name} ({select.value})...', 'ongoing')
+                                                    _safe_notify(t('plugins.notify.installing', name=name, version=select.value), 'ongoing')
                                                     if await plugin_service.install_plugin(url, version=select.value):
                                                         try:
                                                             await load_installed()
@@ -428,11 +429,11 @@ def render_plugins_page():
                                                             if not _is_deleted_slot_error(exc):
                                                                 raise
                                                             log.info(f"Plugins UI: skipped install refresh for {name} after client teardown")
-                                                        _safe_notify(f'{name} installiert und aktiviert.', 'positive')
+                                                        _safe_notify(t('plugins.notify.installed', name=name), 'positive')
                                                     else:
-                                                        _safe_notify(f'Installation von {name} fehlgeschlagen.', 'negative')
+                                                        _safe_notify(t('plugins.notify.install_failed', name=name), 'negative')
 
-                                                ui.button('Install', icon='download', on_click=install_plugin_handler).props('unelevated size=sm color=primary rounded')
+                                                ui.button(t('plugins.marketplace.install'), icon='download', on_click=install_plugin_handler).props('unelevated size=sm color=primary rounded')
 
                 search.on('update:model-value', lambda _: ui.timer(0.05, load_shop, once=True))
                 ui.timer(0.1, load_shop, once=True)

@@ -3,7 +3,7 @@ from functools import wraps
 from nicegui import ui
 
 from config import settings
-from ui.theme import apply_theme, UIStyles
+from ui.theme import apply_theme, UIStyles, set_page_metadata
 from ui.maintenance import attach_maintenance_overlay
 from core.logger import get_logger
 from core.i18n import t, set_locale, get_locale
@@ -163,7 +163,9 @@ def main_layout(page_title: str):
                 return
 
             theme_pref = _safe_user_value("theme_pref", "dark")
-            apply_theme(theme_pref)
+            theme_id = _safe_user_value("theme_id", settings.DEFAULT_THEME_ID)
+            apply_theme(theme_pref, page_title=page_title, theme_id=theme_id)
+            set_page_metadata(page_title)
 
             is_dark = theme_pref == "dark"
             dark = ui.dark_mode(value=is_dark)

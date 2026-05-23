@@ -1,14 +1,133 @@
 {
   "login": {
-    "title": "Anmelden",
+    "title": "Lyndrix Login",
     "username": "Benutzername",
     "password": "Passwort",
-    "submit": "Anmelden",
+    "submit": "Einloggen",
     "remember": "Angemeldet bleiben",
-    "failed": "Ungültige Anmeldedaten. Bitte erneut versuchen.",
+    "failed": "Anmeldung fehlgeschlagen: Falscher User oder Passwort.",
     "locked": "Konto gesperrt.",
+    "empty_creds": "Bitte Benutzername und Passwort eingeben.",
+    "welcome": "Willkommen zurück, %{name}!",
+    "or": "oder",
+    "sso_with": "Anmelden mit %{provider}",
+    "sso_unavailable": "SSO-Anbieter \"%{name}\" ist derzeit nicht erreichbar.",
+    "default_creds_hint": "Standard: admin / lyndrix",
     "provider_local": "Lokal (Datenbank)",
     "provider_ldap": "LDAP / Active Directory",
     "provider_oidc": "SSO"
+  },
+  "sso": {
+    "handoff_failed": "SSO-Anmeldung fehlgeschlagen oder abgelaufen."
+  },
+  "unseal": {
+    "title": "Lyndrix Vault",
+    "subtitle": "Das System ist verschlüsselt. Bitte gib den Master Key ein.",
+    "master_key": "Master Key",
+    "decrypting": "Vault wird entschlüsselt…",
+    "incorrect_key": "Falscher Master Key.",
+    "empty_key": "Bitte einen Schlüssel eingeben.",
+    "locked_for": "Zu viele Versuche. Gesperrt für %{seconds}s.",
+    "submit": "Vault entsperren",
+    "bus_active": "Kernel Bus aktiv",
+    "unlocked": "Vault erfolgreich entsperrt!"
+  },
+  "user_card": {
+    "default_user": "Benutzer",
+    "password_via_provider": "Passwortänderung wird von deinem Auth-Provider \"%{provider}\" verwaltet. Ändere dein Passwort dort.",
+    "direct_permissions": "Direkt zugewiesene Berechtigungen",
+    "logout": "Abmelden"
+  },
+  "password": {
+    "title": "Passwort ändern",
+    "current": "Aktuelles Passwort",
+    "new": "Neues Passwort",
+    "confirm": "Neues Passwort bestätigen",
+    "mismatch": "Passwörter stimmen nicht überein.",
+    "submit": "Passwort ändern"
+  },
+  "groups": {
+    "title": "Lokale Gruppen & Berechtigungen",
+    "subtitle": "Gruppen bündeln Berechtigungen. LDAP-Benutzer erhalten die Rechte einer Gruppe automatisch, wenn ihr LDAP-Gruppen-DN gemappt ist.",
+    "new_placeholder": "Neuer Gruppenname…",
+    "create": "Erstellen",
+    "empty_name": "Name darf nicht leer sein.",
+    "exists": "Gruppe \"%{name}\" existiert bereits.",
+    "created": "Gruppe \"%{name}\" erstellt.",
+    "saved": "Gruppe gespeichert.",
+    "deleted": "Gruppe \"%{name}\" gelöscht.",
+    "field_name": "Name",
+    "field_description": "Beschreibung",
+    "permissions": {
+      "title": "Berechtigungen",
+      "hint": "Strings der Form \"%{example}\". In Views / API-Guards nutzbar mit group_service.user_has_permission(roles, \"%{example}\").",
+      "placeholder": "z.B. dashboard.view",
+      "add": "Hinzufügen"
+    },
+    "ldap": {
+      "title": "LDAP-Gruppen-Mapping",
+      "hint": "LDAP-Gruppen-DNs, deren Mitglieder diese Gruppe beim Login erhalten. z.B. cn=ops,ou=groups,dc=example,dc=com",
+      "placeholder": "cn=ops,ou=groups,dc=example,dc=com",
+      "add": "Hinzufügen"
+    },
+    "members": {
+      "title": "Mitglieder",
+      "hint": "Benutzer, die dieser Gruppe explizit zugewiesen sind. LDAP-Benutzer erhalten die Gruppe automatisch beim Login über das LDAP-Mapping.",
+      "empty": "Keine direkten Mitglieder.",
+      "add_label": "Benutzer hinzufügen",
+      "add_tooltip": "Zum Mitglied machen"
+    },
+    "save": "Speichern",
+    "delete": "Löschen",
+    "list_empty": "Keine Gruppen vorhanden.",
+    "list_summary": "%{perm_count} Rechte · %{ldap_count} LDAP-Mappings"
+  },
+  "permissions": {
+    "intro": "Berechtigungen werden automatisch aus aktiven Modulen und Plugins geladen. Gruppen-Zuweisungen wirken beim nächsten Login. Direkte Nutzer-Zuweisungen gelten sofort (nach erneutem Login).",
+    "groups_section": "Gruppen mit dieser Berechtigung",
+    "no_groups": "Keine Gruppe zugewiesen.",
+    "add_group": "Gruppe hinzufügen",
+    "add_group_tooltip": "Gruppe diese Berechtigung geben",
+    "users_section": "Direkte Nutzer-Zuweisungen",
+    "no_users": "Keine direkte Zuweisung.",
+    "add_user": "Benutzer direkt hinzufügen",
+    "add_user_tooltip": "Direkte Berechtigung vergeben"
+  },
+  "settings": {
+    "vault_offline_title": "Vault nicht verbunden",
+    "vault_offline_hint": "Änderungen können nicht gespeichert werden. Konfiguriere die Provider über Umgebungsvariablen (.env).",
+    "save_error": "Fehler beim Speichern: %{err}",
+    "reinit_error": "Gespeichert, aber Neuinitialisierung schlug fehl: %{err}",
+    "saved": "%{section} gespeichert — Provider neu geladen.",
+    "active_providers": "Aktive Provider",
+    "reload": "Neu laden",
+    "reloaded": "Provider neu geladen.",
+    "error": "Fehler: %{err}",
+    "chain_hint": "Beim Login werden die Provider in dieser Reihenfolge versucht. \"Übernehmen\" speichert und lädt die Provider sofort neu.",
+    "no_providers": "Keine Provider registriert.",
+    "ok": "OK",
+    "incomplete": "Unvollständig",
+    "provider_chain": "Provider-Reihenfolge",
+    "apply": "Übernehmen",
+    "ldap": {
+      "title": "LDAP / Active Directory",
+      "missing_fields": "URL, Bind DN und Passwort müssen ausgefüllt sein.",
+      "connecting": "Verbinde…",
+      "test": "Verbindung testen"
+    },
+    "oidc": {
+      "title": "OIDC / OAuth2 (Authentik, Keycloak, …)",
+      "quickstart": "Authentik Schnellstart",
+      "quickstart_text": "In Authentik: Application → Provider → OAuth2/OpenID → Redirect URI eintragen → Client ID / Secret kopieren.",
+      "missing_issuer": "Issuer URL muss ausgefüllt sein.",
+      "loading_discovery": "Lade Discovery…",
+      "test": "Discovery testen"
+    },
+    "env_set_via": "Gesetzt via %{env_var}",
+    "source": {
+      "env": "ENV",
+      "vault": "Vault",
+      "default": "Standard"
+    }
   }
 }

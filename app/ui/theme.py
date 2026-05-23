@@ -1,11 +1,17 @@
+import json
+
 from nicegui import ui
+
+from config import settings
+from core.theming import get_theme_engine
+from version import __version__
 
 class UIStyles:
     # ----------------------------------------------------
     # 1. KARTEN & CONTAINER
     # ----------------------------------------------------
-    CARD_BASE = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 lyndrix-card'
-    CARD_GLASS = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 lyndrix-glass-card'
+    CARD_BASE = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 overflow-hidden lyndrix-card'
+    CARD_GLASS = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 overflow-hidden lyndrix-glass-card'
     CARD_HIGHLIGHT = 'p-6 rounded-none border-2 border-primary bg-indigo-50/50 dark:bg-indigo-900/20'
     MODAL_CONTAINER = '!bg-slate-50 dark:!bg-zinc-950 border border-slate-200 dark:border-zinc-800 shadow-2xl rounded-2xl'
 
@@ -45,107 +51,332 @@ class UIStyles:
     NAV_LINK_ACTIVE = 'bg-blue-50 dark:bg-blue-900/10 text-primary border-l-2 border-primary rounded-r-xl'
     NAV_LINK_INACTIVE = 'text-slate-500 dark:text-zinc-400 hover:bg-slate-200 dark:hover:bg-zinc-800 rounded-xl'
 
+    # ----------------------------------------------------
+    # 7. AUTH SURFACES (login, unseal, profile)
+    # ----------------------------------------------------
+    AUTH_PAGE_BG = 'lyndrix-auth-page'
+    AUTH_CARD = 'absolute-center shadow-2xl p-8 rounded-3xl border border-white/5 text-zinc-100 w-full max-w-md lyndrix-auth-card'
+    AUTH_HERO_ICON = 'text-primary mb-2'
+    AUTH_TITLE = 'text-2xl font-bold tracking-tight text-zinc-100'
+    AUTH_SUBTITLE = 'text-center text-sm text-zinc-400 mb-4'
+    AUTH_INPUT_PROPS = 'dark outlined color=primary'
+    AUTH_BUTTON_PRIMARY = 'w-full py-4 rounded-xl font-bold transition-all text-white lyndrix-btn-primary'
+    AUTH_BUTTON_SSO = 'w-full rounded-xl font-bold lyndrix-btn-sso'
+    AUTH_DIVIDER_LINE = 'flex-grow bg-white/10'
+    AUTH_DIVIDER_LABEL = 'text-xs text-zinc-500 uppercase tracking-widest shrink-0'
+    AUTH_HINT_TEXT = 'text-[10px] uppercase tracking-widest text-zinc-500'
+    AUTH_STATUS_PENDING = 'text-xs font-mono text-cyan-300'
+    AUTH_STATUS_ERROR = 'text-xs font-mono text-red-400'
 
-# WICHTIG: Die Funktion nimmt jetzt den theme_pref Parameter an!
-def apply_theme(theme_pref: str = 'auto'):
-    """Wendet die globalen Systemfarben und das CSS an."""
-    ui.colors(
-        primary='#6366f1', secondary='#0ea5e9', accent='#8b5cf6',
-        positive='#22c55e', negative='#ef4444', info='#3b82f6', warning='#f59e0b'
-    )
-    
-    # ui.dark_mode().enable() WURDE HIER ENTFERNT, das macht jetzt die main_layout!
+    # ----------------------------------------------------
+    # 8. PROFILE / CARD CHROME (auth_cards, groups_card, ...)
+    # ----------------------------------------------------
+    PROFILE_CARD = 'p-0 rounded-2xl shadow-lg border border-white/5 w-full lyndrix-glass-card'
+    GRAD_BAR_ACCENT = 'h-1 w-full bg-gradient-to-r from-cyan-400 via-blue-400 to-violet-400'
+    GRAD_BAR_SUCCESS = 'h-1 w-full bg-gradient-to-r from-emerald-400 to-teal-400'
+    GRAD_BAR_INFO = 'h-1 w-full bg-gradient-to-r from-sky-400 to-cyan-400'
+    GRAD_BAR_NEUTRAL = 'h-1 w-full bg-white/5'
 
+    BADGE_NEUTRAL = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-white/5 text-zinc-300 border border-white/10'
+    BADGE_ACCENT = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+    BADGE_ACCENT_VIOLET = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30'
+    BADGE_SUCCESS = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+
+    CHIP_ROLE = 'text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/5 text-zinc-400 border border-white/10'
+    CHIP_OVERFLOW = 'text-[9px] text-zinc-500'
+    CHIP_PERMISSION = 'text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+
+    WARNING_BANNER = 'w-full items-start gap-2 p-3 mb-1 bg-amber-500/10 border border-amber-500/30 rounded-xl'
+    WARNING_TEXT = 'text-xs text-amber-400/80'
+
+    ICON_PRIMARY = 'text-primary'
+    ICON_MUTED = 'text-zinc-500'
+    ICON_SUCCESS = 'text-emerald-400'
+    ICON_INFO = 'text-cyan-400'
+    ICON_WARNING = 'text-amber-400 shrink-0 mt-0.5'
+
+    STATUS_TEXT_SUCCESS = 'text-xs text-emerald-400'
+    STATUS_TEXT_ERROR = 'text-xs text-red-400'
+    STATUS_TEXT_NEUTRAL = 'text-xs text-zinc-500'
+
+
+def _full_title(page_title: str | None) -> str:
+    if not page_title:
+        return settings.APP_TITLE
+    return f"{page_title} | {settings.APP_TITLE}"
+
+
+def _metadata_script(title: str) -> str:
+    safe_title = json.dumps(title)
+    asset_version = json.dumps(__version__)
+    return f"""
+        (() => {{
+            const title = {safe_title};
+            const version = {asset_version};
+            document.title = title;
+
+            const ensureLink = (id, rel, href, sizes=null, type=null) => {{
+                let el = document.getElementById(id);
+                if (!el) {{
+                    el = document.createElement('link');
+                    el.id = id;
+                    document.head.appendChild(el);
+                }}
+                el.rel = rel;
+                el.href = href;
+                if (sizes) el.sizes = sizes;
+                else el.removeAttribute('sizes');
+                if (type) el.type = type;
+                else el.removeAttribute('type');
+            }};
+
+            ensureLink('lyndrix-favicon-32', 'icon', `/assets/icons/favicon-32x32.png?v=${{version}}`, '32x32', 'image/png');
+            ensureLink('lyndrix-favicon-16', 'icon', `/assets/icons/favicon-16x16.png?v=${{version}}`, '16x16', 'image/png');
+            ensureLink('lyndrix-favicon-ico', 'icon', `/favicon.ico?v=${{version}}`);
+            ensureLink('lyndrix-apple-touch', 'apple-touch-icon', `/assets/icons/apple-touch-icon.png?v=${{version}}`, '180x180', 'image/png');
+            ensureLink('lyndrix-manifest', 'manifest', `/site.webmanifest?v=${{version}}`);
+        }})();
+    """
+
+
+def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
     ui.add_head_html(f'''
         <script>
             (function() {{
-                // Lese den Wert aus dem Python-Backend ODER dem Browser-Storage
                 var pref = '{theme_pref}';
                 if (pref === 'auto') {{
                     pref = localStorage.getItem('theme_pref') || 'auto';
                 }}
                 var isDark = pref === 'dark' || (pref === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-                
-                if (isDark) {{
-                    // Setzt Tailwind auf Dark Mode BEVOR das HTML gerendert wird
-                    document.documentElement.classList.add('dark');
-                    
-                    // Injiziere Notfall-CSS, das Animationen blockiert und den Header sofort dunkel färbt
-                    var style = document.createElement('style');
-                    style.innerHTML = `
-                        body, .q-header, .q-drawer, .lyndrix-glass-card {{ 
-                            background-color: #09090b !important; 
-                            color: #f4f4f5 !important; 
-                        }}
-                        * {{
-                            /* KILLT ALLE LADE-BLITZE DURCH TRANSITIONS */
-                            transition: none !important; 
-                            transition-duration: 0s !important;
-                        }}
-                    `;
-                    document.head.appendChild(style);
 
-                    // Reaktiviere die weichen Übergänge, sobald alles geladen ist
-                    window.addEventListener('load', function() {{
-                        setTimeout(() => {{ style.remove(); }}, 150);
-                    }});
+                if (isDark) {{
+                    document.documentElement.classList.add('dark');
                 }}
             }})();
-        </script>          
+        </script>
         <style>
-            body {{ 
-                font-family: 'Inter', system-ui, sans-serif; 
-                transition: background-color 0.3s ease;
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+            :root {{
+                --lx-bg: #0a0e1a;
+                --lx-surface: #0f1629;
+                --lx-elevated: #131c33;
+                --lx-border: rgba(0, 212, 255, 0.15);
+                --lx-border-soft: rgba(255, 255, 255, 0.06);
+                --lx-text: #f0f6ff;
+                --lx-text-muted: #8b95b5;
+                --lx-accent: #00d4ff;
+                --lx-accent-2: #0ea5e9;
+                --lx-accent-3: #8b5cf6;
+                --lx-font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                --lx-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+                --lx-radius-sm: 6px;
+                --lx-radius-md: 12px;
+                --lx-radius-lg: 20px;
+                --lx-glow: 0 0 24px rgba(0, 212, 255, 0.25);
             }}
 
-            /* --- DER AGGRESSIVE FIX FÜR KARTEN & MENÜS --- */
-            
-            /* Basis-Karten */
+            body {{
+                font-family: var(--lx-font-sans);
+                transition: background-color 0.3s ease;
+                -webkit-font-smoothing: antialiased;
+            }}
+            /* Force app typography across Quasar/NiceGUI controls. */
+            body,
+            .q-layout,
+            .q-page-container,
+            .q-page,
+            .q-card,
+            .q-btn,
+            .q-item,
+            .q-tab,
+            .q-chip,
+            .q-menu,
+            .q-tooltip,
+            .q-dialog,
+            .q-field__native,
+            .q-field__input,
+            .q-table,
+            .q-list,
+            .q-notification,
+            input,
+            textarea,
+            select,
+            button,
+            label,
+            p {{
+                font-family: var(--lx-font-sans) !important;
+            }}
+            body.body--dark, html.dark body {{
+                background-color: var(--lx-bg) !important;
+                color: var(--lx-text) !important;
+            }}
+            body.body--dark .q-layout,
+            body.body--dark .q-page-container,
+            body.body--dark .q-page {{
+                background-color: var(--lx-bg) !important;
+            }}
+            body.body--light {{
+                background-color: #f8fafc !important;
+                color: #0f172a !important;
+            }}
+            code, .font-mono, .lyndrix-mono {{
+                font-family: var(--lx-font-mono);
+            }}
+            code,
+            pre,
+            kbd,
+            samp,
+            .font-mono,
+            .lyndrix-mono,
+            .q-editor__content pre,
+            .q-editor__content code {{
+                font-family: var(--lx-font-mono) !important;
+            }}
+
             .lyndrix-card {{
                 background-color: white !important;
             }}
             .body--dark .lyndrix-card, .dark .lyndrix-card {{
-                background-color: #18181b !important; /* zinc-900 */
+                background-color: var(--lx-surface) !important;
+                border-color: var(--lx-border-soft) !important;
             }}
 
-            /* Glass-Karten */
             .lyndrix-glass-card {{
-                backdrop-filter: blur(12px);
-                -webkit-backdrop-filter: blur(12px);
+                backdrop-filter: blur(16px) saturate(140%);
+                -webkit-backdrop-filter: blur(16px) saturate(140%);
             }}
             .body--light .lyndrix-glass-card {{
-                background-color: rgba(255, 255, 255, 0.7) !important;
+                background-color: rgba(255, 255, 255, 0.72) !important;
             }}
             .body--dark .lyndrix-glass-card, .dark .lyndrix-glass-card {{
-                background-color: rgba(24, 24, 27, 0.6) !important;
+                background: linear-gradient(180deg, rgba(19, 28, 51, 0.7), rgba(15, 22, 41, 0.55)) !important;
+                border-color: var(--lx-border-soft) !important;
             }}
 
-            /* Dropdown Menüs (QMenu) */
+            /* ── Auth surfaces ──────────────────────────────────── */
+            .lyndrix-auth-page {{
+                background: radial-gradient(circle at 20% 20%, rgba(0, 212, 255, 0.10), transparent 55%),
+                            radial-gradient(circle at 80% 80%, rgba(139, 92, 246, 0.10), transparent 55%),
+                            var(--lx-bg) !important;
+                min-height: 100vh;
+            }}
+            .lyndrix-auth-card {{
+                background: linear-gradient(180deg, rgba(19, 28, 51, 0.85), rgba(15, 22, 41, 0.78)) !important;
+                backdrop-filter: blur(20px) saturate(150%);
+                -webkit-backdrop-filter: blur(20px) saturate(150%);
+                box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.6), 0 0 40px rgba(0, 212, 255, 0.08);
+            }}
+
+            /* ── Buttons ─────────────────────────────────────────── */
+            .lyndrix-btn-primary {{
+                background: linear-gradient(135deg, var(--lx-accent) 0%, var(--lx-accent-2) 60%, var(--lx-accent-3) 100%) !important;
+                box-shadow: 0 10px 24px -10px rgba(0, 212, 255, 0.55);
+            }}
+            .lyndrix-btn-primary:hover {{
+                filter: brightness(1.08);
+                box-shadow: 0 14px 32px -10px rgba(0, 212, 255, 0.7);
+            }}
+            .lyndrix-btn-sso {{
+                background: rgba(255, 255, 255, 0.03) !important;
+                border: 1px solid rgba(255, 255, 255, 0.10) !important;
+                color: #e2e8f0 !important;
+                transition: all 0.2s ease;
+            }}
+            .lyndrix-btn-sso:hover {{
+                border-color: var(--lx-accent) !important;
+                color: var(--lx-accent) !important;
+                box-shadow: 0 0 18px rgba(0, 212, 255, 0.2);
+            }}
+
+            /* Card style: no top gradient stripes. */
+            .q-card > [class*="h-1"][class*="w-full"][class*="bg-gradient-to-r"] {{
+                display: none !important;
+            }}
+
             .q-menu.lyndrix-menu {{
                 background-color: white !important;
                 min-width: 200px;
             }}
             .body--dark .q-menu.lyndrix-menu, .dark .q-menu.lyndrix-menu {{
-                background-color: #18181b !important;
-                color: #f4f4f5 !important;
-            }}
-            
-            /* Genereller Quasar Reset für Darkmode */
-            .body--dark .q-card, .dark .q-card {{
-                background: #18181b;
-                color: white;
-            }}
-            
-            /* Overrides hardcoded Quasar bg-white classes ONLY in dark mode */
-            .body--dark .bg-white, .dark .bg-white {{
-                background-color: #18181b !important;
-                color: #f4f4f5 !important;
+                background-color: var(--lx-elevated) !important;
+                color: var(--lx-text) !important;
             }}
 
-            /* Scrollbar Styling */
+            .body--dark .q-card, .dark .q-card {{
+                background: var(--lx-surface);
+                color: var(--lx-text);
+            }}
+
+            .body--dark .bg-white, .dark .bg-white {{
+                background-color: var(--lx-surface) !important;
+                color: var(--lx-text) !important;
+            }}
+
             ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
             ::-webkit-scrollbar-track {{ background: transparent; }}
-            body.body--dark ::-webkit-scrollbar-thumb, html.dark ::-webkit-scrollbar-thumb {{ background: #3f3f46; border-radius: 4px; }}
+            body.body--dark ::-webkit-scrollbar-thumb, html.dark ::-webkit-scrollbar-thumb {{
+                background: rgba(0, 212, 255, 0.25);
+                border-radius: 4px;
+            }}
             body.body--light ::-webkit-scrollbar-thumb {{ background: #cbd5e1; border-radius: 4px; }}
         </style>
     ''')
+
+
+def _hydrate_ui_styles(theme_id: str):
+    if not settings.THEME_ENGINE_ENABLED:
+        return
+
+    styles = get_theme_engine().resolve_component_styles(theme_id)
+    for key, value in styles.items():
+        if hasattr(UIStyles, key):
+            setattr(UIStyles, key, value)
+
+
+def set_page_metadata(page_title: str | None):
+    ui.run_javascript(_metadata_script(_full_title(page_title)))
+
+
+def apply_theme(theme_pref: str = 'auto', page_title: str | None = None, theme_id: str | None = None):
+    """Apply current visual theme and browser metadata."""
+    is_dark = theme_pref == 'dark'
+    active_theme = theme_id or settings.DEFAULT_THEME_ID
+
+    if settings.THEME_ENGINE_ENABLED:
+        palette = get_theme_engine().resolve_runtime_palette(is_dark, active_theme)
+    else:
+        palette = {
+            'primary': '#00d4ff',
+            'secondary': '#0ea5e9',
+            'accent': '#8b5cf6',
+            'positive': '#10b981',
+            'negative': '#ef4444',
+            'info': '#00d4ff',
+            'warning': '#f59e0b',
+        }
+
+    _hydrate_ui_styles(active_theme)
+    ui.colors(**palette)
+
+    if settings.THEME_ENGINE_ENABLED:
+        body_bg = get_theme_engine().resolve_color('bg_body', is_dark, active_theme) or '#0a0e1a'
+        body_fg = get_theme_engine().resolve_color('text_body', is_dark, active_theme) or '#f0f6ff'
+    else:
+        body_bg = '#0a0e1a'
+        body_fg = '#f0f6ff'
+
+    full_title = _full_title(page_title)
+    asset_version = __version__
+    ui.add_head_html(f'''
+        <title id="lyndrix-title">{full_title}</title>
+        <link id="lyndrix-favicon-32" rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32x32.png?v={asset_version}" />
+        <link id="lyndrix-favicon-16" rel="icon" type="image/png" sizes="16x16" href="/assets/icons/favicon-16x16.png?v={asset_version}" />
+        <link id="lyndrix-favicon-ico" rel="icon" href="/favicon.ico?v={asset_version}" />
+        <link id="lyndrix-apple-touch" rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v={asset_version}" />
+        <link id="lyndrix-manifest" rel="manifest" href="/site.webmanifest?v={asset_version}" />
+        <meta name="theme-color" content="{body_bg}" />
+        <script>{_metadata_script(full_title)}</script>
+    ''')
+
+    _apply_style_overrides(theme_pref, body_bg, body_fg)

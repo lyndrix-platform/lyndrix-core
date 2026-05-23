@@ -54,7 +54,7 @@ def register_auth_routes():
             state, _ = _OIDC_HANDOFFS.pop(handoff, ("", 0.0))
         if not state:
             ui.notify(
-                t("SSO-Anmeldung fehlgeschlagen oder abgelaufen."), type="negative"
+                t("auth.sso.handoff_failed"), type="negative"
             )
             ui.navigate.to("/login")
             return
@@ -73,7 +73,7 @@ def register_auth_routes():
                 f"AUTH: /auth/complete — no pending result for state '{state[:8]}…'."
             )
             ui.notify(
-                t("SSO-Anmeldung fehlgeschlagen oder abgelaufen."), type="negative"
+                t("auth.sso.handoff_failed"), type="negative"
             )
             ui.navigate.to("/login")
             return

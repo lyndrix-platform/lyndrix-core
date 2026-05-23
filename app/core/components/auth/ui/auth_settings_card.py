@@ -28,19 +28,19 @@ from core.components.auth.ui.groups_card import render_groups_card
 log = get_logger("UI:AuthSettings")
 
 _SOURCE_STYLES = {
-    "env":     ("ENV",      "bg-amber-500/15 text-amber-300 border border-amber-500/30"),
-    "vault":   ("Vault",    "bg-sky-500/15 text-sky-300 border border-sky-500/30"),
-    "default": ("Standard", "bg-zinc-700/40 text-zinc-400 border border-zinc-600/40"),
+    "env":     ("auth.settings.source.env",     "bg-amber-500/15 text-amber-300 border border-amber-500/30"),
+    "vault":   ("auth.settings.source.vault",   "bg-sky-500/15 text-sky-300 border border-sky-500/30"),
+    "default": ("auth.settings.source.default", "bg-zinc-700/40 text-zinc-400 border border-zinc-600/40"),
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Field row helper
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _source_badge(source: str) -> None:
-    text, cls = _SOURCE_STYLES.get(source, ("?", ""))
-    ui.label(text).classes(
+    key, cls = _SOURCE_STYLES.get(source, ("core.common.unknown", ""))
+    ui.label(t(key)).classes(
         f'text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 {cls}'
     )
 
@@ -74,7 +74,7 @@ def _field_row(spec: FieldSpec, value: str, source: str, inputs: dict) -> None:
                 # For sensitive locked fields: never expose the actual secret value
                 if locked and spec.sensitive:
                     display = ""
-                    placeholder = f"Gesetzt via {spec.env_var}"
+                    placeholder = t("auth.settings.env_set_via", env_var=spec.env_var)
                 else:
                     display = value
                     placeholder = spec.label
@@ -123,12 +123,11 @@ async def render_auth_settings_card() -> None:
         ):
             ui.icon('warning_amber', size='20px').classes('text-amber-400 shrink-0 mt-0.5')
             with ui.column().classes('gap-0'):
-                ui.label(t('Vault nicht verbunden')).classes(
+                ui.label(t('auth.settings.vault_offline_title')).classes(
                     'text-sm font-bold text-amber-300'
                 )
                 ui.label(
-                    t('Änderungen können nicht gespeichert werden. '
-                      'Konfiguriere die Provider über Umgebungsvariablen (.env).')
+                    t('auth.settings.vault_offline_hint')
                 ).classes('text-xs text-amber-500/80 mt-0.5')
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -147,14 +146,14 @@ async def render_auth_settings_card() -> None:
         try:
             auth_config_service.save_vault_data(data)
         except Exception as e:
-            ui.notify(t('Fehler beim Speichern: %{err}', err=str(e)), type='negative')
+            ui.notify(t('auth.settings.save_error', err=str(e)), type='negative')
             return
         try:
             auth_service.reinitialize_providers()
         except Exception as e:
-            ui.notify(t('Gespeichert, aber Neuinitialisierung schlug fehl: %{err}', err=str(e)), type='warning')
+            ui.notify(t('auth.settings.reinit_error', err=str(e)), type='warning')
             return
-        ui.notify(t('%{section} gespeichert — Provider neu geladen.', section=section), type='positive')
+        ui.notify(t('auth.settings.saved', section=section), type='positive')
 
     with ui.column().classes('w-full gap-4'):
 
@@ -167,27 +166,26 @@ async def render_auth_settings_card() -> None:
                 with ui.row().classes('w-full items-center justify-between'):
                     with ui.row().classes('items-center gap-2'):
                         ui.icon('security', size='18px').classes('text-indigo-400')
-                        ui.label(t('Aktive Provider')).classes(UIStyles.TITLE_H3)
+                        ui.label(t('auth.settings.active_providers')).classes(UIStyles.TITLE_H3)
 
                     def do_reinit():
                         try:
                             auth_service.reinitialize_providers()
-                            ui.notify(t('Provider neu geladen.'), type='positive')
+                            ui.notify(t('auth.settings.reloaded'), type='positive')
                         except Exception as e:
-                            ui.notify(t('Fehler: %{err}', err=str(e)), type='negative')
+                            ui.notify(t('auth.settings.error', err=str(e)), type='negative')
 
-                    ui.button(t('Neu laden'), icon='refresh', on_click=do_reinit).props(
+                    ui.button(t('auth.settings.reload'), icon='refresh', on_click=do_reinit).props(
                         'outline size=sm color=indigo'
                     )
 
                 ui.label(
-                    t('Beim Login werden die Provider in dieser Reihenfolge versucht. '
-                      '"Übernehmen" speichert und lädt die Provider sofort neu.')
+                    t('auth.settings.chain_hint')
                 ).classes(UIStyles.TEXT_MUTED + ' text-xs')
 
                 all_providers = provider_registry.get_all()
                 if not all_providers:
-                    ui.label(t('Keine Provider registriert.')).classes(
+                    ui.label(t('auth.settings.no_providers')).classes(
                         'text-xs text-zinc-600 italic mt-1'
                     )
                 else:
@@ -217,7 +215,7 @@ async def render_auth_settings_card() -> None:
                                     if ok else
                                     'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                                 )
-                                ui.label(t('OK') if ok else t('Unvollständig')).classes(
+                                ui.label(t('auth.settings.ok') if ok else t('auth.settings.incomplete')).classes(
                                     f'text-[9px] font-bold px-2 py-0.5 rounded-full {badge_ok}'
                                 )
 
@@ -228,15 +226,15 @@ async def render_auth_settings_card() -> None:
             with ui.column().classes('w-full flex-grow p-5 gap-2'):
                 with ui.row().classes('items-center gap-2 mb-1'):
                     ui.icon('sort', size='18px').classes('text-zinc-400')
-                    ui.label(t('Provider-Reihenfolge')).classes(UIStyles.TITLE_H3)
+                    ui.label(t('auth.settings.provider_chain')).classes(UIStyles.TITLE_H3)
 
                 val, src = auth_config_service.get_effective(PROVIDER_CHAIN_SPEC, vault_data)
                 _field_row(PROVIDER_CHAIN_SPEC, val, src, chain_inputs)
 
                 with ui.row().classes('w-full justify-end mt-3'):
                     ui.button(
-                        t('Übernehmen'), icon='check',
-                        on_click=lambda: save_and_reinit(chain_inputs, 'Provider Chain'),
+                        t('auth.settings.apply'), icon='check',
+                        on_click=lambda: save_and_reinit(chain_inputs, t('auth.settings.provider_chain')),
                     ).props('unelevated size=sm color=primary').set_enabled(vault_ok)
 
         # ── LDAP / Active Directory ───────────────────────────────────────────
@@ -247,7 +245,7 @@ async def render_auth_settings_card() -> None:
 
                 with ui.row().classes('items-center gap-2 mb-1'):
                     ui.icon('folder_shared', size='18px').classes('text-sky-400')
-                    ui.label(t('LDAP / Active Directory')).classes(UIStyles.TITLE_H3)
+                    ui.label(t('auth.settings.ldap.title')).classes(UIStyles.TITLE_H3)
 
                 for spec in LDAP_SPECS:
                     val, src = auth_config_service.get_effective(spec, vault_data)
@@ -270,13 +268,13 @@ async def render_auth_settings_card() -> None:
                         ldap_status.classes(
                             add='text-amber-400', remove='text-emerald-400 text-red-400 text-zinc-400'
                         )
-                        ldap_status.set_text(t('URL, Bind DN und Passwort müssen ausgefüllt sein.'))
+                        ldap_status.set_text(t('auth.settings.ldap.missing_fields'))
                         return
                     tmp = LDAPProvider(**kwargs)
                     ldap_status.classes(
                         add='text-zinc-400', remove='text-emerald-400 text-red-400 text-amber-400'
                     )
-                    ldap_status.set_text(t('Verbinde…'))
+                    ldap_status.set_text(t('auth.settings.ldap.connecting'))
                     ok, msg = await tmp.test_connection()
                     ldap_status.classes(
                         add='text-emerald-400' if ok else 'text-red-400',
@@ -287,12 +285,12 @@ async def render_auth_settings_card() -> None:
 
                 with ui.row().classes('w-full items-center gap-3 mt-3'):
                     ui.button(
-                        t('Verbindung testen'), icon='cable', on_click=test_ldap
+                        t('auth.settings.ldap.test'), icon='cable', on_click=test_ldap
                     ).props('outline size=sm color=sky')
                     ldap_status  # positioned in the row via flex-grow
                     ui.button(
-                        t('Übernehmen'), icon='check',
-                        on_click=lambda: save_and_reinit(ldap_inputs, 'LDAP'),
+                        t('auth.settings.apply'), icon='check',
+                        on_click=lambda: save_and_reinit(ldap_inputs, t('auth.settings.ldap.title')),
                     ).props('unelevated size=sm color=primary').set_enabled(vault_ok)
 
         # ── OIDC / OAuth2 / Authentik ─────────────────────────────────────────
@@ -305,20 +303,19 @@ async def render_auth_settings_card() -> None:
 
                 with ui.row().classes('items-center gap-2 mb-1'):
                     ui.icon('login', size='18px').classes('text-violet-400')
-                    ui.label(t('OIDC / OAuth2 (Authentik, Keycloak, …)')).classes(UIStyles.TITLE_H3)
+                    ui.label(t('auth.settings.oidc.title')).classes(UIStyles.TITLE_H3)
 
                 for spec in OIDC_SPECS:
                     val, src = auth_config_service.get_effective(spec, vault_data)
                     _field_row(spec, val, src, oidc_inputs)
 
                 # ── Authentik quickstart reference ────────────────────────────
-                with ui.expansion(t('Authentik Schnellstart'), icon='help_outline').classes(
+                with ui.expansion(t('auth.settings.oidc.quickstart'), icon='help_outline').classes(
                     'w-full text-zinc-500 mt-2'
                 ):
                     with ui.column().classes('gap-1 p-3'):
                         ui.label(
-                            t('In Authentik: Application → Provider → OAuth2/OpenID → '
-                              'Redirect URI eintragen → Client ID / Secret kopieren.')
+                            t('auth.settings.oidc.quickstart_text')
                         ).classes('text-xs text-zinc-500 mb-2')
                         for var, example in [
                             ('LYNDRIX_AUTH_PROVIDERS',   'local,oidc'),
@@ -352,13 +349,13 @@ async def render_auth_settings_card() -> None:
                         oidc_status.classes(
                             add='text-amber-400', remove='text-emerald-400 text-red-400 text-zinc-400'
                         )
-                        oidc_status.set_text(t('Issuer URL muss ausgefüllt sein.'))
+                        oidc_status.set_text(t('auth.settings.oidc.missing_issuer'))
                         return
                     tmp = OIDCProvider(**kwargs)
                     oidc_status.classes(
                         add='text-zinc-400', remove='text-emerald-400 text-red-400 text-amber-400'
                     )
-                    oidc_status.set_text(t('Lade Discovery…'))
+                    oidc_status.set_text(t('auth.settings.oidc.loading_discovery'))
                     ok, msg = await tmp.probe_discovery()
                     oidc_status.classes(
                         add='text-emerald-400' if ok else 'text-red-400',
@@ -369,12 +366,12 @@ async def render_auth_settings_card() -> None:
 
                 with ui.row().classes('w-full items-center gap-3 mt-3'):
                     ui.button(
-                        t('Discovery testen'), icon='wifi_tethering', on_click=test_oidc
+                        t('auth.settings.oidc.test'), icon='wifi_tethering', on_click=test_oidc
                     ).props('outline size=sm color=deep-purple')
                     oidc_status  # flex-grow positions it between buttons
                     ui.button(
-                        t('Übernehmen'), icon='check',
-                        on_click=lambda: save_and_reinit(oidc_inputs, 'OIDC'),
+                        t('auth.settings.apply'), icon='check',
+                        on_click=lambda: save_and_reinit(oidc_inputs, t('auth.settings.oidc.title')),
                     ).props('unelevated size=sm color=primary').set_enabled(vault_ok)
 
         # ── Local Groups & Permissions ────────────────────────────────────────
