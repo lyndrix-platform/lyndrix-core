@@ -5,7 +5,7 @@
 # --- Core Framework ---
 fastapi==0.129.0
 uvicorn[standard]==0.41.0
-nicegui==3.9.0
+nicegui==3.10.0
 pydantic-settings>=2.0.0,<3.0.0
 
 # --- Database ---
