@@ -1,73 +1,74 @@
 # Event Catalog
 
-This catalog lists event topics currently used in Lyndrix Core (publish and/or subscribe in source code).
+This catalog summarizes the event topics currently used in Lyndrix Core.
 
 ## Lifecycle and system
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `system:started` | `main.py` startup | Vault, Monitor | Global startup trigger |
-| `system:boot_phase` | Boot | UI (boot screen) | Phase updates: waiting/loading/ready/failed |
-| `system:boot_complete` | Boot | Plugin component | Signals module loading completion |
-| `system:maintenance_mode` | Boot, Database | Maintenance UI | Activates/deactivates maintenance overlay |
-| `system:metrics_update` | System Monitor | UI metrics consumers | High-frequency metrics event |
+| `system:started` | `main.py` startup | Vault, System Monitoring | Initial runtime trigger |
+| `system:boot_phase` | Boot | UI and boot-state consumers | Phase updates such as `waiting_core`, `loading_modules`, `ready`, `failed` |
+| `system:boot_complete` | Boot | Plugins component and plugins | Signals that core startup completed |
+| `system:maintenance_mode` | Boot, Database | Maintenance UI | Enables or clears maintenance mode |
+| `system:metrics_update` | System Monitoring | UI metrics consumers | Periodic host metrics update |
 
 ## Vault
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `vault:init_requested` | Vault UI, Auto-Unseal | Vault service | Init flow trigger |
-| `vault:unseal_requested` | Vault UI, Auto-Unseal | Vault service | Unseal flow trigger |
-| `vault:needs_init` | Vault service | Auto-Unseal | Vault not initialized |
-| `vault:needs_unseal` | Vault service | Auto-Unseal | Vault sealed |
-| `vault:auth_failed` | Vault service | (none in core) | Token/permission failure |
-| `vault:opened` | Vault service | Database | Vault ready to unlock DB init |
-| `vault:ready_for_data` | Vault service | Plugins (recommended) | Safe point for plugin secret usage |
-| `vault:unseal_failed` | (reserved) | Vault unseal UI | UI subscribes; no active emitter in core |
+| `vault:init_requested` | Vault UI, auto-unseal flow | Vault service | Trigger Vault initialization |
+| `vault:unseal_requested` | Vault UI, auto-unseal flow | Vault service | Trigger Vault unseal |
+| `vault:needs_init` | Vault service | Auto-unseal manager, setup UI | Vault is not initialized |
+| `vault:needs_unseal` | Vault service | Auto-unseal manager, unseal UI | Vault is sealed |
+| `vault:auth_failed` | Vault service | Operational consumers | Token or policy issue while preparing the mount |
+| `vault:opened` | Vault service | Database | Vault is available for downstream startup |
+| `vault:ready_for_data` | Vault service | Plugins and other secret consumers | Safe point for reading and writing secret data |
+| `vault:unseal_failed` | Reserved topic | Unseal UI | UI subscribes, no active emitter in current core |
 
 ## Database and IAM
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `db:connected` | Database | Auth, ModuleManager fallback | DB ready signal |
-| `iam:ready` | Auth | Boot | IAM/provider chain ready |
-| `auth:register_provider` | Plugin/Auth providers | Auth provider registry | Runtime custom provider registration |
+| `db:connected` | Database | Auth, Plugins fallback activation | Database is ready for schema work and state restore |
+| `iam:ready` | Auth | Boot | IAM bootstrap and provider-chain initialization finished |
+| `auth:register_provider` | Plugins or auth code | Auth provider registry | Registers runtime auth providers |
 
 ## Plugin lifecycle and UI refresh
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `plugin:install_started` | Plugin service | (none in core) | Install progress hook |
-| `plugin:installed` | Plugin service | (none in core) | Install success hook |
-| `plugin:install_failed` | Plugin service | (none in core) | Install failure hook |
-| `plugin:files_changed` | Plugin service | ModuleManager | Triggers load/reload/unload |
-| `ui:needs_refresh` | ModuleManager | Main layout refresh hook | Forces UI re-render |
+| `plugin:install_started` | Plugin service | Optional listeners | Start of a plugin install or upgrade |
+| `plugin:installed` | Plugin service | Optional listeners | Plugin install succeeded |
+| `plugin:install_failed` | Plugin service | Optional listeners | Plugin install failed |
+| `plugin:files_changed` | Plugin service | ModuleManager | Triggers load, reload, or unload handling |
+| `ui:needs_refresh` | ModuleManager | Layout/UI refresh hooks | Requests a UI rebuild after module changes |
 
 ## Git integration
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `git:sync` | Plugin service | Git service | Clone/pull trigger |
-| `git:commit_push` | Plugins/UI integrations | Git service | Commit/push trigger |
-| `git:status_update` | Git service | Plugin service | Sync/commit status updates |
+| `git:sync` | Plugin service and integrations | Git service | Clone or pull a repository |
+| `git:commit_push` | Plugins or UI integrations | Git service | Stage, commit, and push repo changes |
+| `git:status_update` | Git service | Plugin service | Reports sync or commit result state |
 
 ## Notifications
 
 | Topic | Produced by | Consumed by | Notes |
 |---|---|---|---|
-| `system:notify` | Core/plugins | Notification component | Broadcast notifications |
-| `user:notify` | Core/plugins | Notification component | User-targeted notifications |
-| `notification:outbound` | Notification component | External listeners/plugins | Outbound normalized event |
+| `system:notify` | Core and plugins | Notifications component | Broadcast notification |
+| `user:notify` | Core and plugins | Notifications component | User-targeted notification |
+| `notification:outbound` | Notifications component | External listeners or plugins | Normalized outbound notification stream |
 
-## Monitoring-specific (summarized in event-bus logging)
+## Monitoring-specific topics summarized in logs
 
 | Topic | Notes |
 |---|---|
-| `monitoring:inventory_sync` | Payload logging is summarized by Event Bus |
-| `monitoring:state_changed` | Payload logging is summarized by Event Bus |
+| `monitoring:inventory_sync` | Payload logging is summarized by the event bus |
+| `monitoring:state_changed` | Payload logging is summarized by the event bus |
 
-## For plugin authors
+## Guidance for plugin authors
 
-- Subscribe and emit via `ctx.subscribe(...)` / `ctx.emit(...)`
-- Declare every used topic in manifest permissions
-- Prefer stable existing topics before creating custom ones
+- subscribe and emit through `ctx.subscribe(...)` and `ctx.emit(...)`
+- declare every used topic in the manifest permissions
+- prefer existing stable topics before inventing new ones
+- avoid putting secrets or oversized blobs into event payloads

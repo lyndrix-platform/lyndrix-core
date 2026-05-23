@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Notifications component handles in-app notifications, persistence, toast delivery, and webhook ingestion.
+The Notifications component handles in-app notifications, persistence, toast delivery, and webhook-based ingestion.
 
 ## Main locations
 
@@ -12,11 +12,11 @@ The Notifications component handles in-app notifications, persistence, toast del
 
 ## Responsibilities
 
-- Receive broadcast/user notification events
-- Persist notification history
-- Broadcast UI toasts to active clients
-- Expose webhook API for external notification ingestion
-- Emit normalized outbound notification event
+- receive broadcast and user-targeted notifications from the event bus
+- persist notification history
+- display toast-style notifications to active UI clients
+- expose a webhook API for external systems
+- emit a normalized outbound notification event for integrations
 
 ## Events
 
@@ -33,3 +33,7 @@ The Notifications component handles in-app notifications, persistence, toast del
 
 - `GET /api/notifications/webhook/gitlab/health`
 - `POST /api/notifications/webhook/gitlab`
+
+## Integration notes
+
+This component is the preferred bridge between internal Lyndrix events and user-visible operational messages.

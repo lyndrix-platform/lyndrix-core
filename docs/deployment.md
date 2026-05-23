@@ -1,31 +1,33 @@
-# Installation & Deployment
+# Installation and Deployment
 
-## Deployment-Modelle im Lyndrix-Setup
+This page explains how Lyndrix Core is started in local development, what is included in the repository, and what to keep in mind when deriving a production setup.
 
-In eurer Umgebung gibt es bewusst **zwei getrennte Wege**:
+## Deployment model
 
-- **Local Development** direkt aus diesem Repository
-- **Production Deployment** als generierte Docker-Compose-Datei aus einer externen `service.yml`
+The repository ships with a complete **development runtime**. It is the fastest way to boot the full stack locally and the best reference point for understanding required services.
 
-Damit ist klar: Die Dev-Dateien in diesem Repo sind nicht die Produktionsquelle.
-
-## 1) Local Development (Repository-basiert)
-
-Die lokale Entwicklungsstrecke liegt vollständig im Repo:
+The development stack includes:
 
 - `docker/docker-compose.dev.yml`
 - `docker/Dockerfile`
 - `docker/.env.dev`
 - `docker/entrypoint.sh`
 
-Diese Umgebung startet:
+These files start:
 
-- Lyndrix App (`lyndrix`)
-- MariaDB (`db`)
-- HashiCorp Vault (`vault`)
-- Doku-Server (`docs`)
+- the Lyndrix application container
+- a MariaDB database
+- a HashiCorp Vault instance
+- a documentation preview server
 
-Start:
+## Local development setup
+
+### Prerequisites
+
+- Docker
+- Docker Compose
+
+### Start the stack
 
 ```bash
 git clone https://github.com/lyndrix-platform/lyndrix-core.git
@@ -33,100 +35,123 @@ cd lyndrix-core
 docker compose -f docker/docker-compose.dev.yml up -d --build
 ```
 
-Endpoints:
+### Default local endpoints
 
 - App: `http://localhost:8081`
 - Vault UI: `http://localhost:8200`
-- Docs: `http://localhost:8000`
+- Docs preview: `http://localhost:8000`
 
-### Wichtige Dev-Eigenschaften
+## What the development stack does
 
-- App läuft mit Live-Entwicklung (`uvicorn ... --reload`)
-- Source-Code und Plugin-Repositories sind als Bind-Mounts eingebunden
-- Persistenz liegt unter lokalen `.dev/`-Pfaden
+The development compose file is optimized for fast iteration:
 
-Persistenz-Mounts (Auszug):
+- the app runs with a reload-friendly development workflow
+- repository files are mounted into the container
+- local persistence is stored under `.dev/`
+- the docs container serves the content from `docs/` through Zensical
+
+### Important persistent paths
+
+The development setup stores state in local bind mounts under `.dev/`.
+
+Typical paths are:
 
 - `../.dev/storage:/data/storage`
 - `../.dev/secure_data:/data/security`
 - `../.dev/db_data:/var/lib/mysql`
 - `../.dev/vault_data:/vault/file`
 
-## 2) Production Deployment (IaC-generiert)
+These folders are important when you want to inspect local state, reset a broken development environment, or preserve data between restarts.
 
-Die produktive Compose-Datei wird **nicht** manuell aus dem Dev-Compose gepflegt, sondern vom IaC-Orchestrator aus einer Service-Definition erzeugt.
+## Environment and bootstrap configuration
 
-Quelle (Definition):
+Important runtime settings are defined in `app/config.py` and can be supplied through environment variables.
 
-- `aac-application-defenitions/applications/aac-lyndrix-core/service.yml`
+Frequently used values include:
 
-Ziel (generiertes Artifact, Beispielpfad auf dem Host):
+- `PORT`
+- `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- `VAULT_URL`, `LYNDRIX_MASTER_KEY`
+- `LYNDRIX_ADMIN_USER`, `LYNDRIX_ADMIN_PASSWORD`
+- `LYNDRIX_PLUGINS_DESIRED`, `LYNDRIX_PLUGINS_AUTO_UPDATE`
+- `LYNDRIX_AUTH_PROVIDERS`
 
-- `../docker/aac-lyndrix-core/compose/docker-compose.yml`
+For development, the defaults are intentionally convenient. For any shared or production-like environment, replace the default secrets and credentials with secure values.
 
-### Was aus der `service.yml` in der generierten Compose ankommt
+## Plugin-related mounts in development
 
-- App-Image inkl. Tag (z. B. `ghcr.io/lyndrix-platform/lyndrix-core:0.0.8`)
-- Service-/Container-Name und Hostname
-- Ports (`8081`)
-- Persistente Host-Volumes unter `/export/docker/aac-lyndrix-core/...`
-- Abhängigkeiten als Sidecars (`aac-lyndrix-db`, `aac-lyndrix-vault`)
-- `depends_on`-Bedingungen (DB healthy, Vault started)
-- Traefik-, Auto-DNS- und Homepage-Labels
-- Netzwerkzuordnung (`secured`, `exposed`, `interconnect`, `stack_internal`)
+The development compose file supports plugin iteration and can be extended with additional bind mounts for external plugin repositories.
 
-### Production-Charakteristika
+That is useful when:
 
-- Gepinntes Container-Image statt lokalem Build
-- Kein Dev-Reload-Workflow
-- Externe Netzwerke und Ingress-Routing über Traefik
-- Persistenz auf stabilen Host-Pfaden
+- you develop Lyndrix Core and one or more plugins side by side
+- you want a plugin to update immediately without packaging it first
+- you need to inspect generated plugin dependencies in `vendor/`
 
-## 3) Schnellvergleich: Dev vs Prod
+If you add or change plugin mounts, ensure that the target host paths actually exist.
 
-- **Source of truth**:
-  - Dev: Dateien im Repo
-  - Prod: `service.yml` + IaC-Orchestrator
-- **Runtime**:
-  - Dev: lokaler Build + Live-Mounts
-  - Prod: gepinntes Image
-- **Storage**:
-  - Dev: `./.dev/*`
-  - Prod: `/export/docker/aac-lyndrix-core/*`
-- **Networking**:
-  - Dev: localhost-orientiert
-  - Prod: Traefik + DNS + externe Netzwerke
+## Deriving a production setup
 
-## 4) Betriebs-Checks
+The repository does not ship a complete production deployment manifest. Instead, treat the development compose file as a reference implementation and derive your production setup from it.
 
-### Dev-Checks
+A production-ready deployment should usually include:
+
+- a pinned application image instead of a local build
+- TLS termination through a reverse proxy or ingress
+- dedicated persistent storage for the database, Vault, and platform data
+- managed secrets instead of plain environment defaults
+- monitoring, backup, and restore procedures
+- explicit network boundaries between public, application, and data services
+
+## Operational checks
+
+Useful local checks:
 
 ```bash
+# Container status
 docker compose -f docker/docker-compose.dev.yml ps
+
+# Application logs
 docker compose -f docker/docker-compose.dev.yml logs -f lyndrix
+
+# Basic health check
 curl -f http://localhost:8081/
 ```
 
-### Prod-Checks (im generierten Compose-Verzeichnis)
+## Update guidance
 
-```bash
-docker compose ps
-docker compose logs -f aac-lyndrix-core
-docker compose logs -f aac-lyndrix-db
-docker compose logs -f aac-lyndrix-vault
-curl -fk https://lyndrix.int.fam-feser.de/
-```
+Before any upgrade, create backups for:
 
-## 5) Sicherheits- und Update-Hinweise
+- MariaDB data
+- Vault storage
+- `vault_keys.enc` from `settings.LYNDRIX_VAULT_KEY_FILE`
 
-- Secrets niemals im Klartext versionieren
-- Vor Updates immer Backup von DB, Vault-Daten und `vault_keys.enc` erstellen
-- Nach Rollout Boot-Phasen und Plugin-Status prüfen
-- `LYNDRIX_MASTER_KEY` in Prod nur kontrolliert verwenden
+Recommended rollout order:
 
-Empfohlene Rollout-Reihenfolge:
+1. Create backups
+2. Deploy the new application version
+3. Watch the logs for boot events such as `system:boot_phase`
+4. Verify plugin status in the plugin manager UI
+5. Confirm that Vault, database, and login flows are healthy
 
-1. Backup erstellen
-2. Neues Image/Tag über `service.yml` setzen
-3. Compose neu generieren und ausrollen
-4. Health/Logs/Plugin-Status verifizieren
+## Troubleshooting
+
+### The app never becomes ready
+
+Check these first:
+
+- whether Vault is initialized or still sealed
+- whether the database container is reachable
+- whether invalid credentials keep the DB in maintenance mode
+
+### Login works but plugins do not load
+
+Check these next:
+
+- the logs around `iam:ready` and `system:boot_complete`
+- plugin state rows in the database
+- missing plugin dependencies or blocked dependency chains
+
+### Docs preview is unavailable
+
+The docs service depends on the repository content and the documentation build toolchain. Rebuild the compose stack and inspect the `docs` container logs.

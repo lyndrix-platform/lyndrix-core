@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Settings component provides the central configuration UI page.
+The Settings component provides the central UI for runtime configuration and operational settings changes.
 
 ## Main locations
 
@@ -11,12 +11,14 @@ The Settings component provides the central configuration UI page.
 
 ## Responsibilities
 
-- Register and render settings UI
-- Expose runtime configuration forms for operators
+- register the settings route
+- render platform configuration forms
+- expose runtime-editable settings to operators
+- provide a UI entry point for configuration workflows such as auth settings updates
 
 ## Events
 
-The Settings component does not directly publish or subscribe to Event Bus topics in its route layer.
+The Settings route layer does not currently act as a major direct event publisher or subscriber on the global bus.
 
 ## UI endpoint
 
