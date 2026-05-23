@@ -1,6 +1,5 @@
 import asyncio
 import inspect
-import weakref
 from typing import Dict, List, Callable, Set
 from core.logger import get_logger
 
@@ -8,6 +7,7 @@ from core.logger import get_logger
 class GlobalEventBus:
     def __init__(self):
         self.subscribers: Dict[str, List[Callable]] = {}
+        self._subscriber_keys: Dict[str, Set[str]] = {}
         self.log = get_logger("Core:EventBus")
         self._active_tasks: Set[asyncio.Task] = set()
         # Topics that should not spam INFO logs
@@ -15,7 +15,10 @@ class GlobalEventBus:
         # Topics with sensitive payloads (never log data)
         self._sensitive_topics = ["vault:unseal_requested", "vault:init_requested"]
         # Topics with very large payloads should be summarized to keep logs usable.
-        self._summarized_topics = {"monitoring:inventory_sync", "monitoring:state_changed"}
+        self._summarized_topics = {
+            "monitoring:inventory_sync",
+            "monitoring:state_changed",
+        }
 
     def _summarize_payload(self, topic: str, payload: dict) -> str:
         if topic == "monitoring:inventory_sync":
@@ -40,12 +43,26 @@ class GlobalEventBus:
 
     def subscribe(self, topic: str):
         """Decorator: @bus.subscribe('topic') registers a callback."""
+
         def decorator(callback):
             if topic not in self.subscribers:
                 self.subscribers[topic] = []
+                self._subscriber_keys[topic] = set()
+
+            callback_key = (
+                f"{getattr(callback, '__module__', 'unknown')}:"
+                f"{getattr(callback, '__qualname__', callback.__name__)}"
+            )
+            if callback_key in self._subscriber_keys[topic]:
+                self.log.debug(
+                    f"SUBSCRIBE: Ignored duplicate subscriber for {topic} ({callback.__name__})"
+                )
+                return callback
             self.subscribers[topic].append(callback)
+            self._subscriber_keys[topic].add(callback_key)
             self.log.debug(f"SUBSCRIBE: Registered for: {topic} ({callback.__name__})")
             return callback
+
         return decorator
 
     def emit(self, topic: str, payload: dict = None):
@@ -58,7 +75,9 @@ class GlobalEventBus:
         elif topic in self._sensitive_topics:
             self.log.info(f"EVENT: {topic} | Data: [REDACTED]")
         elif topic in self._summarized_topics:
-            self.log.info(f"EVENT: {topic} | Data: {self._summarize_payload(topic, payload)}")
+            self.log.info(
+                f"EVENT: {topic} | Data: {self._summarize_payload(topic, payload)}"
+            )
         else:
             # TODO: redact sensitive keys by default for all event payloads before logging.
             self.log.info(f"EVENT: {topic} | Data: {payload}")
@@ -68,14 +87,16 @@ class GlobalEventBus:
                 try:
                     if inspect.iscoroutinefunction(callback):
                         task = asyncio.create_task(
-                            callback(payload),
-                            name=f"bus:{topic}:{callback.__name__}"
+                            callback(payload), name=f"bus:{topic}:{callback.__name__}"
                         )
                         self._track_task(task, topic, callback.__name__)
                     else:
                         callback(payload)
                 except Exception as e:
-                    self.log.error(f"ERROR: Callback '{callback.__name__}' for '{topic}' raised: {e}", exc_info=True)
+                    self.log.error(
+                        f"ERROR: Callback '{callback.__name__}' for '{topic}' raised: {e}",
+                        exc_info=True,
+                    )
 
     def _track_task(self, task: asyncio.Task, topic: str, callback_name: str):
         """Tracks an async task and logs failures via done callback."""
@@ -90,14 +111,14 @@ class GlobalEventBus:
             if exc:
                 self.log.error(
                     f"TASK_FAILED: Async handler '{callback_name}' for '{topic}' raised: {exc}",
-                    exc_info=(type(exc), exc, exc.__traceback__)
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
 
         task.add_done_callback(_on_done)
 
     def create_tracked_task(self, coro, *, name: str = None) -> asyncio.Task:
         """Creates and tracks an asyncio task with failure logging.
-        
+
         Use this instead of bare asyncio.create_task() for observability.
         """
         task = asyncio.create_task(coro, name=name)
@@ -111,7 +132,7 @@ class GlobalEventBus:
             if exc:
                 self.log.error(
                     f"TASK_FAILED: '{name or 'unnamed'}' raised: {exc}",
-                    exc_info=(type(exc), exc, exc.__traceback__)
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
 
         task.add_done_callback(_on_done)
@@ -119,4 +140,3 @@ class GlobalEventBus:
 
 
 bus = GlobalEventBus()
-
