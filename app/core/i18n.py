@@ -23,6 +23,7 @@ this module for Babel/gettext.  The public API (t / get_locale / set_locale /
 register_plugin_locales) is intentionally kept compatible so the call-sites
 don't need to change.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from core.logger import get_logger
+from core.session import get_user_value, set_user_value
 
 log = get_logger("Core:i18n")
 
@@ -53,6 +55,7 @@ _PLACEHOLDER_RE = re.compile(r"%\{(\w+)\}")
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
 
 def _flatten(data: Any, prefix: str = "") -> dict[str, str]:
     """Recursively flatten a nested dict into dotted keys."""
@@ -97,8 +100,11 @@ def _get_supported() -> set[str]:
     if _supported is None:
         try:
             from config import settings  # noqa: PLC0415
+
             _default = settings.DEFAULT_LOCALE
-            _supported = {s.strip() for s in settings.SUPPORTED_LOCALES.split(",") if s.strip()}
+            _supported = {
+                s.strip() for s in settings.SUPPORTED_LOCALES.split(",") if s.strip()
+            }
         except Exception:
             _supported = {"en", "de"}
     return _supported
@@ -107,8 +113,7 @@ def _get_supported() -> set[str]:
 def _current_locale() -> str:
     """Return the locale for the active NiceGUI request, or the configured default."""
     try:
-        from nicegui import app  # noqa: PLC0415
-        locale = app.storage.user.get("locale", _default)
+        locale = get_user_value("locale", _default)
         return locale if locale in _get_supported() else _default
     except Exception:
         return _default
@@ -117,6 +122,7 @@ def _current_locale() -> str:
 # ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
+
 
 def t(key: str, locale: str | None = None, **kwargs) -> str:
     """Return the translation of *key* for *locale* (default: current user's locale).
@@ -156,11 +162,7 @@ def set_locale(locale: str) -> None:
     if locale not in _get_supported():
         log.warning(f"i18n: unsupported locale '{locale}', ignoring")
         return
-    try:
-        from nicegui import app  # noqa: PLC0415
-        app.storage.user["locale"] = locale
-    except Exception:
-        pass
+    set_user_value("locale", locale)
 
 
 def register_plugin_locales(plugin_path: Path) -> None:
