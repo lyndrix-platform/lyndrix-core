@@ -1,44 +1,68 @@
-# Lyndrix Core Dokumentation
+# Lyndrix Core Documentation
 
-Willkommen zur technischen Dokumentation von Lyndrix Core.
+Welcome to the technical documentation for Lyndrix Core.
 
-Diese Doku wurde auf den aktuellen Core-Stand gebracht und enthält den vollständigen Plugin-Developer-Fokus inklusive API, Lifecycle und Core-Integrationspunkten.
+Lyndrix Core is the runtime foundation for the Lyndrix platform. It combines a FastAPI backend, a NiceGUI frontend, an event-driven component model, Vault-based secret management, and a database-backed plugin lifecycle.
 
-## Schnellnavigation
+## What this documentation covers
 
-- [Installation & Deployment](deployment.md)
-- [Plugin Development Guide](plugins.md)
-- [Security & Vault](security.md)
-- [System-Architektur](architecture.md)
+This documentation set is written for three main audiences:
 
-## Plattformüberblick
+- **Platform operators** who need to boot, configure, and run Lyndrix Core safely
+- **Plugin developers** who want to extend the platform through the supported plugin API
+- **Core contributors** who need an overview of the internal architecture and component responsibilities
 
-Lyndrix Core kombiniert:
+## Quick navigation
 
-- **FastAPI + NiceGUI** für API und UI
-- **Globalen Event-Bus** für lose gekoppelte Modul-Kommunikation
-- **Vault-Integration** für Secrets und verschlüsselte Vault-Key-Persistenz
-- **Persistente Plugin-Zustände** (DB-basiert) für Boot-Restore und Lifecycle
+- [Installation and deployment](deployment.md)
+- [Plugin development guide](plugins.md)
+- [Security and Vault](security.md)
+- [System architecture](architecture.md)
+- [Core components reference](core-components/index.md)
 
-## Wichtigste Neuerungen im aktuellen Stand
+## Platform overview
 
-- Plugin-Manifeste unterstützen zusätzlich:
-  - `dependencies`
-  - `min_core_version`
-  - `auto_enable_on_install`
-  - `repo_url`
-- Plugin-Service bietet:
-  - GitHub Tag-Versionierung
-  - sichere ZIP-Extraktion (Path-Traversal-Check)
-  - atomisches Upgrade via Staging/Swap
-  - lokale Vendor-Dependency-Installation pro Plugin
-- Module-Manager unterstützt:
-  - Dependency-Blocking (`status=blocked`)
-  - Reconciliation gewünschter Plugins über `LYNDRIX_PLUGINS_DESIRED`
-  - Reload/Unload/Toggle inkl. UI-Refresh-Events
+Lyndrix Core brings together the following building blocks:
 
-## Für wen welche Seite?
+- **FastAPI + NiceGUI** for API endpoints, authentication flows, and the web UI
+- **A global event bus** for low-coupling communication between core services and plugins
+- **Vault-first secret handling** with bootstrap, unseal, and mount management
+- **SQLAlchemy + MariaDB** for persistent platform state and plugin activation status
+- **A plugin runtime** with lifecycle hooks, per-plugin dependency isolation, and update workflows
 
-- **Admins / Betreiber**: zuerst [deployment.md](deployment.md), dann [security.md](security.md)
-- **Plugin-Entwickler**: direkt [plugins.md](plugins.md)
-- **Core-Entwickler**: zusätzlich [architecture.md](architecture.md)
+## Current capabilities
+
+At the current repository state, Lyndrix Core includes:
+
+- Boot orchestration with the phases `waiting_core`, `loading_modules`, `ready`, and `failed`
+- Vault initialization and unseal support, including optional auto-flow via `LYNDRIX_MASTER_KEY`
+- Persistent plugin state restoration from the database
+- Plugin installation from GitHub repositories and version tags
+- Per-plugin `requirements.txt` installation into a private `vendor/` directory
+- Desired-state plugin reconciliation through `LYNDRIX_PLUGINS_DESIRED`
+- Configurable authentication providers such as `local`, `ldap`, and `oidc`
+- A stable plugin-facing API surface exposed through `core.api`
+
+## Recommended reading path
+
+If you are new to the project, this order works well:
+
+1. Read [Installation and deployment](deployment.md) to understand the runtime setup
+2. Read [Security and Vault](security.md) to understand the secret-management model
+3. Read [System architecture](architecture.md) for the boot flow and subsystem overview
+4. Use [Core components reference](core-components/index.md) for component-level details
+5. Read [Plugin development guide](plugins.md) if you are building extensions
+
+## Key source locations
+
+Helpful starting points in the repository:
+
+- `app/main.py` — application entry point, middleware, and route wiring
+- `app/config.py` — central environment-backed configuration
+- `app/core/bus.py` — the global event bus
+- `app/core/components/*` — internal core components
+- `app/core/api/__init__.py` — stable imports intended for plugin authors
+
+## Documentation build
+
+The documentation site is generated from `mkdocs.yml` and the Markdown files in `docs/`. The repository workflow builds it with `zensical build` and writes the generated site into `.cache/site`.

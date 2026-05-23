@@ -1,8 +1,8 @@
-# Core Components
+# Core Components Reference
 
-This section documents every internal core component of Lyndrix Core, plus the Event Bus and all currently available event topics.
+This section documents the internal core components of Lyndrix Core, together with the event bus and the event catalog.
 
-## Included documentation
+## Included pages
 
 - [Event Bus](event-bus.md)
 - [Event Catalog](events.md)
@@ -17,17 +17,28 @@ This section documents every internal core component of Lyndrix Core, plus the E
 - [System Monitoring Component](system.md)
 - [Vault Component](vault.md)
 
-## Component map (quick overview)
+## Component map
 
 | Component | Responsibility |
 |---|---|
-| Auth | Identity, provider chain, user/group bootstrap, IAM readiness |
-| Boot | Boot phase state machine and module loading trigger |
-| Dashboard | Main runtime dashboard UI route |
-| Database | SQLAlchemy engine lifecycle, reconnect loop, DB readiness event |
-| Git | Event-driven git clone/sync/commit workflows |
-| Notifications | In-app + webhook-driven notifications and outbound event publishing |
-| Plugins | Module discovery, plugin lifecycle, install/update/uninstall, marketplace sync |
-| Settings | Settings UI route for runtime configuration |
-| System Monitoring | Runtime CPU/RAM/disk metrics emission |
-| Vault | Vault health/init/unseal flow and secret-store readiness |
+| Auth | IAM bootstrap, provider-chain initialization, user and group persistence |
+| Boot | Boot phase state machine and module-loading release point |
+| Dashboard | Main authenticated landing page and widget host |
+| Database | SQLAlchemy engine lifecycle, connection retries, readiness signaling |
+| Git | Repository clone/pull/commit workflows triggered by events |
+| Notifications | Notification persistence, UI toasts, and webhook ingestion |
+| Plugins | Discovery, lifecycle, install/update/uninstall, marketplace integration |
+| Settings | Runtime configuration UI |
+| System Monitoring | Periodic CPU, RAM, and disk metrics emission |
+| Vault | Vault health checks, init/unseal handling, secret-store readiness |
+
+## How to use this section
+
+Use these pages when you need to answer questions such as:
+
+- which event starts a component
+- which files implement a specific runtime capability
+- which component owns a route or a lifecycle hook
+- where to extend Lyndrix without breaking the plugin API
+
+For system-wide flow, start with [../architecture.md](../architecture.md). For topic-level behavior, follow with [events.md](events.md).
