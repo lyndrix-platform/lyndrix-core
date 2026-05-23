@@ -23,5 +23,19 @@ nav:
   - Home: index.md
   - Installation: deployment.md
   - Plugin Development: plugins.md
+  - Core Components:
+      - Overview: core-components/index.md
+      - Event Bus: core-components/event-bus.md
+      - Event Catalog: core-components/events.md
+      - Auth: core-components/auth.md
+      - Boot: core-components/boot.md
+      - Dashboard: core-components/dashboard.md
+      - Database: core-components/database.md
+      - Git: core-components/git.md
+      - Notifications: core-components/notifications.md
+      - Plugins: core-components/plugins.md
+      - Settings: core-components/settings.md
+      - System Monitoring: core-components/system.md
+      - Vault: core-components/vault.md
   - Security: security.md
   - Architecture: architecture.md
