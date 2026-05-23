@@ -1,0 +1,72 @@
+{
+  "styles": {
+    "CARD_BASE": "p-6 rounded-2xl shadow-lg border border-slate-200 dark:border-white/5 overflow-hidden lyndrix-card",
+    "CARD_GLASS": "p-6 rounded-2xl shadow-lg border border-slate-200 dark:border-white/5 overflow-hidden lyndrix-glass-card",
+    "CARD_HIGHLIGHT": "p-6 rounded-2xl border-2 border-primary bg-sky-50/50 dark:bg-cyan-500/5",
+    "MODAL_CONTAINER": "!bg-slate-50 dark:!bg-[#0f1629] border border-slate-200 dark:border-white/5 shadow-2xl rounded-2xl",
+
+    "HEADER": "!bg-white/80 dark:!bg-[#0a0e1a]/80 backdrop-blur-md border-b border-slate-200 dark:border-white/5 text-slate-800 dark:text-white",
+    "TAB_BAR": "w-full justify-start border-b border-slate-200 dark:border-white/5 text-slate-500 dark:text-zinc-400",
+
+    "TITLE_H1": "text-3xl font-bold tracking-tight text-slate-900 dark:text-white",
+    "TITLE_H2": "text-2xl font-bold tracking-tight text-slate-800 dark:text-zinc-100",
+    "TITLE_H3": "text-lg font-bold text-slate-800 dark:text-zinc-100",
+    "TEXT_MUTED": "text-sm text-slate-500 dark:text-zinc-400",
+    "LABEL_MINI": "text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-zinc-500",
+
+    "BUTTON_PRIMARY": "w-full py-4 rounded-xl font-bold transition-all text-white lyndrix-btn-primary",
+    "BUTTON_SECONDARY": "w-full py-4 bg-slate-200 dark:bg-white/5 hover:bg-slate-300 dark:hover:bg-white/10 rounded-xl font-bold transition-all text-slate-900 dark:text-white",
+
+    "MENU_CONTAINER": "lyndrix-menu shadow-2xl rounded-2xl overflow-hidden border border-slate-200 dark:border-white/5",
+    "MENU_ITEM": "text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors px-4 py-2",
+    "MENU_ITEM_DANGER": "text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors px-4 py-2",
+
+    "SIDEBAR": "!bg-slate-50 dark:!bg-[#0a0e1a] border-r border-slate-200 dark:border-white/5 !p-4 flex flex-col transition-colors",
+    "NAV_CATEGORY": "px-3 mb-2 mt-4 text-[11px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-widest",
+    "NAV_LINK_BASE": "w-full flex items-center px-3 py-2 no-underline transition-all",
+    "NAV_LINK_ACTIVE": "bg-sky-50 dark:bg-cyan-500/10 text-primary border-l-2 border-primary rounded-r-xl",
+    "NAV_LINK_INACTIVE": "text-slate-500 dark:text-zinc-400 hover:bg-slate-200 dark:hover:bg-white/5 rounded-xl",
+
+    "AUTH_PAGE_BG": "lyndrix-auth-page",
+    "AUTH_CARD": "absolute-center shadow-2xl p-8 rounded-3xl border border-white/5 text-zinc-100 w-full max-w-md lyndrix-auth-card",
+    "AUTH_HERO_ICON": "text-primary mb-2",
+    "AUTH_TITLE": "text-2xl font-bold tracking-tight text-zinc-100",
+    "AUTH_SUBTITLE": "text-center text-sm text-zinc-400 mb-4",
+    "AUTH_INPUT_PROPS": "dark outlined color=primary",
+    "AUTH_BUTTON_PRIMARY": "w-full py-4 rounded-xl font-bold transition-all text-white lyndrix-btn-primary",
+    "AUTH_BUTTON_SSO": "w-full rounded-xl font-bold lyndrix-btn-sso",
+    "AUTH_DIVIDER_LINE": "flex-grow bg-white/10",
+    "AUTH_DIVIDER_LABEL": "text-xs text-zinc-500 uppercase tracking-widest shrink-0",
+    "AUTH_HINT_TEXT": "text-[10px] uppercase tracking-widest text-zinc-500",
+    "AUTH_STATUS_PENDING": "text-xs font-mono text-cyan-300",
+    "AUTH_STATUS_ERROR": "text-xs font-mono text-red-400",
+
+    "PROFILE_CARD": "p-0 rounded-2xl shadow-lg border border-white/5 w-full lyndrix-glass-card",
+    "GRAD_BAR_ACCENT": "h-1 w-full bg-gradient-to-r from-cyan-400 via-blue-400 to-violet-400",
+    "GRAD_BAR_SUCCESS": "h-1 w-full bg-gradient-to-r from-emerald-400 to-teal-400",
+    "GRAD_BAR_INFO": "h-1 w-full bg-gradient-to-r from-sky-400 to-cyan-400",
+    "GRAD_BAR_NEUTRAL": "h-1 w-full bg-white/5",
+
+    "BADGE_NEUTRAL": "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-white/5 text-zinc-300 border border-white/10",
+    "BADGE_ACCENT": "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30",
+    "BADGE_ACCENT_VIOLET": "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30",
+    "BADGE_SUCCESS": "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30",
+
+    "CHIP_ROLE": "text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/5 text-zinc-400 border border-white/10",
+    "CHIP_OVERFLOW": "text-[9px] text-zinc-500",
+    "CHIP_PERMISSION": "text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30",
+
+    "WARNING_BANNER": "w-full items-start gap-2 p-3 mb-1 bg-amber-500/10 border border-amber-500/30 rounded-xl",
+    "WARNING_TEXT": "text-xs text-amber-400/80",
+
+    "ICON_PRIMARY": "text-primary",
+    "ICON_MUTED": "text-zinc-500",
+    "ICON_SUCCESS": "text-emerald-400",
+    "ICON_INFO": "text-cyan-400",
+    "ICON_WARNING": "text-amber-400 shrink-0 mt-0.5",
+
+    "STATUS_TEXT_SUCCESS": "text-xs text-emerald-400",
+    "STATUS_TEXT_ERROR": "text-xs text-red-400",
+    "STATUS_TEXT_NEUTRAL": "text-xs text-zinc-500"
+  }
+}

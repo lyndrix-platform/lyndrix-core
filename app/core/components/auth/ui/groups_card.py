@@ -41,10 +41,9 @@ async def render_groups_card() -> None:
         with ui.column().classes('w-full flex-grow p-5 gap-3'):
             with ui.row().classes('items-center gap-2 mb-1'):
                 ui.icon('group', size='18px').classes('text-teal-400')
-                ui.label(t('Lokale Gruppen & Berechtigungen')).classes(UIStyles.TITLE_H3)
+                ui.label(t('auth.groups.title')).classes(UIStyles.TITLE_H3)
             ui.label(
-                t('Gruppen bündeln Berechtigungen. LDAP-Benutzer erhalten die Rechte einer Gruppe '
-                  'automatisch, wenn ihr LDAP-Gruppen-DN gemappt ist.')
+                t('auth.groups.subtitle')
             ).classes(UIStyles.TEXT_MUTED + ' text-xs mb-2')
 
             with ui.row().classes('w-full gap-4 items-start'):
@@ -58,23 +57,23 @@ async def render_groups_card() -> None:
             # ── New group row ─────────────────────────────────────────────────
             with ui.row().classes('w-full items-center gap-2 mt-2 pt-3 border-t border-zinc-800/40'):
                 new_name_input = ui.input(
-                    placeholder=t('Neuer Gruppenname…')
+                    placeholder=t('auth.groups.new_placeholder')
                 ).props('outlined dark dense').classes('flex-grow max-w-xs')
 
                 def create_group():
                     name = new_name_input.value.strip()
                     if not name:
-                        ui.notify(t('Name darf nicht leer sein.'), type='warning')
+                        ui.notify(t('auth.groups.empty_name'), type='warning')
                         return
                     if group_service.get_by_name(name):
-                        ui.notify(t('Gruppe "%{name}" existiert bereits.', name=name), type='warning')
+                        ui.notify(t('auth.groups.exists', name=name), type='warning')
                         return
                     group_service.create(name)
                     new_name_input.set_value('')
                     _refresh_list()
-                    ui.notify(t('Gruppe "%{name}" erstellt.', name=name), type='positive')
+                    ui.notify(t('auth.groups.created', name=name), type='positive')
 
-                ui.button('Erstellen', icon='add', on_click=create_group).props(
+                ui.button(t('auth.groups.create'), icon='add', on_click=create_group).props(
                     'unelevated size=sm color=teal'
                 )
 
@@ -89,21 +88,20 @@ async def render_groups_card() -> None:
 
         def _render_editor(grp: Group) -> None:
             name_input = ui.input(
-                t('Name'), value=grp.name
+                t('auth.groups.field_name'), value=grp.name
             ).props('outlined dark dense').classes('w-full max-w-md')
             desc_input = ui.input(
-                t('Beschreibung'), value=grp.description or ''
+                t('auth.groups.field_description'), value=grp.description or ''
             ).props('outlined dark dense').classes('w-full max-w-md')
 
-            # ── Permissions ───────────────────────────────────────────────────
-            ui.label(t('Berechtigungen')).classes('text-xs font-bold text-zinc-400 uppercase tracking-wider mt-2')
+            # ── Permissions ──────────────────────────────────────
+            ui.label(t('auth.groups.permissions.title')).classes('text-xs font-bold text-zinc-400 uppercase tracking-wider mt-2')
             ui.label(
-                t('Strings der Form "%{example}". In Views / API-Guards nutzbar mit '
-                  'group_service.user_has_permission(roles, "%{example}").', example='bereich.aktion')
+                t('auth.groups.permissions.hint', example='bereich.aktion')
             ).classes('text-[10px] text-zinc-600')
 
             perm_input = ui.input(
-                placeholder=t('z.B. dashboard.view')
+                placeholder=t('auth.groups.permissions.placeholder')
             ).props('outlined dark dense').classes('w-full max-w-md')
 
             perms_container = ui.row().classes('flex-wrap gap-1 mt-1')
@@ -137,7 +135,7 @@ async def render_groups_card() -> None:
 
             _render_perms()
             perm_input.on('keydown.enter', lambda _: _add_perm())
-            ui.button(t('Hinzufügen'), icon='add', on_click=_add_perm).props(
+            ui.button(t('auth.groups.permissions.add'), icon='add', on_click=_add_perm).props(
                 'outline size=sm color=teal'
             )
 
@@ -156,16 +154,15 @@ async def render_groups_card() -> None:
                     )
 
             # ── LDAP Mappings ─────────────────────────────────────────────────
-            ui.label(t('LDAP-Gruppen-Mapping')).classes(
+            ui.label(t('auth.groups.ldap.title')).classes(
                 'text-xs font-bold text-zinc-400 uppercase tracking-wider mt-3'
             )
             ui.label(
-                t('LDAP-Gruppen-DNs, deren Mitglieder diese Gruppe beim Login erhalten. '
-                  'z.B. cn=ops,ou=groups,dc=example,dc=com')
+                t('auth.groups.ldap.hint')
             ).classes('text-[10px] text-zinc-600')
 
             ldap_input = ui.input(
-                placeholder=t('cn=ops,ou=groups,dc=example,dc=com')
+                placeholder=t('auth.groups.ldap.placeholder')
             ).props('outlined dark dense').classes('w-full max-w-md font-mono')
 
             ldap_container = ui.row().classes('flex-wrap gap-1 mt-1')
@@ -199,17 +196,16 @@ async def render_groups_card() -> None:
 
             _render_ldap()
             ldap_input.on('keydown.enter', lambda _: _add_ldap())
-            ui.button(t('Hinzufügen'), icon='add', on_click=_add_ldap).props(
+            ui.button(t('auth.groups.ldap.add'), icon='add', on_click=_add_ldap).props(
                 'outline size=sm color=sky'
             )
 
-            # ── Mitglieder ────────────────────────────────────────────────────
-            ui.label(t('Mitglieder')).classes(
+            # ── Mitglieder ───────────────────────────────────────────
+            ui.label(t('auth.groups.members.title')).classes(
                 'text-xs font-bold text-zinc-400 uppercase tracking-wider mt-3'
             )
             ui.label(
-                t('Benutzer, die dieser Gruppe explizit zugewiesen sind. '
-                  'LDAP-Benutzer erhalten die Gruppe automatisch beim Login über das LDAP-Mapping.')
+                t('auth.groups.members.hint')
             ).classes('text-[10px] text-zinc-600')
 
             members_container = ui.column().classes('gap-1 mt-1')
@@ -219,7 +215,7 @@ async def render_groups_card() -> None:
                 members = group_service.get_group_members(grp.id)
                 with members_container:
                     if not members:
-                        ui.label(t('Keine direkten Mitglieder.')).classes(
+                        ui.label(t('auth.groups.members.empty')).classes(
                             'text-xs text-zinc-600 italic py-1'
                         )
                     for member in members:
@@ -253,7 +249,7 @@ async def render_groups_card() -> None:
             with ui.row().classes('items-center gap-2 mt-2'):
                 member_select = ui.select(
                     options=non_members,
-                    label=t('Benutzer hinzufügen'),
+                    label=t('auth.groups.members.add_label'),
                 ).props('outlined dark dense').classes('flex-grow max-w-xs')
 
                 def _add_member():
@@ -270,7 +266,7 @@ async def render_groups_card() -> None:
 
                 ui.button(icon='person_add', on_click=_add_member).props(
                     'unelevated size=sm color=teal'
-                ).tooltip(t('Zum Mitglied machen'))
+                ).tooltip(t('auth.groups.members.add_tooltip'))
 
             # ── Save / Delete row ─────────────────────────────────────────────
             with ui.row().classes('w-full items-center gap-3 mt-4 pt-3 border-t border-zinc-800/40'):
@@ -282,7 +278,7 @@ async def render_groups_card() -> None:
                         permissions=list(current_perms),
                         ldap_mappings=list(current_ldap),
                     )
-                    ui.notify(t('Gruppe gespeichert.'), type='positive')
+                    ui.notify(t('auth.groups.saved'), type='positive')
                     _refresh_list()
                     editor_col.clear()
                     selected_id["value"] = None
@@ -290,16 +286,16 @@ async def render_groups_card() -> None:
                 def delete_group():
                     gname = grp.name
                     group_service.delete(grp.id)
-                    ui.notify(t('Gruppe "%{name}" gelöscht.', name=gname), type='positive')
+                    ui.notify(t('auth.groups.deleted', name=gname), type='positive')
                     editor_col.clear()
                     selected_id["value"] = None
                     _refresh_list()
 
-                ui.button(t('Speichern'), icon='save', on_click=save_group).props(
+                ui.button(t('auth.groups.save'), icon='save', on_click=save_group).props(
                     'unelevated size=sm color=primary'
                 )
                 ui.space()
-                ui.button(t('Löschen'), icon='delete', on_click=delete_group).props(
+                ui.button(t('auth.groups.delete'), icon='delete', on_click=delete_group).props(
                     'outline size=sm color=negative'
                 )
 
@@ -308,7 +304,7 @@ async def render_groups_card() -> None:
             groups = group_service.get_all()
             if not groups:
                 with group_list_col:
-                    ui.label(t('Keine Gruppen vorhanden.')).classes(
+                    ui.label(t('auth.groups.list_empty')).classes(
                         'text-xs text-zinc-600 italic p-2'
                     )
                 return
@@ -329,7 +325,7 @@ async def render_groups_card() -> None:
                             perm_count = len(grp.permissions or [])
                             ldap_count = len(grp.ldap_mappings or [])
                             ui.label(
-                                t('%{perm_count} Rechte · %{ldap_count} LDAP-Mappings', perm_count=perm_count, ldap_count=ldap_count)
+                                t('auth.groups.list_summary', perm_count=perm_count, ldap_count=ldap_count)
                             ).classes('text-[10px] text-zinc-500')
 
         # Initial list render

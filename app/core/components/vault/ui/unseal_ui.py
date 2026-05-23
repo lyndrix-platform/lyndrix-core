@@ -1,7 +1,11 @@
 import time
-from nicegui import ui
-from core.bus import bus
 import asyncio
+
+from nicegui import ui
+
+from core.bus import bus
+from core.i18n import t
+from ui.theme import UIStyles, apply_theme
 
 # Rate limiting state
 _unseal_attempts = []
@@ -12,67 +16,77 @@ _LOCKOUT_SECONDS = 60
 def render_unseal_page():
     """Renders a minimal, isolated unseal mask with rate limiting."""
 
-    ui.query('body').style('background-color: #09090b;')
+    apply_theme(page_title="Unseal")
+    ui.query("body").classes(add=UIStyles.AUTH_PAGE_BG)
 
-    with ui.card().classes('absolute-center shadow-2xl p-8 rounded-3xl border border-zinc-800 bg-zinc-900 text-zinc-100 w-full max-w-md'):
-        with ui.column().classes('items-center w-full gap-4'):
-            ui.icon('lock', size='48px').classes('text-indigo-500 mb-2')
-            ui.label('Lyndrix Vault').classes('text-2xl font-bold tracking-tight')
-            ui.label('The system is encrypted. Please enter the Master Key.')\
-                .classes('text-center text-sm text-zinc-400 mb-4')
+    with ui.card().classes(UIStyles.AUTH_CARD):
+        with ui.column().classes("items-center w-full gap-4"):
+            ui.icon("lock", size="48px").classes(UIStyles.AUTH_HERO_ICON)
+            ui.label(t("auth.unseal.title")).classes(UIStyles.AUTH_TITLE)
+            ui.label(t("auth.unseal.subtitle")).classes(UIStyles.AUTH_SUBTITLE)
 
-            master_key = ui.input('Master Key')\
-                .props('dark outlined password autofocus')\
-                .classes('w-full mb-2')
+            master_key = (
+                ui.input(t("auth.unseal.master_key"))
+                .props(f"{UIStyles.AUTH_INPUT_PROPS} password autofocus")
+                .classes("w-full mb-2")
+            )
 
-            status_label = ui.label('').classes('text-xs font-mono')
+            status_label = ui.label("").classes(UIStyles.AUTH_STATUS_PENDING)
 
             async def attempt_unseal():
                 global _unseal_attempts
                 now = time.time()
 
                 # Purge old attempts outside the lockout window
-                _unseal_attempts = [t for t in _unseal_attempts if now - t < _LOCKOUT_SECONDS]
+                _unseal_attempts = [ts for ts in _unseal_attempts if now - ts < _LOCKOUT_SECONDS]
 
                 if len(_unseal_attempts) >= _MAX_ATTEMPTS:
                     remaining = int(_LOCKOUT_SECONDS - (now - _unseal_attempts[0]))
-                    status_label.set_text(f'Too many attempts. Locked for {remaining}s.')
-                    status_label.classes('text-red-500', remove='text-indigo-400')
+                    status_label.set_text(t("auth.unseal.locked_for", seconds=remaining))
+                    status_label.classes(
+                        add=UIStyles.AUTH_STATUS_ERROR,
+                        remove=UIStyles.AUTH_STATUS_PENDING,
+                    )
                     return
 
                 if not master_key.value:
-                    ui.notify('Please enter a key.', type='warning')
+                    ui.notify(t("auth.unseal.empty_key"), type="warning")
                     return
 
                 _unseal_attempts.append(now)
-                status_label.set_text('Decrypting Vault...')
-                status_label.classes('text-indigo-400', remove='text-red-500')
+                status_label.set_text(t("auth.unseal.decrypting"))
+                status_label.classes(
+                    add=UIStyles.AUTH_STATUS_PENDING,
+                    remove=UIStyles.AUTH_STATUS_ERROR,
+                )
 
                 bus.emit("vault:unseal_requested", {"key": master_key.value})
 
-            # FIX: Use NiceGUI's async-aware on_click (passes coroutine properly)
-            master_key.on('keydown.enter', attempt_unseal)
+            master_key.on("keydown.enter", attempt_unseal)
 
-            ui.button('Unlock Vault', on_click=attempt_unseal)\
-                .classes('w-full py-4 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold transition-all')\
-                .props('unelevated')
+            ui.button(t("auth.unseal.submit"), on_click=attempt_unseal).classes(
+                UIStyles.AUTH_BUTTON_PRIMARY
+            ).props("unelevated")
 
-            with ui.row().classes('items-center gap-2 opacity-30 mt-4'):
-                ui.element('div').classes('w-2 h-2 rounded-full bg-emerald-500')
-                ui.label('Kernel Bus Active').classes('text-[10px] uppercase tracking-tighter')
+            with ui.row().classes("items-center gap-2 opacity-30 mt-4"):
+                ui.element("div").classes("w-2 h-2 rounded-full bg-emerald-500")
+                ui.label(t("auth.unseal.bus_active")).classes(UIStyles.AUTH_HINT_TEXT)
 
     # Poll vault connection status in the UI context
     async def check_status():
         from core.services import vault_instance
         if vault_instance.is_connected:
             status_timer.cancel()
-            ui.notify('Vault unlocked successfully!', type='positive')
+            ui.notify(t("auth.unseal.unlocked"), type="positive")
             await asyncio.sleep(0.5)
-            ui.navigate.to('/')
+            ui.navigate.to("/")
 
     status_timer = ui.timer(0.5, check_status)
 
     @bus.subscribe("vault:unseal_failed")
     def on_vault_failed(payload):
-        status_label.set_text('Incorrect Master Key.')
-        status_label.classes('text-red-500', remove='text-indigo-400')
+        status_label.set_text(t("auth.unseal.incorrect_key"))
+        status_label.classes(
+            add=UIStyles.AUTH_STATUS_ERROR,
+            remove=UIStyles.AUTH_STATUS_PENDING,
+        )

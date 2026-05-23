@@ -1,14 +1,133 @@
 {
   "login": {
-    "title": "Sign In",
+    "title": "Lyndrix Login",
     "username": "Username",
     "password": "Password",
     "submit": "Sign In",
     "remember": "Remember me",
-    "failed": "Invalid credentials. Please try again.",
+    "failed": "Sign-in failed: incorrect user or password.",
     "locked": "Account locked.",
+    "empty_creds": "Please enter username and password.",
+    "welcome": "Welcome back, %{name}!",
+    "or": "or",
+    "sso_with": "Sign in with %{provider}",
+    "sso_unavailable": "SSO provider \"%{name}\" is currently unavailable.",
+    "default_creds_hint": "Default: admin / lyndrix",
     "provider_local": "Local (Database)",
     "provider_ldap": "LDAP / Active Directory",
     "provider_oidc": "SSO"
+  },
+  "sso": {
+    "handoff_failed": "SSO sign-in failed or expired."
+  },
+  "unseal": {
+    "title": "Lyndrix Vault",
+    "subtitle": "The system is encrypted. Please enter the Master Key.",
+    "master_key": "Master Key",
+    "decrypting": "Decrypting Vault…",
+    "incorrect_key": "Incorrect Master Key.",
+    "empty_key": "Please enter a key.",
+    "locked_for": "Too many attempts. Locked for %{seconds}s.",
+    "submit": "Unlock Vault",
+    "bus_active": "Kernel Bus Active",
+    "unlocked": "Vault unlocked successfully!"
+  },
+  "user_card": {
+    "default_user": "User",
+    "password_via_provider": "Password is managed by your auth provider \"%{provider}\". Change your password there.",
+    "direct_permissions": "Directly assigned permissions",
+    "logout": "Sign Out"
+  },
+  "password": {
+    "title": "Change Password",
+    "current": "Current password",
+    "new": "New password",
+    "confirm": "Confirm new password",
+    "mismatch": "Passwords do not match.",
+    "submit": "Change Password"
+  },
+  "groups": {
+    "title": "Local Groups & Permissions",
+    "subtitle": "Groups bundle permissions. LDAP users automatically inherit a group's rights when their LDAP group DN is mapped.",
+    "new_placeholder": "New group name…",
+    "create": "Create",
+    "empty_name": "Name must not be empty.",
+    "exists": "Group \"%{name}\" already exists.",
+    "created": "Group \"%{name}\" created.",
+    "saved": "Group saved.",
+    "deleted": "Group \"%{name}\" deleted.",
+    "field_name": "Name",
+    "field_description": "Description",
+    "permissions": {
+      "title": "Permissions",
+      "hint": "Strings of the form \"%{example}\". Usable in views/API guards via group_service.user_has_permission(roles, \"%{example}\").",
+      "placeholder": "e.g. dashboard.view",
+      "add": "Add"
+    },
+    "ldap": {
+      "title": "LDAP Group Mapping",
+      "hint": "LDAP group DNs whose members are granted this group on login. e.g. cn=ops,ou=groups,dc=example,dc=com",
+      "placeholder": "cn=ops,ou=groups,dc=example,dc=com",
+      "add": "Add"
+    },
+    "members": {
+      "title": "Members",
+      "hint": "Users explicitly assigned to this group. LDAP users get this group automatically on login via the LDAP mapping.",
+      "empty": "No direct members.",
+      "add_label": "Add user",
+      "add_tooltip": "Add as member"
+    },
+    "save": "Save",
+    "delete": "Delete",
+    "list_empty": "No groups available.",
+    "list_summary": "%{perm_count} rights · %{ldap_count} LDAP mappings"
+  },
+  "permissions": {
+    "intro": "Permissions are loaded automatically from active modules and plugins. Group assignments take effect on next login. Direct user grants apply immediately (after re-login).",
+    "groups_section": "Groups with this permission",
+    "no_groups": "No group assigned.",
+    "add_group": "Add group",
+    "add_group_tooltip": "Grant this permission to group",
+    "users_section": "Direct user grants",
+    "no_users": "No direct grant.",
+    "add_user": "Add user directly",
+    "add_user_tooltip": "Grant permission directly"
+  },
+  "settings": {
+    "vault_offline_title": "Vault not connected",
+    "vault_offline_hint": "Changes cannot be saved. Configure providers via environment variables (.env).",
+    "save_error": "Save failed: %{err}",
+    "reinit_error": "Saved, but reinitialization failed: %{err}",
+    "saved": "%{section} saved — providers reloaded.",
+    "active_providers": "Active providers",
+    "reload": "Reload",
+    "reloaded": "Providers reloaded.",
+    "error": "Error: %{err}",
+    "chain_hint": "On login, providers are tried in this order. \"Apply\" saves and reloads providers immediately.",
+    "no_providers": "No providers registered.",
+    "ok": "OK",
+    "incomplete": "Incomplete",
+    "provider_chain": "Provider order",
+    "apply": "Apply",
+    "ldap": {
+      "title": "LDAP / Active Directory",
+      "missing_fields": "URL, Bind DN, and password must be filled.",
+      "connecting": "Connecting…",
+      "test": "Test connection"
+    },
+    "oidc": {
+      "title": "OIDC / OAuth2 (Authentik, Keycloak, …)",
+      "quickstart": "Authentik quickstart",
+      "quickstart_text": "In Authentik: Application → Provider → OAuth2/OpenID → enter Redirect URI → copy Client ID / Secret.",
+      "missing_issuer": "Issuer URL must be filled.",
+      "loading_discovery": "Loading discovery…",
+      "test": "Test discovery"
+    },
+    "env_set_via": "Set via %{env_var}",
+    "source": {
+      "env": "ENV",
+      "vault": "Vault",
+      "default": "Default"
+    }
   }
 }

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     ENV_TYPE: str = Field(default="dev")
     LOG_LEVEL: str = "INFO"
     APP_TITLE: str = "LYNDRIX - DEVELOPER MODE"
+    THEME_ENGINE_ENABLED: bool = True
+    THEME_DB_OVERRIDES_ENABLED: bool = False
+    DEFAULT_THEME_ID: str = "default"
     # --- SERVER ---
     PORT: int = 8081
     STORAGE_SECRET: str = "dev_secret_only"
