@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Dashboard component provides the main post-login UI page for operational visibility.
+The Dashboard component owns the main authenticated landing page and provides a place for core and plugin widgets to render operational information.
 
 ## Main locations
 
@@ -12,14 +12,19 @@ The Dashboard component provides the main post-login UI page for operational vis
 
 ## Responsibilities
 
-- Register dashboard page route
-- Render dashboard widgets (including plugin-provided widgets)
-- Present runtime status to authenticated users
+- register the dashboard page route
+- render the default dashboard layout
+- display runtime information to authenticated users
+- host plugin-provided dashboard widgets through the plugin lifecycle hooks
 
 ## Events
 
-The dashboard itself does not actively emit core bus topics. It consumes runtime state provided by other components and UI services.
+The Dashboard component does not currently act as a major event producer. It mainly consumes shared runtime state exposed by the rest of the system.
 
 ## UI endpoint
 
 - `/dashboard`
+
+## Integration notes
+
+Plugins can extend the dashboard by implementing `render_dashboard_widget(ctx)`. That keeps the dashboard extensible without requiring direct edits to the dashboard component itself.

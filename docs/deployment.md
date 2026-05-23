@@ -1,78 +1,157 @@
-# Installation & Deployment
+# Installation and Deployment
 
-## Aktueller Lieferumfang
+This page explains how Lyndrix Core is started in local development, what is included in the repository, and what to keep in mind when deriving a production setup.
 
-Im Repository ist **eine vollständige Development-Deployment-Strecke** enthalten:
+## Deployment model
+
+The repository ships with a complete **development runtime**. It is the fastest way to boot the full stack locally and the best reference point for understanding required services.
+
+The development stack includes:
 
 - `docker/docker-compose.dev.yml`
 - `docker/Dockerfile`
 - `docker/.env.dev`
+- `docker/entrypoint.sh`
 
-Diese Umgebung startet:
+These files start:
 
-- Lyndrix App (`lyndrix`)
-- MariaDB (`db`)
-- HashiCorp Vault (`vault`)
-- Doku-Server (`docs` via zensical)
+- the Lyndrix application container
+- a MariaDB database
+- a HashiCorp Vault instance
+- a documentation preview server
 
-## Development Setup
+## Local development setup
+
+### Prerequisites
+
+- Docker
+- Docker Compose
+
+### Start the stack
 
 ```bash
 git clone https://github.com/lyndrix-platform/lyndrix-core.git
 cd lyndrix-core
-
 docker compose -f docker/docker-compose.dev.yml up -d --build
 ```
 
-Endpoints:
+### Default local endpoints
 
 - App: `http://localhost:8081`
 - Vault UI: `http://localhost:8200`
-- Docs: `http://localhost:8000`
+- Docs preview: `http://localhost:8000`
 
-## Persistenzpfade
+## What the development stack does
 
-`docker-compose.dev.yml` bindet lokale Persistenz unter `.dev/`:
+The development compose file is optimized for fast iteration:
+
+- the app runs with a reload-friendly development workflow
+- repository files are mounted into the container
+- local persistence is stored under `.dev/`
+- the docs container serves the content from `docs/` through Zensical
+
+### Important persistent paths
+
+The development setup stores state in local bind mounts under `.dev/`.
+
+Typical paths are:
 
 - `../.dev/storage:/data/storage`
 - `../.dev/secure_data:/data/security`
 - `../.dev/db_data:/var/lib/mysql`
 - `../.dev/vault_data:/vault/file`
 
-## Plugin-Mounts im Dev-Compose
+These folders are important when you want to inspect local state, reset a broken development environment, or preserve data between restarts.
 
-Die Dev-Compose-Datei enthält optionale Bind-Mounts für externe Plugin-Repositories (z. B. lokale Entwicklung mehrerer Repos). Diese Pfade müssen auf deinem Host existieren oder angepasst werden.
+## Environment and bootstrap configuration
 
-## Produktionsbetrieb
+Important runtime settings are defined in `app/config.py` and can be supplied through environment variables.
 
-Für produktive Umgebungen gilt:
+Frequently used values include:
 
-- eigenes Compose/Kubernetes-Manifest aus dem Dev-Stack ableiten
-- `--reload` deaktivieren
-- starke Secrets setzen (DB + Storage + Vault)
-- `LYNDRIX_MASTER_KEY` nicht unkontrolliert in Produktivsystemen verwenden
-- TLS/Ingress/Reverse-Proxy vorschalten
-- Backups für:
-  - MariaDB-Daten
-  - Vault Storage
-  - `vault_keys.enc` (Pfad: `settings.LYNDRIX_VAULT_KEY_FILE`)
+- `PORT`
+- `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- `VAULT_URL`, `LYNDRIX_MASTER_KEY`
+- `LYNDRIX_ADMIN_USER`, `LYNDRIX_ADMIN_PASSWORD`
+- `LYNDRIX_PLUGINS_DESIRED`, `LYNDRIX_PLUGINS_AUTO_UPDATE`
+- `LYNDRIX_AUTH_PROVIDERS`
 
-## Betriebs-Checks
+For development, the defaults are intentionally convenient. For any shared or production-like environment, replace the default secrets and credentials with secure values.
+
+## Plugin-related mounts in development
+
+The development compose file supports plugin iteration and can be extended with additional bind mounts for external plugin repositories.
+
+That is useful when:
+
+- you develop Lyndrix Core and one or more plugins side by side
+- you want a plugin to update immediately without packaging it first
+- you need to inspect generated plugin dependencies in `vendor/`
+
+If you add or change plugin mounts, ensure that the target host paths actually exist.
+
+## Deriving a production setup
+
+The repository does not ship a complete production deployment manifest. Instead, treat the development compose file as a reference implementation and derive your production setup from it.
+
+A production-ready deployment should usually include:
+
+- a pinned application image instead of a local build
+- TLS termination through a reverse proxy or ingress
+- dedicated persistent storage for the database, Vault, and platform data
+- managed secrets instead of plain environment defaults
+- monitoring, backup, and restore procedures
+- explicit network boundaries between public, application, and data services
+
+## Operational checks
+
+Useful local checks:
 
 ```bash
-# Containerstatus
+# Container status
 docker compose -f docker/docker-compose.dev.yml ps
 
-# Logs
+# Application logs
 docker compose -f docker/docker-compose.dev.yml logs -f lyndrix
 
-# Health (Root erreichbar)
+# Basic health check
 curl -f http://localhost:8081/
 ```
 
-## Update-Strategie (Empfehlung)
+## Update guidance
 
-1. Backup von DB + Vault + `vault_keys.enc`
-2. Neue Version ausrollen
-3. Logs auf Boot-Phasen prüfen (`system:boot_phase`)
-4. Plugin-Status im Plugin-Manager prüfen
+Before any upgrade, create backups for:
+
+- MariaDB data
+- Vault storage
+- `vault_keys.enc` from `settings.LYNDRIX_VAULT_KEY_FILE`
+
+Recommended rollout order:
+
+1. Create backups
+2. Deploy the new application version
+3. Watch the logs for boot events such as `system:boot_phase`
+4. Verify plugin status in the plugin manager UI
+5. Confirm that Vault, database, and login flows are healthy
+
+## Troubleshooting
+
+### The app never becomes ready
+
+Check these first:
+
+- whether Vault is initialized or still sealed
+- whether the database container is reachable
+- whether invalid credentials keep the DB in maintenance mode
+
+### Login works but plugins do not load
+
+Check these next:
+
+- the logs around `iam:ready` and `system:boot_complete`
+- plugin state rows in the database
+- missing plugin dependencies or blocked dependency chains
+
+### Docs preview is unavailable
+
+The docs service depends on the repository content and the documentation build toolchain. Rebuild the compose stack and inspect the `docs` container logs.

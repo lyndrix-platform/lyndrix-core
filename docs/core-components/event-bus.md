@@ -1,49 +1,90 @@
 # Event Bus
 
-The Lyndrix Event Bus (`app/core/bus.py`) is the global async event backbone of the platform.
+The Lyndrix Event Bus in `app/core/bus.py` is the async backbone shared by core components and plugins.
 
-## What it is
+## Purpose
 
-- A topic-based publish/subscribe bus (`topic: payload`)
-- Shared by core components and plugins
-- Supports sync and async handlers
-- Tracks async tasks and logs handler failures centrally
+The bus provides a lightweight publish/subscribe model that lets components communicate without hard-coding direct dependencies.
+
+It is used for:
+
+- startup sequencing
+- readiness signaling
+- plugin lifecycle reactions
+- operational notifications
+- background task tracking
 
 ## Core API
 
-- `bus.subscribe(topic)` → decorator to register a handler
-- `bus.emit(topic, payload)` → publish an event
-- `bus.create_tracked_task(coro, name=...)` → start observable background task
+Main primitives:
+
+- `bus.subscribe(topic)` — decorator that registers a handler
+- `bus.emit(topic, payload)` — publish an event with an optional payload
+- `bus.create_tracked_task(coro, name=...)` — create an observable background task
+
+## Handler model
+
+The bus supports both:
+
+- synchronous handlers
+- asynchronous handlers
+
+Async handlers are wrapped in tracked tasks so that failures are logged centrally rather than disappearing silently.
+
+## Logging behavior
+
+The bus also acts as a logging choke point for runtime events.
+
+Important built-in behaviors:
+
+- very noisy topics such as `system:metrics_update` are logged at lower verbosity
+- sensitive topics such as Vault init and unseal requests are redacted
+- selected large payloads are summarized instead of logged verbatim
+
+That keeps logs useful while reducing accidental data exposure.
+
+## Duplicate subscription protection
+
+The bus tracks subscriber keys per topic and ignores duplicate registrations of the same callback. This helps during reload-heavy development flows and prevents repeated event handling.
 
 ## Plugin integration
 
-Plugins should integrate through `ModuleContext` (`ctx`) instead of directly using the global bus:
+Plugins should not normally import the global bus directly.
+
+Instead, they should use the `ModuleContext` helpers:
 
 - `ctx.subscribe(topic)`
 - `ctx.emit(topic, payload)`
 - `ctx.create_task(coro, name=...)`
 
-This enforces each plugin manifest permission model:
+This ensures the plugin permission model is enforced.
+
+## Permission model for plugins
+
+Plugin manifests define:
 
 - `permissions.subscribe`
 - `permissions.emit`
 
-If a plugin tries to emit/subscribe to a non-permitted topic, Lyndrix blocks the action and logs a warning.
+If a plugin tries to subscribe to or emit a topic that is not allowed, Lyndrix blocks the action and logs a warning.
 
-## Recommended plugin flow
+## Recommended event usage
 
-1. Declare event permissions in the plugin manifest
-2. Register subscriptions in `setup(ctx)`
-3. Emit events only through `ctx.emit(...)`
-4. Use `ctx.create_task(...)` for long-running async work
-5. Keep payloads minimal, stable, and JSON-serializable
+Good plugin and component behavior usually means:
 
-## Event naming convention
+1. keep topic names stable and namespaced, for example `domain:event_name`
+2. keep payloads small and JSON-friendly
+3. use events for cross-component contracts, not for hidden internal state
+4. use tracked tasks for long-running async side effects
+5. avoid placing secrets in event payloads
 
-Use namespaced topics (`domain:event_name`) such as:
+## Examples of common topics
 
+- `system:started`
 - `vault:ready_for_data`
+- `db:connected`
+- `system:boot_complete`
 - `plugin:installed`
 - `git:status_update`
 
-For all currently used topics, see [Event Catalog](events.md).
+For the full list currently used in the repository, see [events.md](events.md).

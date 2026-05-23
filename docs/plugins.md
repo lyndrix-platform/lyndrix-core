@@ -1,101 +1,125 @@
 # Plugin Development Guide
 
-Diese Seite dokumentiert vollständig, wie eigene Plugins für Lyndrix Core entwickelt werden und welche Core-Funktionen dafür bereitstehen.
+This guide explains how to build plugins for Lyndrix Core and how the core runtime interacts with them.
 
-## 1) Grundprinzip
+## Plugin model
 
-Ein Plugin ist ein Python-Paket unter `/app/plugins/<plugin_folder>` mit einem `entrypoint.py`, das mindestens ein `manifest` bereitstellt und über `setup(ctx)` in den Core integriert wird.
+A Lyndrix plugin is a Python package inside `/app/plugins/<plugin_folder>` with an `entrypoint.py` module.
 
-## 2) Verzeichnisstruktur
+At minimum, a plugin provides:
+
+- a `manifest`
+- a `setup(ctx)` function
+
+The manifest tells Lyndrix what the plugin is, what permissions it needs, and how it should behave during activation.
+
+## Directory structure
+
+A typical plugin looks like this:
 
 ```text
 app/plugins/my_plugin/
 ├── entrypoint.py
 ├── requirements.txt        # optional
-├── vendor/                 # wird bei Installation erzeugt (optional)
-├── assets/                 # optional
-└── locales/                # optional, wird automatisch registriert
+├── vendor/                 # generated during install, optional in source repos
+├── assets/                 # optional static assets
+└── locales/                # optional translation files, auto-registered
 ```
 
-Wichtig:
+Rules and conventions:
 
-- Ordnername muss Python-kompatibel sein (`isidentifier()`)
-- Bindestriche werden beim Laden automatisch zu Unterstrichen normalisiert
+- the folder name must be a valid Python identifier
+- if a repository name contains `-`, Lyndrix normalizes it to `_` for imports
+- `requirements.txt` is supported, but dependencies are installed into the plugin-local `vendor/` directory
 
-## 3) Stabile API verwenden
+## Stable plugin API
 
-Für Plugin-Code bevorzugt aus `core.api` importieren:
+Plugin code should import from `core.api` rather than from internal core modules.
 
 ```python
 from core.api import __api_version__, ModuleManifest
 ```
 
-Aktuell:
+Current stable API version:
 
 - `__api_version__ = "1.0.0"`
 
-Das reduziert Abhängigkeit auf interne Pfade.
+The goal is to give plugin authors a stable surface even when the internal core structure evolves.
 
-## 4) Manifest vollständig
+## Manifest fields
 
-`ModuleManifest` (Pydantic) unterstützt:
+`ModuleManifest` supports the following important fields:
 
-- `id` *(required)*: eindeutige ID, empfohlen `lyndrix.plugin.<name>`
-- `name` *(required)*
-- `version` *(required)*
-- `description`, `author`, `icon`
-- `type`: `PLUGIN` oder `CORE` (für eigene Plugins: `PLUGIN`)
-- `ui_route`: Route für Navigation/Seite
-- `permissions.subscribe`: erlaubte Event-Topics
-- `permissions.emit`: erlaubte Event-Topics
-- `permissions.vault_paths`: zusätzliche Vault-Pfade
-- `settings_schema`: frei nutzbar
-- `dependencies`: Liste abhängiger Module
-- `min_core_version`: minimale Core-API-Version
-- `auto_enable_on_install`: Default-Aktivierungszustand
-- `repo_url`: Quell-Repository (für Marketplace/Updates)
+- `id` — required unique ID, typically `lyndrix.plugin.<name>`
+- `name` — display name
+- `version` — plugin version string
+- `description`, `author`, `icon` — metadata for UI and marketplace views
+- `type` — use `PLUGIN` for normal plugins
+- `ui_route` — route mounted by the plugin in the UI
+- `permissions.subscribe` — topics the plugin may subscribe to
+- `permissions.emit` — topics the plugin may emit
+- `permissions.vault_paths` — additional Vault paths if needed
+- `settings_schema` — optional plugin-defined settings metadata
+- `dependencies` — list of required modules or plugins
+- `min_core_version` — minimum supported Lyndrix API/core version
+- `auto_enable_on_install` — whether the plugin should activate automatically
+- `repo_url` — source repository URL used for updates and marketplace metadata
 
-## 5) Lifecycle-Hooks
+## Lifecycle hooks
 
-### Pflicht
+### Required hook
 
-- `setup(ctx)` (sync oder async)
+- `setup(ctx)`
 
-### Optional
+`setup(ctx)` can be synchronous or asynchronous. Lyndrix calls it when the plugin becomes active.
 
-- `teardown(ctx)` bei Deaktivierung
-- `render_settings_ui(ctx)` für Settings-Dialog
-- `render_dashboard_widget(ctx)` für Dashboard-Karte
+### Optional hooks
 
-Module-Status intern:
+- `teardown(ctx)` — cleanup during deactivation or unload
+- `render_settings_ui(ctx)` — render plugin settings inside the platform settings UI
+- `render_dashboard_widget(ctx)` — render dashboard widgets on the main dashboard
+
+## Runtime states
+
+Plugins can move through several internal states:
 
 - `initializing`
 - `active`
 - `disabled`
-- `blocked` (Dependencies nicht erfüllt)
+- `blocked`
 
-## 6) ModuleContext (`ctx`) – was der Core bereitstellt
+`blocked` is used when the plugin is enabled but a declared dependency is not available or not active yet.
 
-`ctx` stellt pro Plugin bereit:
+## ModuleContext
 
-- `ctx.manifest`: Manifest-Objekt
-- `ctx.log`: Plugin-spezifischer Logger
-- `ctx.state`: flüchtiger In-Memory-Zustand
-- `ctx.subscribe(topic)`: Event-Subscription (Permission-checked)
-- `ctx.emit(topic, payload)`: Event-Emission (Permission-checked)
-- `ctx.create_task(coro, name=...)`: getrackte Async-Tasks
-- `ctx.get_secret(key)`: Secret lesen (Vault KV v2)
-- `ctx.set_secret(key, value)`: Secret schreiben (Read-Modify-Write mit Lock)
+Each plugin receives a `ModuleContext` instance named `ctx`. This is the supported bridge into the core runtime.
 
-Vault-Isolation:
+Important members include:
 
-- Core-Module: `core/<manifest.id>`
-- Plugins: `plugins/<manifest.id>`
-- Mountpoint: `lyndrix` (KV v2)
+- `ctx.manifest` — validated manifest object
+- `ctx.log` — plugin-specific logger
+- `ctx.state` — transient in-memory state dictionary
+- `ctx.subscribe(topic)` — permission-checked event subscription decorator
+- `ctx.emit(topic, payload)` — permission-checked event emission
+- `ctx.create_task(coro, name=...)` — tracked async task creation
+- `ctx.get_secret(key)` — read from the plugin Vault namespace
+- `ctx.set_secret(key, value)` — write into the plugin Vault namespace
 
-## 7) Event-System für Plugins
+### Vault isolation
 
-Relevante systemische Topics:
+Secrets are separated by module identity:
+
+- core components use `core/<manifest.id>`
+- plugins use `plugins/<manifest.id>`
+- both are stored inside the Vault mount `lyndrix` using KV v2
+
+This means plugins do not automatically share secret space with each other.
+
+## Event integration
+
+Plugins should communicate through the event bus via `ctx` instead of importing the global bus directly.
+
+Common topics worth knowing include:
 
 - `vault:ready_for_data`
 - `system:boot_complete`
@@ -107,38 +131,47 @@ Relevante systemische Topics:
 - `git:status_update`
 - `ui:needs_refresh`
 
-Wichtig:
+Important rules:
 
-- Nur Events aus `permissions.subscribe` sind abonnierbar
-- Nur Events aus `permissions.emit` sind sendbar
-- Fehler werden geloggt, unerlaubte Operationen werden blockiert
+- every subscribed topic must be declared in `permissions.subscribe`
+- every emitted topic must be declared in `permissions.emit`
+- unauthorized event access is blocked and logged by Lyndrix
 
-## 8) Dependencies im Plugin
+## Dependencies inside a plugin
 
-Wenn `requirements.txt` existiert, installiert der Plugin-Service Pakete nach `vendor/` im Plugin-Ordner.
+If a plugin contains a `requirements.txt`, Lyndrix installs those dependencies during plugin installation or upgrade into the plugin-local `vendor/` folder.
 
-Hinweise:
+This design keeps plugin dependencies isolated from the core application environment.
 
-- Installation erfolgt während Plugin-Install/Upgrade
-- Timeout/Fehler führen zu Abbruch und Cleanup
-- Verdächtige Requirement-Zeilen (z. B. lokale Pfade) werden geblockt
+Notes:
 
-## 9) Installation, Update, Versionierung
+- installation happens before the plugin is moved into its final runtime directory
+- install failures abort the operation and trigger cleanup
+- suspicious requirement lines such as unsafe local-path style entries are rejected
 
-Der Core kann Plugins von GitHub installieren:
+## Installation and versioning
 
-- Quelle: Repository-URL
-- Version: `latest` (Default-Branch ZIP) oder Tag (`v1.2.3`)
-- Upgrade: atomischer Swap mit Backup-Fallback
+Lyndrix can install plugins directly from GitHub repositories.
 
-Zusätzlich:
+Supported flows:
 
-- Tag-Liste wird via GitHub API geladen und gecacht
-- Marketplace-Daten kommen primär aus `lyndrix-plugin-collection` (lokaler Clone) oder HTTP-Fallback
+- install the default branch as `latest`
+- install a specific tag such as `v1.2.3`
+- upgrade an existing plugin through an atomic staging and swap workflow
 
-## 10) Desired Plugins (automatische Soll-Konfiguration)
+During installation, Lyndrix:
 
-Über `LYNDRIX_PLUGINS_DESIRED` können Plugins als gewünschter Zustand definiert werden.
+1. resolves repository metadata through the GitHub API
+2. downloads a branch or tag archive
+3. extracts the archive into a staging directory
+4. validates extraction paths to prevent ZIP path traversal
+5. installs dependencies into `vendor/` if needed
+6. moves the plugin into `/app/plugins`
+7. emits plugin lifecycle events
+
+## Desired plugin state
+
+`LYNDRIX_PLUGINS_DESIRED` allows operators to define plugins that should exist after reconciliation.
 
 Format:
 
@@ -146,20 +179,22 @@ Format:
 https://github.com/org/plugin-a@v1.2.0,https://github.com/org/plugin-b
 ```
 
-Optionen:
+Rules:
 
-- ohne `@version` ⇒ `latest`
-- `LYNDRIX_PLUGINS_AUTO_UPDATE=true` aktualisiert `latest`-Plugins beim Reconcile
+- omit `@version` to mean `latest`
+- set `LYNDRIX_PLUGINS_AUTO_UPDATE=true` to auto-update `latest` plugins during reconcile
 
-## 11) Plugin kann Auth-Provider registrieren
+## Authentication extensions
 
-Plugins können eigene Auth-Provider zur Laufzeit registrieren über Event:
+Plugins can register custom authentication providers at runtime through the event bus.
 
-- `auth:register_provider` mit Payload `{"provider": <AuthProvider instance>}`
+Relevant event:
 
-Dadurch lässt sich die Login-Kette (`LYNDRIX_AUTH_PROVIDERS`) um eigene Provider erweitern.
+- `auth:register_provider` with payload `{"provider": <AuthProvider instance>}`
 
-## 12) Minimales Plugin-Beispiel
+If you do this, the provider ID must also be listed in `LYNDRIX_AUTH_PROVIDERS` so the provider chain can activate it.
+
+## Minimal example
 
 ```python
 from core.api import ModuleManifest
@@ -182,25 +217,45 @@ async def setup(ctx):
         ui.label('Hello from plugin')
 ```
 
-## 13) Best Practices
+## Best practices
 
-- Secrets ausschließlich mit `ctx.get_secret`/`ctx.set_secret`
-- I/O-lastige Arbeit in `ctx.create_task(...)` auslagern
-- `manifest.id` stabil halten (State-Migration)
-- Bei inkompatiblen Core-Änderungen `min_core_version` setzen
-- Plugin-README + Changelog im Plugin-Repo pflegen
+- import from `core.api` whenever possible
+- keep `manifest.id` stable across releases
+- use `ctx.get_secret` and `ctx.set_secret` instead of plain files or env vars
+- move long-running work into `ctx.create_task(...)`
+- declare `min_core_version` when your plugin depends on newer core behavior
+- document plugin behavior in the plugin repository itself
 
-## 14) Troubleshooting
+## Troubleshooting
 
-- Plugin lädt nicht:
-  - `entrypoint.py` vorhanden?
-  - `manifest` gültig?
-  - Ordnername Python-kompatibel?
-- Plugin blockiert:
-  - Abhängigkeiten in `dependencies` aktiv?
-- Secret-Zugriff leer:
-  - Vault offen?
-  - Event `vault:ready_for_data` abgewartet?
-- Update klappt nicht:
-  - Tag existiert?
-  - `requirements.txt` gültig?
+### Plugin does not load
+
+Check:
+
+- `entrypoint.py` exists
+- `manifest` is present and valid
+- the folder name is import-safe
+- the plugin import does not fail due to missing dependencies
+
+### Plugin is blocked
+
+Check:
+
+- whether all dependencies in `dependencies` are installed and active
+- whether the dependent plugins use the expected `manifest.id`
+
+### Secret access returns nothing
+
+Check:
+
+- whether Vault is open
+- whether the plugin waited for `vault:ready_for_data`
+- whether the secret was written under the plugin's own namespace
+
+### Upgrade fails
+
+Check:
+
+- whether the requested tag exists
+- whether the downloaded archive is valid
+- whether `requirements.txt` can be installed cleanly

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Plugins component provides module discovery, plugin lifecycle management, marketplace integration, and installation workflows.
+The Plugins component provides discovery, lifecycle management, marketplace integration, and installation workflows for both built-in modules and user-installed plugins.
 
 ## Main locations
 
@@ -14,12 +14,36 @@ The Plugins component provides module discovery, plugin lifecycle management, ma
 
 ## Responsibilities
 
-- Discover and load core modules + user plugins
-- Enforce manifest validation and dependency order
-- Persist plugin state in DB
-- Install/upgrade/uninstall plugins from GitHub
-- Request and track plugin collection sync via Git component
-- Provide plugin runtime sandbox (`ModuleContext`)
+- discover core components and user plugins from disk
+- import and validate plugin entrypoints and manifests
+- create isolated `ModuleContext` instances
+- persist plugin activation state in the database
+- install, upgrade, reload, disable, and uninstall plugins
+- integrate with GitHub archives and version tags
+- request marketplace collection sync through the Git component
+- trigger UI refreshes after lifecycle changes
+
+## Internal layers
+
+### ModuleManager
+
+Owns runtime loading behavior:
+
+- scans `core/components` and `plugins`
+- validates folder names and manifests
+- restores activation state from `plugin_states`
+- blocks plugins with unmet dependencies
+- activates plugins once the database-backed state is known
+
+### PluginService
+
+Owns package acquisition behavior:
+
+- downloads plugin source from GitHub
+- performs safe ZIP extraction into staging
+- installs plugin dependencies into `vendor/`
+- swaps upgraded plugin directories atomically
+- maintains marketplace metadata and collection caches
 
 ## Events
 
@@ -28,7 +52,7 @@ The Plugins component provides module discovery, plugin lifecycle management, ma
 - `git:status_update`
 - `system:boot_complete`
 - `plugin:files_changed`
-- `db:connected` (fallback activation path)
+- `db:connected`
 
 ### Emits
 
@@ -38,3 +62,10 @@ The Plugins component provides module discovery, plugin lifecycle management, ma
 - `plugin:install_failed`
 - `plugin:files_changed`
 - `ui:needs_refresh`
+
+## Runtime notes
+
+- plugins remain pending until the database-backed activation state can be restored
+- `requirements.txt` without a matching `vendor/` directory is treated as a warning condition
+- repository names with dashes are normalized to underscores for Python imports
+- plugin secret access is scoped through `ModuleContext`
