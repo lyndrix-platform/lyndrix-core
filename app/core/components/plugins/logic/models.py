@@ -42,7 +42,7 @@ class ModuleManifest(BaseModel):
     # --- NEW: Dependency & lifecycle declarations ---
     dependencies: List[ModuleDependency] = Field(default_factory=list)
     min_core_version: Optional[str] = Field(default=None, description="Minimum compatible core API version")
-    auto_enable_on_install: bool = Field(default=True, description="Activate immediately after install")
+    auto_enable_on_install: bool = Field(default=False, description="Activate immediately after install")
     repo_url: Optional[str] = Field(default=None, description="Source repository URL for updates")
 
 
