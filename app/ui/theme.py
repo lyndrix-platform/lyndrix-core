@@ -155,7 +155,27 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
             }})();
         </script>
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+            @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+            @font-face {{
+                font-family: 'Lyndrix System Sans';
+                src:
+                    local('JetBrainsMonoNL Nerd Font Propo'),
+                    local('JetBrainsMono Nerd Font Propo'),
+                    local('JetBrainsMonoNL Nerd Font'),
+                    local('JetBrains Mono');
+                font-display: swap;
+            }}
+
+            @font-face {{
+                font-family: 'Lyndrix System Mono';
+                src:
+                    local('JetBrainsMonoNL Nerd Font Mono'),
+                    local('JetBrainsMono Nerd Font Mono'),
+                    local('JetBrainsMonoNL Nerd Font'),
+                    local('JetBrains Mono');
+                font-display: swap;
+            }}
 
             :root {{
                 --lx-bg: #0a0e1a;
@@ -168,16 +188,18 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
                 --lx-accent: #00d4ff;
                 --lx-accent-2: #0ea5e9;
                 --lx-accent-3: #8b5cf6;
-                --lx-font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                --lx-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+                --lx-font-sans: 'Lyndrix System Sans', 'JetBrainsMonoNL Nerd Font Propo', 'JetBrainsMono Nerd Font Propo', 'JetBrains Mono', 'Noto Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                --lx-font-mono: 'Lyndrix System Mono', 'JetBrainsMonoNL Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+                --q-font-family: var(--lx-font-sans);
                 --lx-radius-sm: 6px;
                 --lx-radius-md: 12px;
                 --lx-radius-lg: 20px;
                 --lx-glow: 0 0 24px rgba(0, 212, 255, 0.25);
             }}
 
+            html,
             body {{
-                font-family: var(--lx-font-sans);
+                font-family: var(--lx-font-sans) !important;
                 transition: background-color 0.3s ease;
                 -webkit-font-smoothing: antialiased;
             }}
