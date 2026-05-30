@@ -54,10 +54,45 @@ _ENV_VAR = "LYNDRIX_SYSTEM_API_KEY"
 class ApiIdentity:
     """Resolved identity for an authenticated API request."""
 
-    method: str                       # "api_key" | "basic" | "session"
+    method: str                       # "api_key" | "user_api_key" | "basic" | "session"
     username: str = "system"
     roles: List[str] = field(default_factory=list)
+    extra_permissions: List[str] = field(default_factory=list)
     is_system: bool = False           # True for the master system API key
+    # When set (non-None), the credential restricts access to this subset of
+    # permissions (used by per-user API keys with explicit scopes).
+    key_scopes: Optional[List[str]] = None
+
+    def allows(self, permission: str) -> bool:
+        """
+        Return True if this identity is authorized for ``permission``.
+
+        - The master system key bypasses all permission checks.
+        - The ``superadmin`` role bypasses permission checks (matches UI convention).
+        - Otherwise the owner's effective permissions are resolved via the
+          group/permission system (Permissions tab).
+        - A scoped per-user key additionally requires the permission to be within
+          its ``key_scopes``.
+        """
+        if self.is_system:
+            return True
+
+        if "superadmin" in self.roles:
+            base_allowed = True
+        else:
+            try:
+                from core.components.auth.logic.group_service import group_service
+
+                base_allowed = group_service.user_has_permission(
+                    self.roles, permission, self.extra_permissions
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(f"API authz check failed for '{permission}': {exc}")
+                base_allowed = False
+
+        if self.key_scopes is not None:
+            return base_allowed and (permission in self.key_scopes)
+        return base_allowed
 
 
 def resolve_system_api_key() -> Optional[str]:
@@ -125,6 +160,44 @@ def _try_api_key(request: Request) -> Optional[ApiIdentity]:
     return None
 
 
+def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
+    """Validate a per-user API key (X-API-Key or Bearer) against the key store."""
+    presented = request.headers.get("X-API-Key") or _extract_bearer(request)
+    if not presented:
+        return None
+
+    try:
+        from core.components.auth.logic.api_key_service import api_key_service
+
+        resolved = api_key_service.verify(presented.strip())
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"API user-key check failed: {exc}")
+        return None
+
+    if resolved is None:
+        return None
+
+    roles: List[str] = []
+    extra: List[str] = []
+    try:
+        from core.components.auth.logic.user_service import user_service
+
+        owner = user_service.get_by_username(resolved.username)
+        if owner is not None:
+            roles = list(getattr(owner, "roles", None) or [])
+            extra = list(getattr(owner, "extra_permissions", None) or [])
+    except Exception:
+        pass
+
+    return ApiIdentity(
+        method="user_api_key",
+        username=resolved.username,
+        roles=roles,
+        extra_permissions=extra,
+        key_scopes=resolved.scopes or None,
+    )
+
+
 def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
     """Validate HTTP Basic credentials against the local IAM."""
     auth = request.headers.get("Authorization", "")
@@ -152,7 +225,13 @@ def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
         return None
 
     roles = list(getattr(user, "roles", None) or [])
-    return ApiIdentity(method="basic", username=str(user.username), roles=roles)
+    extra = list(getattr(user, "extra_permissions", None) or [])
+    return ApiIdentity(
+        method="basic",
+        username=str(user.username),
+        roles=roles,
+        extra_permissions=extra,
+    )
 
 
 def _try_session(request: Request) -> Optional[ApiIdentity]:
@@ -163,7 +242,13 @@ def _try_session(request: Request) -> Optional[ApiIdentity]:
         if is_authenticated():
             username = str(get_user_value("username", "user"))
             roles = list(get_user_value("roles", []) or [])
-            return ApiIdentity(method="session", username=username, roles=roles)
+            extra = list(get_user_value("extra_permissions", []) or [])
+            return ApiIdentity(
+                method="session",
+                username=username,
+                roles=roles,
+                extra_permissions=extra,
+            )
     except Exception:
         # No NiceGUI storage context for this request (typical for pure HTTP
         # clients) — simply skip this method.
@@ -177,7 +262,7 @@ def authenticate_request(request: Request) -> Optional[ApiIdentity]:
 
     Returns ``None`` when the request carries no valid credentials.
     """
-    for method in (_try_api_key, _try_basic_auth, _try_session):
+    for method in (_try_api_key, _try_user_api_key, _try_basic_auth, _try_session):
         identity = method(request)
         if identity is not None:
             return identity
@@ -209,6 +294,30 @@ def optional_api_auth(request: Request) -> Optional[ApiIdentity]:
     return authenticate_request(request)
 
 
+def require_permission(permission: str):
+    """
+    Build a FastAPI dependency that requires authentication *and* a specific
+    permission from the Permissions system (e.g. ``"api:read"`` / ``"api:write"``).
+
+    Authentication failures raise ``401``; authorization failures raise ``403``.
+
+        @app.post("/api/system/config")
+        async def update(... , identity: ApiIdentity = Depends(require_permission("api:write"))):
+            ...
+    """
+
+    def dependency(request: Request) -> ApiIdentity:
+        identity = require_api_auth(request)
+        if not identity.allows(permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required permission: {permission}",
+            )
+        return identity
+
+    return dependency
+
+
 __all__ = [
     "ApiIdentity",
     "resolve_system_api_key",
@@ -216,4 +325,5 @@ __all__ = [
     "authenticate_request",
     "require_api_auth",
     "optional_api_auth",
+    "require_permission",
 ]

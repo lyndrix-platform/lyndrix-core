@@ -58,6 +58,7 @@ from core.api.security import (
     authenticate_request,
     optional_api_auth,
     require_api_auth,
+    require_permission,
     resolve_system_api_key,
     system_api_key_configured,
 )
@@ -125,6 +126,7 @@ __all__ = [
     "authenticate_request",
     "optional_api_auth",
     "require_api_auth",
+    "require_permission",
     "resolve_system_api_key",
     "system_api_key_configured",
     # Health

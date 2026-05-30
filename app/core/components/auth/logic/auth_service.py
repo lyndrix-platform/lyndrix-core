@@ -4,7 +4,7 @@ from core.bus import bus
 from core.logger import get_logger
 from core.components.database.logic.db_service import Base, db_instance
 from .hashing import hash_password, verify_password
-from .models import User, Group  # Group import ensures table is created
+from .models import User, Group, UserApiKey  # noqa: F401 — imports ensure tables are created
 
 log = get_logger("Core:AuthService")
 

@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, JSON
+from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime
+from datetime import datetime
+
 from core.components.database.logic.db_service import Base
 
 
@@ -32,3 +34,25 @@ class Group(Base):
     description = Column(String(255), nullable=True, default="")
     permissions = Column(JSON, default=list)   # List[str]
     ldap_mappings = Column(JSON, default=list)  # List[str]  — LDAP group DNs
+
+
+class UserApiKey(Base):
+    """
+    A per-user API key for machine-to-machine HTTP access.
+
+    The raw key is shown to the user exactly once at creation time; only its
+    SHA-256 hash is stored.  ``scopes`` optionally restricts the key to a subset
+    of the owner's permissions (e.g. ["api:read"]); an empty list means the key
+    inherits the owner's full effective permissions.
+    """
+    __tablename__ = "user_api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), index=True)          # owner username
+    label = Column(String(100), default="API Key")     # human-friendly name
+    prefix = Column(String(16), index=True)            # visible key prefix for display
+    hashed_key = Column(String(64), unique=True, index=True)  # sha256 hex digest
+    scopes = Column(JSON, default=list)                # subset of api:* perms; [] => inherit
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, default=False)

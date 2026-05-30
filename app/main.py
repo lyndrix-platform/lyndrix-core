@@ -21,6 +21,7 @@ from core.api import (
     ApiIdentity,
     optional_api_auth,
     require_api_auth,
+    require_permission,
     system_api_key_configured,
 )
 
@@ -244,10 +245,11 @@ async def global_health():
 
 
 @app.get("/api/system/config", tags=["System"], summary="Get runtime config (sanitized)")
-async def get_runtime_config(identity: ApiIdentity = Depends(require_api_auth)):
+async def get_runtime_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
     """Expose runtime settings from config.py with secrets redacted.
 
-    Requires authentication (system API key, HTTP Basic, or dashboard session).
+    Requires authentication and the ``api:read`` permission (system API key,
+    HTTP Basic, per-user API key, or dashboard session).
     """
     return {
         "status": "ok",
@@ -259,12 +261,13 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_api_auth)):
 @app.post("/api/system/config", tags=["System"], summary="Update runtime config")
 async def set_runtime_config(
     payload: ConfigUpdateRequest,
-    identity: ApiIdentity = Depends(require_api_auth),
+    identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
     """
     Update config keys via API.
 
-    Requires authentication (system API key, HTTP Basic, or dashboard session).
+    Requires authentication and the ``api:write`` permission (system API key,
+    HTTP Basic, per-user API key, or dashboard session).
 
     - `updates`: key/value map of config fields.
     - `persist_in_vault`: if true, writes into `lyndrix/core/settings`.
@@ -347,6 +350,10 @@ async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
         "method": identity.method if identity else None,
         "username": identity.username if identity else None,
         "roles": identity.roles if identity else [],
+        "permissions": {
+            "api:read": identity.allows("api:read") if identity else False,
+            "api:write": identity.allows("api:write") if identity else False,
+        },
         "system_api_key_enabled": system_api_key_configured(),
     }
 
