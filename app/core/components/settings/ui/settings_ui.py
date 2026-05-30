@@ -237,6 +237,7 @@ async def render_settings_page():
                                 ui.icon('api', size='18px').classes('text-sky-400')
                                 ui.label(t('core.settings.system.api_integration')).classes(UIStyles.TITLE_H3)
                             ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                            ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes('text-xs text-zinc-500')
 
                             current_token = ''
                             if vault_instance.is_connected:
@@ -281,6 +282,7 @@ async def render_settings_page():
                             with ui.row().classes('items-center gap-2 mb-1'):
                                 ui.icon('vpn_key', size='18px').classes('text-amber-400')
                                 ui.label('System API Key').classes(UIStyles.TITLE_H3)
+                            ui.label('Env: LYNDRIX_SYSTEM_API_KEY').classes('text-xs text-zinc-500')
 
                             env_key = os.getenv('LYNDRIX_SYSTEM_API_KEY')
                             env_locked = bool(env_key and env_key.strip())
