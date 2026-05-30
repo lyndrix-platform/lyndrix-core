@@ -364,4 +364,15 @@ async def startup_event():
     bus.emit("system:started", {})
 
 
+async def _hydrate_settings_from_vault(payload=None):
+    """Apply UI-saved settings stored in Vault once Vault is available (env wins)."""
+    try:
+        settings.hydrate_from_vault()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"CONFIG: Vault settings hydration failed: {exc}")
+
+
+bus.subscribe("vault:opened")(_hydrate_settings_from_vault)
+
+
 ui.run_with(app, storage_secret=settings.STORAGE_SECRET)
