@@ -6,6 +6,8 @@ import inspect
 import asyncio
 from typing import List
 from sqlalchemy import inspect as sqlalchemy_inspect, text
+from packaging.version import Version, InvalidVersion
+from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from core.logger import get_logger
 from core.bus import bus
 from core.components.database.logic.db_service import db_instance
@@ -130,7 +132,8 @@ class ModuleManager:
                 vendor_path_str = str(vendor_path)
                 if vendor_path_str not in sys.path:
                     log.debug(f"VENDORS: Adding {vendor_path_str} to sys.path for '{module_name}'")
-                    sys.path.insert(0, vendor_path_str)
+                    # Append (not insert at 0) so vendored packages never shadow core packages.
+                    sys.path.append(vendor_path_str)
                     path_added = True
         
         try:
@@ -144,12 +147,16 @@ class ModuleManager:
             manifest = ModuleManifest(**raw_manifest) if isinstance(raw_manifest, dict) else raw_manifest
 
             # Validate manifest constraints
+            validation_issues: List[str] = []
+            critical_issues: List[str] = []
             if is_plugin:
-                issues = self._validate_manifest(manifest)
-                if issues:
-                    log.warning(f"VALIDATION: Plugin '{module_name}' has issues: {'; '.join(issues)}")
-                    # Non-fatal: load but mark as degraded
-                    
+                validation_issues, critical_issues = self._validate_manifest(manifest)
+                if validation_issues:
+                    log.warning(
+                        f"VALIDATION: Plugin '{module_name}' has issues: "
+                        f"{'; '.join(validation_issues)}"
+                    )
+
             if manifest.id in self.registry:
                 return False
 
@@ -160,12 +167,18 @@ class ModuleManager:
                 plugin_dir_path = Path(self.base_path) / "plugins" / module_name
                 register_plugin_locales(plugin_dir_path)
 
-            # Register as initializing/parked
+            # Determine initial status. Any validation issues mark the plugin
+            # as 'degraded'; critical issues additionally block setup.
+            initial_status = "initializing"
+            if is_plugin and validation_issues:
+                initial_status = "degraded"
+
+            # Register as initializing/parked/degraded
             self.registry[manifest.id] = {
                 "manifest": manifest,
                 "module": module,
                 "context": ctx,
-                "status": "initializing" 
+                "status": initial_status
             }
 
             if not is_plugin:
@@ -173,8 +186,14 @@ class ModuleManager:
                 self._execute_setup(manifest.id)
                 log.info(f"LOAD_SUCCESS: CORE '{manifest.name}' is online")
             else:
-                # Plugins wait for the DB event
-                log.info(f"LOAD_PENDING: PLUGIN '{manifest.name}' loaded, awaiting DB state...")
+                if critical_issues:
+                    log.error(
+                        f"LOAD_DEGRADED: PLUGIN '{manifest.name}' loaded but blocked "
+                        f"from activation due to critical issues: {'; '.join(critical_issues)}"
+                    )
+                else:
+                    # Plugins wait for the DB event
+                    log.info(f"LOAD_PENDING: PLUGIN '{manifest.name}' loaded, awaiting DB state...")
 
             return True
 
@@ -222,6 +241,13 @@ class ModuleManager:
         if entry.get("status") == "active":
             return
 
+        # Degraded plugins (critical manifest issues) must not be activated.
+        if entry.get("status") == "degraded":
+            log.warning(
+                f"SETUP_BLOCKED: Module '{module_id}' is degraded; skipping setup()."
+            )
+            return
+
         module = entry["module"]
         ctx = entry["context"]
 
@@ -232,8 +258,16 @@ class ModuleManager:
                     name=f"module_setup:{module_id}"
                 )
             else:
-                module.setup(ctx)
-                entry["status"] = "active"
+                try:
+                    module.setup(ctx)
+                    entry["status"] = "active"
+                except Exception as e:
+                    log.error(f"RUNTIME_ERROR: Sync setup failed for '{module_id}': {e}")
+                    entry["status"] = "failed"
+                    try:
+                        bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
+                    except Exception as emit_err:
+                        log.error(f"BUS_ERROR: Failed to emit plugin:setup_failed for '{module_id}': {emit_err}")
 
     def _persist_plugin_state(self, module_id: str, is_active: bool):
         """Persist plugin activation without duplicating lifecycle work."""
@@ -272,6 +306,13 @@ class ModuleManager:
                 self.registry[module_id]["status"] = "active"
         except Exception as e:
             log.error(f"RUNTIME_ERROR: Async setup failed for '{module_id}': {e}")
+            if module_id in self.registry:
+                self.registry[module_id]["status"] = "failed"
+            # Emit on the global bus directly (bypass plugin permissions in ctx).
+            try:
+                bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
+            except Exception as emit_err:
+                log.error(f"BUS_ERROR: Failed to emit plugin:setup_failed for '{module_id}': {emit_err}")
 
     async def _activate_saved_plugins(self, payload=None):
         """Called when DB connects. Reads states and boots active plugins."""
@@ -480,24 +521,49 @@ class ModuleManager:
         bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} reloaded."})
         return success
 
-    def _validate_manifest(self, manifest: ModuleManifest) -> List[str]:
-        """Validate manifest constraints. Returns list of issues (empty = valid)."""
-        issues = []
+    def _validate_manifest(self, manifest: ModuleManifest):
+        """Validate manifest constraints.
+
+        Returns a tuple ``(issues, critical_issues)`` where ``issues`` is the
+        full list of human-readable problems and ``critical_issues`` is the
+        subset that must block activation (e.g. incompatible core version,
+        missing dependencies, malformed version metadata).
+        """
+        issues: List[str] = []
+        critical: List[str] = []
+
         if manifest.min_core_version:
             from core.api import __api_version__
-            if manifest.min_core_version > __api_version__:
-                issues.append(
-                    f"Requires core API >= {manifest.min_core_version}, "
-                    f"but running {__api_version__}"
-                )
+            try:
+                if Version(manifest.min_core_version) > Version(__api_version__):
+                    msg = (
+                        f"Requires min core version {manifest.min_core_version}, "
+                        f"but running {__api_version__}"
+                    )
+                    issues.append(msg)
+                    critical.append(msg)
+            except InvalidVersion:
+                msg = f"Invalid min_core_version format: '{manifest.min_core_version}'"
+                issues.append(msg)
+                critical.append(msg)
+
         if manifest.dependencies:
             for dep in manifest.dependencies:
                 if dep.id not in self.registry:
-                    issues.append(f"Missing dependency: {dep.id}")
+                    msg = f"Missing dependency: {dep.id}"
+                    issues.append(msg)
+                    critical.append(msg)
+
+        # Non-critical hygiene checks (warn-only, never block activation).
+        if not manifest.description or manifest.description == "No description provided":
+            issues.append("Missing 'description' in manifest")
+        if not manifest.icon or manifest.icon == "extension":
+            issues.append("Missing custom 'icon' in manifest")
 
         # Soft health-contract check: plugins are encouraged to expose health().
         module_entry = self.registry.get(manifest.id)
         if module_entry and not hasattr(module_entry.get("module"), "health"):
+            issues.append("Missing optional 'health(ctx)' function (recommended)")
             log.debug(
                 "HEALTH_CONTRACT: Plugin '%s' does not implement health(ctx). "
                 "Add 'async def health(ctx) -> PluginHealthStatus' to enable "
@@ -505,16 +571,39 @@ class ModuleManager:
                 manifest.id,
             )
 
-        return issues
+        return issues, critical
 
     def _check_dependencies_met(self, manifest: ModuleManifest) -> bool:
-        """Check if all plugin dependencies are loaded and active."""
+        """Check if all plugin dependencies are loaded, active, and version-compatible."""
         if not manifest.dependencies:
             return True
         for dep in manifest.dependencies:
             entry = self.registry.get(dep.id)
             if not entry or entry.get("status") != "active":
                 return False
+
+            # Evaluate optional semver constraint declared on the dependency.
+            constraint = getattr(dep, "version_constraint", None)
+            if constraint and constraint != "*":
+                try:
+                    spec = SpecifierSet(constraint)
+                    dep_version = entry["manifest"].version
+                    if Version(dep_version) not in spec:
+                        log.error(
+                            f"Dependency constraint failed: {manifest.id} requires "
+                            f"{dep.id} {constraint}, found {dep_version}"
+                        )
+                        return False
+                except (InvalidSpecifier, InvalidVersion) as e:
+                    log.error(
+                        f"Invalid version constraint '{constraint}' for {dep.id}: {e}"
+                    )
+                    return False
+                except Exception as e:
+                    log.error(
+                        f"Invalid version constraint '{constraint}' for {dep.id}: {e}"
+                    )
+                    return False
         return True
 
     async def reconcile_desired_plugins(self):

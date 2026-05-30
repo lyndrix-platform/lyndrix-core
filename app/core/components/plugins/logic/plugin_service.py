@@ -7,6 +7,7 @@ import zipfile
 import time
 import tempfile
 import subprocess
+import importlib.util
 import httpx
 import re
 from pathlib import Path
@@ -61,6 +62,59 @@ class PluginService:
                 repo = repo[:-4]
             return parts[-2], repo
         raise ValueError("Invalid GitHub URL format")
+
+    def _read_manifest_id(self, plugin_path: Path) -> str | None:
+        """Best-effort load of manifest.id from an entrypoint.py without
+        importing the module into the application's sys.modules namespace."""
+        entrypoint_path = plugin_path / "entrypoint.py"
+        if not entrypoint_path.exists():
+            return None
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"_lyndrix_manifest_probe_{plugin_path.name}", str(entrypoint_path)
+            )
+            if spec is None or spec.loader is None:
+                return None
+            staged = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(staged)
+            manifest = getattr(staged, "manifest", None)
+            if isinstance(manifest, dict):
+                return manifest.get("id")
+            return getattr(manifest, "id", None)
+        except Exception as e:
+            log.error(f"Failed to read manifest id from '{plugin_path}': {e}")
+            return None
+
+    def _verify_plugin_identity(self, staging_path: str, expected_id: str) -> bool:
+        """Verify the extracted plugin's manifest.id matches the expected
+        identity, to prevent install/upgrade-time substitution attacks."""
+        entrypoint_path = os.path.join(staging_path, "entrypoint.py")
+        if not os.path.exists(entrypoint_path):
+            log.error("No entrypoint.py found in downloaded archive.")
+            return False
+        try:
+            spec = importlib.util.spec_from_file_location("_staged_ep", entrypoint_path)
+            if spec is None or spec.loader is None:
+                log.error("Unable to load entrypoint.py from staged archive.")
+                return False
+            staged = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(staged)
+            raw_manifest = getattr(staged, "manifest", None)
+            actual_id = (
+                raw_manifest.get("id")
+                if isinstance(raw_manifest, dict)
+                else getattr(raw_manifest, "id", None)
+            )
+            if actual_id != expected_id:
+                log.error(
+                    f"Identity mismatch: expected '{expected_id}', "
+                    f"archive contains '{actual_id}'"
+                )
+                return False
+            return True
+        except Exception as e:
+            log.error(f"Failed to verify plugin identity: {e}")
+            return False
 
     def _normalize_repo_name(self, repo_name: str) -> str:
         return repo_name.replace("-", "_")
@@ -318,6 +372,24 @@ class PluginService:
             
             # 4. Dependency Management in Staging
             await self._install_requirements(extracted_dir)
+
+            # 4b. Identity verification — when upgrading an existing plugin we
+            # know the expected manifest.id from the installed copy. Refuse the
+            # swap if the freshly downloaded archive declares a different id.
+            if upgrade and plugin_path.exists():
+                expected_id = self._read_manifest_id(plugin_path)
+                if expected_id and not self._verify_plugin_identity(
+                    str(extracted_dir), expected_id
+                ):
+                    log.error(
+                        f"SECURITY: Aborting upgrade of '{safe_repo_name}' — "
+                        f"plugin identity mismatch."
+                    )
+                    bus.emit(
+                        "plugin:install_failed",
+                        {"repo": repo, "error": "identity_mismatch"},
+                    )
+                    return False
 
             # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes)
             backup_path = self.plugin_dir / f".backup_{safe_repo_name}"

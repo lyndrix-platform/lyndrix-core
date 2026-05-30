@@ -29,7 +29,12 @@ class ModuleContext:
                 self.log.debug(f"SUBSCRIBE: Subscribed to topic: {topic}")
                 global_bus.subscribe(topic)(callback)
             else:
-                self.log.warning(f"PERMISSION: Module not allowed to subscribe to '{topic}'!")
+                message = (
+                    f"Plugin '{self.manifest.id}' is not permitted to subscribe to "
+                    f"'{topic}'. Declare it in permissions.subscribe."
+                )
+                self.log.error(message)
+                raise PermissionError(message)
             return callback
         return decorator
 
@@ -37,7 +42,12 @@ class ModuleContext:
         if topic in self.manifest.permissions.emit or "*" in self.manifest.permissions.emit:
             global_bus.emit(topic, payload)
         else:
-            self.log.warning(f"PERMISSION: Module not allowed to emit '{topic}'!")
+            message = (
+                f"Plugin '{self.manifest.id}' is not permitted to emit topic "
+                f"'{topic}'. Declare it in permissions.emit."
+            )
+            self.log.error(message)
+            raise PermissionError(message)
 
     def create_task(self, coro, *, name: str = None):
         """Create an observed background task owned by this module."""
