@@ -30,6 +30,7 @@ import os
 import stat
 import shutil
 import tempfile
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -61,6 +62,39 @@ def _lazy_git():
 
 def _ensure_base(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_safe_directory(path: Path, repo_id: str) -> None:
+    """
+    Mark *path* as a trusted git safe.directory.
+
+    Docker-mounted volumes can have host ownership that differs from the
+    container runtime user, which causes git to reject repo access with
+    "detected dubious ownership". Registering the path avoids that failure.
+    """
+    repo_path = str(path.resolve())
+    try:
+        current = subprocess.run(
+            ["git", "config", "--global", "--get-all", "safe.directory"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        existing = {line.strip() for line in (current.stdout or "").splitlines() if line.strip()}
+        if repo_path in existing:
+            return
+
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", repo_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        log.info(f"[GIT:{repo_id}] Registered safe.directory: {repo_path}")
+    except Exception as exc:
+        log.warning(
+            f"[GIT:{repo_id}] Could not register safe.directory for {repo_path}: {exc}"
+        )
 
 
 def _init_local(path: Path, repo_id: str) -> None:
@@ -235,6 +269,7 @@ class GitService:
         request_id: str | None = payload.get("request_id")
         path = self._repo_path(repo_id)
         path.mkdir(parents=True, exist_ok=True)
+        _ensure_safe_directory(path, repo_id)
 
         log.info(f"[GIT:SYNC] Starting sync for '{repo_id}' (auth_type={auth_type})")
 
@@ -270,6 +305,7 @@ class GitService:
         is_local: bool = payload.get("is_local", False)
         request_id: str | None = payload.get("request_id")
         path = self._repo_path(repo_id)
+        _ensure_safe_directory(path, repo_id)
 
         log.info(f"[GIT:COMMIT] Starting commit/push for '{repo_id}' (is_local={is_local})")
 
