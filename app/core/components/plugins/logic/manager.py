@@ -560,6 +560,17 @@ class ModuleManager:
         if not manifest.icon or manifest.icon == "extension":
             issues.append("Missing custom 'icon' in manifest")
 
+        # Soft health-contract check: plugins are encouraged to expose health().
+        module_entry = self.registry.get(manifest.id)
+        if module_entry and not hasattr(module_entry.get("module"), "health"):
+            issues.append("Missing optional 'health(ctx)' function (recommended)")
+            log.debug(
+                "HEALTH_CONTRACT: Plugin '%s' does not implement health(ctx). "
+                "Add 'async def health(ctx) -> PluginHealthStatus' to enable "
+                "global health reporting for this plugin.",
+                manifest.id,
+            )
+
         return issues, critical
 
     def _check_dependencies_met(self, manifest: ModuleManifest) -> bool:
