@@ -1,0 +1,370 @@
+"""
+Permissions management API.
+
+Exposes the permission/authorization model (the same one backing the
+Settings → Permissions tab) over HTTP so groups, group permissions and per-user
+direct grants can be inspected and configured programmatically.
+
+Authentication & authorization
+-------------------------------
+All endpoints require a valid API identity (system key, per-user API key, HTTP
+Basic or dashboard session). Reads require the ``api:read`` permission; any
+mutation requires ``api:write``. The master system key and ``superadmin`` role
+bypass these checks, consistent with the rest of the API surface.
+
+Routes (mounted under ``/api/permissions``)::
+
+    GET    /catalog                       list all known permission definitions
+    GET    /groups                        list groups with their permissions
+    POST   /groups                        create a group
+    GET    /groups/{group_id}             read a single group
+    PATCH  /groups/{group_id}             update a group (name/desc/perms/ldap)
+    DELETE /groups/{group_id}             delete a group
+    GET    /users/{username}              effective permissions for a user
+    PUT    /users/{username}/extra        replace a user's direct grants
+    POST   /users/{username}/extra/{perm} add one direct grant
+    DELETE /users/{username}/extra/{perm} remove one direct grant
+"""
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from core.api.security import ApiIdentity, require_permission
+from core.logger import get_logger
+
+log = get_logger("Core:PermissionsAPI")
+
+permissions_router = APIRouter(prefix="/api/permissions", tags=["Permissions"])
+
+
+# ── Pydantic request/response models ─────────────────────────────────────────
+class PermissionDefOut(BaseModel):
+    id: str
+    label: str
+    category: str
+    description: str = ""
+    icon: str = "lock"
+
+
+class GroupOut(BaseModel):
+    id: int
+    name: str
+    description: str = ""
+    permissions: List[str] = Field(default_factory=list)
+    ldap_mappings: List[str] = Field(default_factory=list)
+
+
+class GroupCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    permissions: List[str] = Field(default_factory=list)
+    ldap_mappings: List[str] = Field(default_factory=list)
+    allow_unknown: bool = False
+
+
+class GroupUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    ldap_mappings: Optional[List[str]] = None
+    allow_unknown: bool = False
+
+
+class ExtraPermissionsRequest(BaseModel):
+    permissions: List[str] = Field(default_factory=list)
+    allow_unknown: bool = False
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def _registry():
+    from core.components.auth.logic.permission_registry import permission_registry
+
+    return permission_registry
+
+
+def _known_permission_ids() -> set:
+    reg = _registry()
+    try:
+        reg.scan_from_manifests()
+    except Exception:  # pragma: no cover - manifests optional at this point
+        pass
+    return {p.id for p in reg.get_all()}
+
+
+def _validate_permissions(permissions: List[str], allow_unknown: bool) -> None:
+    """Reject permission IDs that are not in the registry unless explicitly allowed."""
+    if allow_unknown:
+        return
+    known = _known_permission_ids()
+    unknown = sorted({p for p in permissions if p not in known})
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown permission ids: {', '.join(unknown)}. "
+                f"Pass allow_unknown=true to override."
+            ),
+        )
+
+
+def _group_to_out(grp) -> GroupOut:
+    return GroupOut(
+        id=int(grp.id),
+        name=str(grp.name),
+        description=str(grp.description or ""),
+        permissions=list(grp.permissions or []),
+        ldap_mappings=list(grp.ldap_mappings or []),
+    )
+
+
+def _group_service():
+    from core.components.auth.logic.group_service import group_service
+
+    return group_service
+
+
+def _user_service():
+    from core.components.auth.logic.user_service import user_service
+
+    return user_service
+
+
+# ── Catalog ──────────────────────────────────────────────────────────────────
+@permissions_router.get(
+    "/catalog",
+    summary="List all known permission definitions",
+    response_model=Dict[str, object],
+)
+async def list_permission_catalog(
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    """Return every permission id the system knows about (route/plugin/feature/api)."""
+    reg = _registry()
+    try:
+        reg.scan_from_manifests()
+    except Exception:
+        pass
+    perms = [
+        PermissionDefOut(
+            id=p.id,
+            label=p.label,
+            category=p.category,
+            description=p.description,
+            icon=p.icon,
+        ).model_dump()
+        for p in reg.get_all()
+    ]
+    return {
+        "status": "ok",
+        "count": len(perms),
+        "categories": reg.categories(),
+        "permissions": perms,
+    }
+
+
+# ── Groups ───────────────────────────────────────────────────────────────────
+@permissions_router.get("/groups", summary="List groups and their permissions")
+async def list_groups(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    groups = [_group_to_out(g).model_dump() for g in _group_service().get_all()]
+    return {"status": "ok", "count": len(groups), "groups": groups}
+
+
+@permissions_router.post("/groups", summary="Create a group")
+async def create_group(
+    payload: GroupCreateRequest,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Group name must not be empty")
+
+    svc = _group_service()
+    if svc.get_by_name(name):
+        raise HTTPException(status_code=409, detail=f"Group '{name}' already exists")
+
+    _validate_permissions(payload.permissions, payload.allow_unknown)
+    grp = svc.create(
+        name=name,
+        description=payload.description,
+        permissions=sorted(set(payload.permissions)),
+        ldap_mappings=payload.ldap_mappings,
+    )
+    log.info(f"API: Group '{name}' created by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(grp).model_dump()}
+
+
+@permissions_router.get("/groups/{group_id}", summary="Read a single group")
+async def get_group(
+    group_id: int,
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    grp = _group_service().get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    return {"status": "ok", "group": _group_to_out(grp).model_dump()}
+
+
+@permissions_router.patch("/groups/{group_id}", summary="Update a group")
+async def update_group(
+    group_id: int,
+    payload: GroupUpdateRequest,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+
+    permissions = None
+    if payload.permissions is not None:
+        _validate_permissions(payload.permissions, payload.allow_unknown)
+        permissions = sorted(set(payload.permissions))
+
+    name = payload.name.strip() if payload.name is not None else None
+    if name is not None and not name:
+        raise HTTPException(status_code=422, detail="Group name must not be empty")
+    if name and name != grp.name and svc.get_by_name(name):
+        raise HTTPException(status_code=409, detail=f"Group '{name}' already exists")
+
+    updated = svc.update(
+        group_id,
+        name=name,
+        description=payload.description,
+        permissions=permissions,
+        ldap_mappings=payload.ldap_mappings,
+    )
+    log.info(f"API: Group {group_id} updated by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(updated).model_dump()}
+
+
+@permissions_router.delete("/groups/{group_id}", summary="Delete a group")
+async def delete_group(
+    group_id: int,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    name = grp.name
+    ok = svc.delete(group_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete group")
+    log.info(f"API: Group '{name}' ({group_id}) deleted by '{identity.username}'.")
+    return {"status": "ok", "deleted": {"id": group_id, "name": name}}
+
+
+# ── User direct grants ───────────────────────────────────────────────────────
+@permissions_router.get(
+    "/users/{username}", summary="Effective permissions for a user"
+)
+async def get_user_permissions(
+    username: str,
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    user = _user_service().get_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    roles = list(user.roles or [])
+    groups = list(user.groups or [])
+    extra = list(user.extra_permissions or [])
+
+    gsvc = _group_service()
+    from_groups = gsvc.get_permissions_for_roles(roles + groups)
+    effective = sorted(set(from_groups) | set(extra))
+
+    return {
+        "status": "ok",
+        "user": {
+            "username": str(user.username),
+            "roles": roles,
+            "groups": groups,
+            "extra_permissions": extra,
+            "from_groups": from_groups,
+            "effective_permissions": effective,
+        },
+    }
+
+
+@permissions_router.put(
+    "/users/{username}/extra", summary="Replace a user's direct permission grants"
+)
+async def set_user_extra_permissions(
+    username: str,
+    payload: ExtraPermissionsRequest,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    svc = _user_service()
+    if not svc.get_by_username(username):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    _validate_permissions(payload.permissions, payload.allow_unknown)
+    ok = svc.update_extra_permissions(username, payload.permissions)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update permissions")
+    log.info(f"API: Extra permissions for '{username}' set by '{identity.username}'.")
+    user = svc.get_by_username(username)
+    return {
+        "status": "ok",
+        "username": username,
+        "extra_permissions": list(user.extra_permissions or []),
+    }
+
+
+@permissions_router.post(
+    "/users/{username}/extra/{permission:path}",
+    summary="Grant a single direct permission to a user",
+)
+async def add_user_extra_permission(
+    username: str,
+    permission: str,
+    allow_unknown: bool = False,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    svc = _user_service()
+    if not svc.get_by_username(username):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    _validate_permissions([permission], allow_unknown)
+    svc.add_extra_permission(username, permission)
+    log.info(
+        f"API: Granted '{permission}' to '{username}' by '{identity.username}'."
+    )
+    user = svc.get_by_username(username)
+    return {
+        "status": "ok",
+        "username": username,
+        "extra_permissions": list(user.extra_permissions or []),
+    }
+
+
+@permissions_router.delete(
+    "/users/{username}/extra/{permission:path}",
+    summary="Revoke a single direct permission from a user",
+)
+async def remove_user_extra_permission(
+    username: str,
+    permission: str,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    svc = _user_service()
+    if not svc.get_by_username(username):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    svc.remove_extra_permission(username, permission)
+    log.info(
+        f"API: Revoked '{permission}' from '{username}' by '{identity.username}'."
+    )
+    user = svc.get_by_username(username)
+    return {
+        "status": "ok",
+        "username": username,
+        "extra_permissions": list(user.extra_permissions or []),
+    }
+
+
+__all__ = ["permissions_router"]

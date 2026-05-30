@@ -24,6 +24,7 @@ from core.api import (
     require_permission,
     system_api_key_configured,
 )
+from core.api.permissions_api import permissions_router
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
@@ -179,6 +180,9 @@ register_dashboard_routes()
 # Bind the running app to the plugin router registry so plugins that call
 # ctx.register_routes() after startup get mounted immediately.
 router_registry.mount_all(app)
+
+# Permissions management API (groups, group permissions, per-user direct grants).
+app.include_router(permissions_router)
 
 
 # ==========================================
