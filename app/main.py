@@ -2,7 +2,9 @@ from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from nicegui import ui
 from pydantic import BaseModel, ValidationError
 
@@ -45,9 +47,92 @@ app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",
     version=__version__,
+    docs_url=None,
+    redoc_url=None,
 )
 log = get_logger("Core:Main")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
+
+_SWAGGER_DARK_CSS = f"/assets/vendor/swagger-dark.css?v={__version__}"
+
+
+def _custom_openapi():
+    """Augment the OpenAPI schema with auth security schemes.
+
+    Declaring these makes Swagger UI render the **Authorize** button so callers
+    can paste an API key (or Basic credentials) and try authenticated endpoints
+    directly from the docs. The schemes mirror the methods accepted by
+    ``core.api.security``: a system/per-user API key (``X-API-Key`` header or
+    ``Bearer`` token) and HTTP Basic against the local IAM.
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    components = schema.setdefault("components", {})
+    components.setdefault("securitySchemes", {}).update(
+        {
+            "ApiKeyHeader": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "System API key or per-user API key (prefix `lyk_`).",
+            },
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Send the API key as a Bearer token.",
+            },
+            "BasicAuth": {
+                "type": "http",
+                "scheme": "basic",
+                "description": "Dashboard username and password (local IAM).",
+            },
+        }
+    )
+    # Offered globally so the Authorize button applies the chosen credential to
+    # every Try-it-out request. Public endpoints simply ignore it server-side.
+    schema["security"] = [
+        {"ApiKeyHeader": []},
+        {"BearerAuth": []},
+        {"BasicAuth": []},
+    ]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    """Swagger UI with the Lyndrix dark theme and an Authorize button."""
+    response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} — Docs",
+        swagger_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
+        swagger_ui_parameters={"persistAuthorization": True, "tryItOutEnabled": True},
+    )
+    body = response.body.decode("utf-8")
+    body = body.replace(
+        "</head>",
+        f'<link type="text/css" rel="stylesheet" href="{_SWAGGER_DARK_CSS}">\n</head>',
+    )
+    return HTMLResponse(body)
+
+
+@app.get("/redoc", include_in_schema=False)
+async def custom_redoc_html():
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} — ReDoc",
+        redoc_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
+    )
 
 
 def _safe_is_authenticated() -> bool:
