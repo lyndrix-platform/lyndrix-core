@@ -494,6 +494,17 @@ class ModuleManager:
             for dep in manifest.dependencies:
                 if dep.id not in self.registry:
                     issues.append(f"Missing dependency: {dep.id}")
+
+        # Soft health-contract check: plugins are encouraged to expose health().
+        module_entry = self.registry.get(manifest.id)
+        if module_entry and not hasattr(module_entry.get("module"), "health"):
+            log.debug(
+                "HEALTH_CONTRACT: Plugin '%s' does not implement health(ctx). "
+                "Add 'async def health(ctx) -> PluginHealthStatus' to enable "
+                "global health reporting for this plugin.",
+                manifest.id,
+            )
+
         return issues
 
     def _check_dependencies_met(self, manifest: ModuleManifest) -> bool:

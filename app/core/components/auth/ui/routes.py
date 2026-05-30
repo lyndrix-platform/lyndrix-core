@@ -96,7 +96,11 @@ def register_auth_routes():
 def register_oidc_fastapi_routes(fastapi_app: FastAPI):
     """Register the FastAPI HTTP route that handles the OIDC authorization-code callback."""
 
-    @fastapi_app.get("/auth/callback/oidc")
+    @fastapi_app.get(
+        "/auth/callback/oidc",
+        tags=["Authentication"],
+        summary="OIDC callback",
+    )
     async def oidc_callback(
         code: str = "",
         state: str = "",

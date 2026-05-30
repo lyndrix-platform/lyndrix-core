@@ -11,6 +11,10 @@ from core.session import is_authenticated
 # --- FIX: Load exclusively from the facade ---
 from core.services import vault_instance, boot_service
 
+# --- Global API surface ---
+from core.api import __api_version__, __core_version__, router_registry
+from core.api import PluginHealthStatus
+
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
     register_auth_routes,
@@ -19,7 +23,6 @@ from core.components.auth.ui.routes import (
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
-from core.components.notifications.api import register_notification_fastapi_routes
 
 # --- Global UI ---
 from ui.theme import apply_theme
@@ -27,7 +30,11 @@ from ui.maintenance import attach_maintenance_overlay
 from version import __version__
 
 setup_logging()
-app = FastAPI()
+app = FastAPI(
+    title="Lyndrix Core API",
+    description="Core and plugin endpoints for Lyndrix.",
+    version=__version__,
+)
 log = get_logger("Core:Main")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
@@ -132,7 +139,73 @@ register_oidc_fastapi_routes(app)
 register_settings_routes()
 register_vault_routes()
 register_dashboard_routes()
-register_notification_fastapi_routes(app)
+
+# Bind the running app to the plugin router registry so plugins that call
+# ctx.register_routes() after startup get mounted immediately.
+router_registry.mount_all(app)
+
+
+# ==========================================
+# GLOBAL HEALTH CHECK
+# ==========================================
+
+@app.get("/api/health", tags=["System"])
+async def global_health():
+    """
+    Aggregate health report for the Lyndrix core and all active plugins.
+
+    Each plugin may implement ``async def health(ctx) -> PluginHealthStatus``
+    in its ``entrypoint.py``.  Plugins without a ``health`` function are
+    reported as ``"unknown"``.
+
+    The top-level ``status`` field is the worst-case across all components:
+    ``error`` > ``degraded`` > ``unknown`` > ``ok``.
+    """
+    import asyncio
+    import time
+    from core.components.plugins.logic.manager import module_manager
+
+    plugin_results: dict = {}
+    severity_order = {"error": 3, "degraded": 2, "unknown": 1, "ok": 0}
+    worst = "ok"
+
+    async def _call_health(module_id: str, entry: dict):
+        module = entry.get("module")
+        ctx = entry.get("context")
+        if module is None or ctx is None or not hasattr(module, "health"):
+            return module_id, PluginHealthStatus(status="unknown")
+        try:
+            t0 = time.monotonic()
+            result = await asyncio.wait_for(module.health(ctx), timeout=5.0)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if not isinstance(result, PluginHealthStatus):
+                result = PluginHealthStatus(status="unknown", details={"raw": str(result)})
+            result.latency_ms = round(elapsed_ms, 2)
+            return module_id, result
+        except asyncio.TimeoutError:
+            return module_id, PluginHealthStatus(status="error", details={"reason": "health() timed out"})
+        except Exception as exc:
+            return module_id, PluginHealthStatus(status="error", details={"reason": str(exc)})
+
+    tasks = [
+        _call_health(mid, entry)
+        for mid, entry in module_manager.registry.items()
+        if entry.get("manifest") and entry["manifest"].type == "PLUGIN"
+        and entry.get("status") == "active"
+    ]
+
+    gathered = await asyncio.gather(*tasks)
+    for module_id, health_status in gathered:
+        plugin_results[module_id] = health_status.model_dump()
+        if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
+            worst = health_status.status
+
+    return {
+        "status": worst,
+        "core_version": __core_version__,
+        "api_version": __api_version__,
+        "plugins": plugin_results,
+    }
 
 
 @app.on_event("startup")

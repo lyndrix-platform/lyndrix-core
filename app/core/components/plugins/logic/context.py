@@ -2,6 +2,7 @@ from collections import defaultdict
 import threading
 
 import hvac
+from fastapi import APIRouter
 from core.bus import bus as global_bus
 from core.logger import get_logger
 from core.services import vault_instance
@@ -42,6 +43,34 @@ class ModuleContext:
         """Create an observed background task owned by this module."""
         task_name = name or f"module:{self.manifest.id}"
         return global_bus.create_tracked_task(coro, name=task_name)
+
+    # --- HTTP ROUTE REGISTRATION ---
+
+    def register_routes(self, router: APIRouter) -> None:
+        """
+        Mount a FastAPI ``APIRouter`` for this plugin.
+
+        Routes are prefixed at ``/api/plugins/<module-id>/`` and appear in
+        the OpenAPI schema automatically.  Call this inside ``setup(ctx)``.
+
+        Example::
+
+            from core.api import APIRouter
+
+            router = APIRouter()
+
+            @router.get("/status")
+            def status():
+                return {"ok": True}
+
+            def setup(ctx):
+                ctx.register_routes(router)
+        """
+        # Import here to avoid a circular import at module load time.
+        from core.api.router_registry import router_registry
+
+        router_registry.register(self.manifest.id, router)
+        self.log.info("ROUTES: Registered HTTP router at /api/plugins/%s/", self.manifest.id)
 
     # --- VAULT PROXY (Hier war der Einrückungsfehler) ---
 
