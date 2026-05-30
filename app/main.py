@@ -1,9 +1,12 @@
-from fastapi import FastAPI, Request
+from typing import Any, Dict
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from nicegui import ui
+from pydantic import BaseModel, ValidationError
 
-from config import settings
+from config import Settings, settings
 from core.bus import bus
 from core.logger import setup_logging, get_logger
 from core.session import is_authenticated
@@ -14,6 +17,12 @@ from core.services import vault_instance, boot_service
 # --- Global API surface ---
 from core.api import __api_version__, __core_version__, router_registry
 from core.api import PluginHealthStatus
+from core.api import (
+    ApiIdentity,
+    optional_api_auth,
+    require_api_auth,
+    system_api_key_configured,
+)
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
@@ -41,6 +50,32 @@ app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 def _safe_is_authenticated() -> bool:
     return is_authenticated()
+
+
+def _is_sensitive_config_key(key: str) -> bool:
+    upper = key.upper()
+    sensitive_tokens = ("PASSWORD", "SECRET", "MASTER_KEY", "TOKEN", "PRIVATE_KEY", "API_KEY")
+    return any(token in upper for token in sensitive_tokens)
+
+
+def _public_config_snapshot() -> dict:
+    raw = settings.model_dump()
+    sanitized = {
+        key: ("***" if value is not None and _is_sensitive_config_key(key) else value)
+        for key, value in raw.items()
+    }
+    sanitized["DATABASE_URL_SAFE"] = settings.DATABASE_URL_SAFE
+    sanitized["active_auth_providers"] = settings.active_auth_providers
+    sanitized["desired_plugin_specs"] = settings.desired_plugin_specs
+    sanitized["ldap_default_roles"] = settings.ldap_default_roles
+    sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
+    return sanitized
+
+
+class ConfigUpdateRequest(BaseModel):
+    updates: Dict[str, Any]
+    persist_in_vault: bool = True
+    apply_runtime: bool = True
 
 
 # ==========================================
@@ -205,6 +240,114 @@ async def global_health():
         "core_version": __core_version__,
         "api_version": __api_version__,
         "plugins": plugin_results,
+    }
+
+
+@app.get("/api/system/config", tags=["System"], summary="Get runtime config (sanitized)")
+async def get_runtime_config(identity: ApiIdentity = Depends(require_api_auth)):
+    """Expose runtime settings from config.py with secrets redacted.
+
+    Requires authentication (system API key, HTTP Basic, or dashboard session).
+    """
+    return {
+        "status": "ok",
+        "authenticated_as": identity.username,
+        "config": _public_config_snapshot(),
+    }
+
+
+@app.post("/api/system/config", tags=["System"], summary="Update runtime config")
+async def set_runtime_config(
+    payload: ConfigUpdateRequest,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """
+    Update config keys via API.
+
+    Requires authentication (system API key, HTTP Basic, or dashboard session).
+
+    - `updates`: key/value map of config fields.
+    - `persist_in_vault`: if true, writes into `lyndrix/core/settings`.
+    - `apply_runtime`: if true, applies validated Settings fields in-memory.
+    """
+    updates = payload.updates or {}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    settings_fields = set(settings.model_fields.keys())
+    allowed_extra_keys = {"github_token", "system_api_key"}
+    unknown_keys = sorted(set(updates.keys()) - settings_fields - allowed_extra_keys)
+    if unknown_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported config keys: {', '.join(unknown_keys)}",
+        )
+
+    settings_updates = {k: v for k, v in updates.items() if k in settings_fields}
+
+    validated_settings = None
+    if settings_updates:
+        try:
+            merged = settings.model_dump()
+            merged.update(settings_updates)
+            validated_settings = Settings.model_validate(merged)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    if payload.persist_in_vault:
+        if not vault_instance.is_connected:
+            raise HTTPException(
+                status_code=503,
+                detail="Vault is not connected; cannot persist config updates",
+            )
+        try:
+            existing = {}
+            try:
+                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                    path="core/settings",
+                    mount_point="lyndrix",
+                )
+                existing = resp["data"]["data"] or {}
+            except Exception:
+                existing = {}
+
+            existing.update(updates)
+            vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                path="core/settings",
+                mount_point="lyndrix",
+                secret=existing,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to persist settings: {exc}") from exc
+
+    if payload.apply_runtime and validated_settings is not None:
+        for key in settings_updates.keys():
+            setattr(settings, key, getattr(validated_settings, key))
+
+    return {
+        "status": "ok",
+        "updated_keys": sorted(updates.keys()),
+        "persisted_in_vault": payload.persist_in_vault,
+        "applied_runtime": payload.apply_runtime and bool(settings_updates),
+        "config": _public_config_snapshot(),
+    }
+
+
+@app.get("/api/auth/whoami", tags=["Authentication"], summary="Inspect API auth status")
+async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
+    """
+    Public endpoint describing the current API authentication state.
+
+    Returns whether the request is authenticated, by which method, and whether
+    the system API key mechanism is enabled on this instance. Useful for clients
+    to verify their credentials without hitting a protected endpoint.
+    """
+    return {
+        "authenticated": identity is not None,
+        "method": identity.method if identity else None,
+        "username": identity.username if identity else None,
+        "roles": identity.roles if identity else [],
+        "system_api_key_enabled": system_api_key_configured(),
     }
 
 

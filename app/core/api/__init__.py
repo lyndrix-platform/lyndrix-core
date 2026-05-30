@@ -53,6 +53,14 @@ from core.components.plugins.logic.models import ModuleManifest, ModulePermissio
 from core.components.plugins.logic.context import ModuleContext
 from core.components.database.logic.db_service import db_instance, Base
 from core.api.router_registry import router_registry
+from core.api.security import (
+    ApiIdentity,
+    authenticate_request,
+    optional_api_auth,
+    require_api_auth,
+    resolve_system_api_key,
+    system_api_key_configured,
+)
 from version import __version__ as __core_version__
 
 
@@ -112,6 +120,13 @@ __all__ = [
     # HTTP routing
     "APIRouter",
     "router_registry",
+    # API authentication
+    "ApiIdentity",
+    "authenticate_request",
+    "optional_api_auth",
+    "require_api_auth",
+    "resolve_system_api_key",
+    "system_api_key_configured",
     # Health
     "PluginHealthStatus",
     # Core services (lazy)

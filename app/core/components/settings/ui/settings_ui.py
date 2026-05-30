@@ -1,4 +1,5 @@
 import sys
+import os
 import platform
 import psutil
 from nicegui import ui
@@ -162,6 +163,84 @@ async def render_settings_page():
                                 with ui.row().classes(f'items-center gap-1 {vault_cls}'):
                                     ui.icon('lock' if vault_ok else 'lock_open', size='14px')
                                     ui.label(t('core.settings.system.vault_connected') if vault_ok else t('core.settings.system.vault_offline')).classes('text-xs')
+
+                            # ── System API Key ───────────────────────────────
+                            ui.separator().classes('my-3 bg-zinc-800/40')
+                            with ui.row().classes('items-center gap-2 mb-1'):
+                                ui.icon('vpn_key', size='18px').classes('text-amber-400')
+                                ui.label('System API Key').classes(UIStyles.TITLE_H3)
+
+                            env_key = os.getenv('LYNDRIX_SYSTEM_API_KEY')
+                            env_locked = bool(env_key and env_key.strip())
+
+                            if env_locked:
+                                ui.label(
+                                    'Set via the LYNDRIX_SYSTEM_API_KEY environment variable. '
+                                    'The environment value takes precedence and cannot be overridden here.'
+                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                            else:
+                                ui.label(
+                                    'Master key for machine-to-machine API access (header X-API-Key or '
+                                    'Authorization: Bearer). Unset by default — leave empty to keep the '
+                                    'API-key method disabled.'
+                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+
+                            current_api_key = ''
+                            if vault_instance.is_connected:
+                                try:
+                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                                        path='core/settings', mount_point='lyndrix')
+                                    current_api_key = resp['data']['data'].get('system_api_key', '')
+                                except Exception:
+                                    pass
+
+                            api_key_input = ui.input(
+                                'System API Key',
+                                value=current_api_key,
+                                password=True,
+                            ).classes('w-full max-w-md').props('outlined dark')
+                            if env_locked:
+                                api_key_input.props('readonly').classes('opacity-60')
+
+                            def save_api_key():
+                                if env_locked:
+                                    ui.notify(
+                                        'Key is locked by the LYNDRIX_SYSTEM_API_KEY environment variable.',
+                                        type='warning',
+                                    )
+                                    return
+                                if not vault_instance.is_connected:
+                                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+                                    return
+                                try:
+                                    data = {}
+                                    try:
+                                        resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                                            path='core/settings', mount_point='lyndrix')
+                                        data = resp['data']['data']
+                                    except Exception:
+                                        pass
+                                    new_value = (api_key_input.value or '').strip()
+                                    if new_value:
+                                        data['system_api_key'] = new_value
+                                    else:
+                                        data.pop('system_api_key', None)
+                                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                                        path='core/settings', mount_point='lyndrix', secret=data)
+                                    ui.notify(
+                                        'System API key saved.' if new_value else 'System API key cleared (API-key method disabled).',
+                                        type='positive',
+                                    )
+                                except Exception as e:
+                                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+
+                            with ui.row().classes('items-center gap-3 mt-1'):
+                                save_btn = ui.button('Save API Key', icon='save', on_click=save_api_key).props('outline size=sm color=primary')
+                                if env_locked:
+                                    save_btn.props('disable')
+                                    with ui.row().classes('items-center gap-1 text-amber-400'):
+                                        ui.icon('lock', size='14px')
+                                        ui.label('Locked by environment').classes('text-xs')
 
             # ── AUTH ─────────────────────────────────────────────────────────
             with ui.tab_panel(tab_auth).classes('p-0'):

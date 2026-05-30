@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     # Custom plugin providers must also be listed here to be registered at startup.
     LYNDRIX_AUTH_PROVIDERS: str = "local"
 
+    # --- SYSTEM API KEY ---
+    # Master API key for machine-to-machine access to protected HTTP endpoints.
+    # Unset by default: when neither this env var nor the Vault-stored
+    # `system_api_key` is configured, the API-key auth method is DISABLED entirely
+    # (no implicit/empty key is ever accepted). Can also be set via the Settings UI,
+    # which persists it to Vault under lyndrix/core/settings → system_api_key.
+    # Resolution order: this env var > Vault > disabled.
+    LYNDRIX_SYSTEM_API_KEY: Optional[str] = None
+
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
     LYNDRIX_LDAP_URL: Optional[str] = None
