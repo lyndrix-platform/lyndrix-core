@@ -294,7 +294,7 @@ def _show_key_dialog(raw_key: str) -> None:
         ui.label(
             "Copy it now — it will not be shown again."
         ).classes("text-xs text-red-400")
-        key_box = ui.input(value=raw_key).props("outlined dark readonly").classes("w-full")
+        key_box = ui.input(value=raw_key).props("outlined dark readonly").classes("w-full")  # noqa: F841  (rendered widget; reference kept for clarity)
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button(
                 "Copy",

@@ -19,7 +19,7 @@ class VaultInitializer:
                 "initialized": client.sys.is_initialized(),
                 "sealed": client.sys.is_sealed()
             }
-        except:
+        except Exception:
             return {"initialized": False, "sealed": True, "error": "Connection failed"}
 
     def setup_fresh_vault(self, master_key: str):

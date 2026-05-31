@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 
 # --- NEW IMPORTS FOR DATABASE MODEL ---
-from sqlalchemy import Column, String, Boolean, Text
+from sqlalchemy import Column, String, Boolean
 from core.components.database.logic.db_service import Base
 
 # ==========================================

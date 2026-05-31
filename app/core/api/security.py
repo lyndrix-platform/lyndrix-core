@@ -38,7 +38,7 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import HTTPException, Request, status
 
 from core.logger import get_logger
 

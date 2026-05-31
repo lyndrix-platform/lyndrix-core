@@ -1,7 +1,6 @@
 from collections import defaultdict
 import threading
 
-import hvac
 from fastapi import APIRouter
 from core.bus import bus as global_bus
 from core.logger import get_logger

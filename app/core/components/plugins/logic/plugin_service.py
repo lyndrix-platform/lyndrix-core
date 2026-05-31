@@ -264,7 +264,8 @@ class PluginService:
                 if vault_instance.is_connected:
                     resp = vault_instance.client.secrets.kv.v2.read_secret_version(path="core/settings", mount_point="lyndrix")
                     token = resp['data']['data'].get('github_token')
-            except Exception: pass
+            except Exception:
+                pass
             
         if token:
             headers["Authorization"] = f"token {token}"
@@ -291,7 +292,8 @@ class PluginService:
                         c = t.lstrip('v')
                         parts = []
                         for p in re.split(r'[^0-9]+', c):
-                            if p: parts.append(int(p))
+                            if p:
+                                parts.append(int(p))
                         return parts
                     tag_list = sorted(raw_tags, key=parse_v, reverse=True)
                     self._tag_cache[github_url] = tag_list
@@ -330,7 +332,7 @@ class PluginService:
                 resp = await client.get(api_url)
                 
                 if resp.status_code == 403:
-                    log.warning(f"INSTALL: Rate limit hit for metadata. Assuming 'main' branch.")
+                    log.warning("INSTALL: Rate limit hit for metadata. Assuming 'main' branch.")
                     default_branch = "main"
                 else:
                     resp.raise_for_status()

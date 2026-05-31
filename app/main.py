@@ -22,7 +22,6 @@ from core.api import PluginHealthStatus
 from core.api import (
     ApiIdentity,
     optional_api_auth,
-    require_api_auth,
     require_permission,
     system_api_key_configured,
 )

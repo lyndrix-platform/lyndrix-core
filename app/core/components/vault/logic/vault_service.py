@@ -1,6 +1,5 @@
 import hvac
 import os
-import asyncio
 from core.bus import bus
 from core.logger import get_logger
 from config import settings
@@ -66,7 +65,7 @@ class VaultService:
                                 keys = decrypt_vault_keys(auto_key, f.read())
                                 self.client.token = keys['root_token']
                                 log.info("AUTH: Token restored during runtime.")
-                        except:
+                        except Exception:
                             log.error("ERROR: Token restoration failed (Wrong Master Key?)")
 
                 mount_success = await self._ensure_lyndrix_mount()

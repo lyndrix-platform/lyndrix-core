@@ -456,7 +456,8 @@ class ModuleManager:
 
     def _teardown_ui(self, module_id: str):
         """Removes a module's UI components without unloading the code."""
-        if module_id not in self.registry: return
+        if module_id not in self.registry:
+            return
         from main import app as fastapi_app
         manifest = self.registry[module_id]["manifest"]
         if manifest.ui_route:

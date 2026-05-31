@@ -20,7 +20,7 @@ Usage in views / API guards:
       ui.navigate.to('/login')
       return
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from core.logger import get_logger

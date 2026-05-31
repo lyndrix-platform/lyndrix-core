@@ -1,5 +1,4 @@
 import os
-import asyncio
 from core.bus import bus
 from core.logger import get_logger
 from config import settings

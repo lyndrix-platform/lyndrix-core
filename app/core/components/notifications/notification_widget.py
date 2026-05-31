@@ -9,7 +9,7 @@ def render_notification_bell(user_id: str = "admin"):
     with ui.button(icon='notifications').props('flat round color=slate-300') as btn:
         badge = ui.badge('', color='red').props('floating').classes('hidden')
         
-        with ui.menu().classes(f'w-80 max-h-[500px] p-0 flex flex-col {UIStyles.MENU_CONTAINER}') as menu:
+        with ui.menu().classes(f'w-80 max-h-[500px] p-0 flex flex-col {UIStyles.MENU_CONTAINER}'):
             with ui.row().classes('w-full justify-between items-center p-3 border-b border-zinc-800 bg-zinc-900 shrink-0'):
                 ui.label(t('notifications.title')).classes('text-sm font-bold text-slate-200 tracking-wide')
                 ui.button(t('notifications.clear_all'), on_click=lambda: [notification_service.remove_notification(n['id']) for n in notification_service.get_unread_for_user(user_id)]).props('flat dense size=xs color=zinc-400')

@@ -11,7 +11,7 @@ Priority (highest → lowest):
 """
 import os
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from core.logger import get_logger

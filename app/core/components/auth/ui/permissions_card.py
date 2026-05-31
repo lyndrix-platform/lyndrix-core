@@ -19,7 +19,7 @@ log = get_logger("UI:PermissionsCard")
 
 
 async def render_permissions_card() -> None:
-    from core.components.auth.logic.permission_registry import permission_registry, PermissionDef
+    from core.components.auth.logic.permission_registry import permission_registry
     from core.components.auth.logic.group_service import group_service
     from core.components.auth.logic.user_service import user_service
 
@@ -77,12 +77,8 @@ def _render_permission_row(
 
     # Pre-compute which groups and users have this permission
     all_groups = group_service.get_all()
-    all_users  = user_service.get_all()
 
-    groups_with_perm = [g for g in all_groups if pdef.id in (g.permissions or [])]
-    users_with_perm  = [u for u in all_users  if pdef.id in (u.extra_permissions or [])]
     groups_without   = [g for g in all_groups if pdef.id not in (g.permissions or [])]
-    users_without    = [u for u in all_users  if pdef.id not in (u.extra_permissions or [])]
 
     with ui.expansion(
         pdef.label,
