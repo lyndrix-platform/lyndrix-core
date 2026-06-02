@@ -194,6 +194,9 @@ class DockerProvider(BaseSocketProvider):
         networks: Optional[List[str]] = None,
     ) -> SpawnResult:
         """Spawn a Docker container."""
+        import time
+        start_time = time.monotonic()
+        
         try:
             if not self.is_available:
                 return SpawnResult(
@@ -224,6 +227,7 @@ class DockerProvider(BaseSocketProvider):
 
             code, stdout, stderr = await self._run_docker(*cmd)
             if code != 0:
+                elapsed = time.monotonic() - start_time
                 return SpawnResult(
                     container_id="",
                     name=name,
@@ -234,6 +238,9 @@ class DockerProvider(BaseSocketProvider):
             container_id = stdout.strip()
             self.logger.info(f"Spawned container {name} (ID: {container_id[:12]})")
             container_mounts = await self._inspect_mounts(container_id)
+            
+            elapsed = time.monotonic() - start_time
+            self.logger.debug(f"spawn_runner completed in {elapsed:.2f}s: {name}")
 
             return SpawnResult(
                 container_id=container_id,
@@ -243,7 +250,8 @@ class DockerProvider(BaseSocketProvider):
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to spawn container {name}: {e}")
+            elapsed = time.monotonic() - start_time
+            self.logger.error(f"Failed to spawn container {name} after {elapsed:.2f}s: {e}")
             return SpawnResult(
                 container_id="",
                 name=name,

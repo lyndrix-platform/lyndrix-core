@@ -38,6 +38,10 @@ def setup(ctx):
         provider_name = (payload.get("provider") or "docker").strip()
         args = payload.get("args") or {}
         provider = registry.get_provider(provider_name)
+        
+        import time
+        start_time = time.monotonic()
+        ctx.log.debug(f"[socket:request] {operation} from {provider_name} (request_id={request_id[:8]}...)")
 
         response = {
             "request_id": request_id,
@@ -103,6 +107,8 @@ def setup(ctx):
         except Exception as exc:
             response["error"] = str(exc)
 
+        elapsed = time.monotonic() - start_time
+        ctx.log.info(f"[socket:response] {operation} completed in {elapsed:.2f}s (ok={response['ok']}, request_id={request_id[:8]}...)")
         ctx.emit("socket:response", response)
 
 
