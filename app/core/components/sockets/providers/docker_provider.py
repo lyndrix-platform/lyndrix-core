@@ -2,6 +2,8 @@
 
 import docker
 import logging
+import os
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -100,6 +102,31 @@ class DockerProvider(BaseSocketProvider):
         except Exception as e:
             return 0, str(e)
 
+    async def list_containers(self, prefix: str = "aac-runner-") -> list[dict]:
+        """List containers that match a prefix, including runner labels."""
+        try:
+            if not self.client:
+                return []
+
+            result = []
+            for container in self.client.containers.list(all=True):
+                name = getattr(container, "name", "")
+                if not name.startswith(prefix):
+                    continue
+                labels = container.labels or {}
+                result.append(
+                    {
+                        "name": name,
+                        "id": container.id,
+                        "status": container.status,
+                        "labels": labels,
+                    }
+                )
+            return result
+        except Exception as e:
+            self.logger.error(f"Failed to list containers: {e}")
+            return []
+
     async def get_mounts(self) -> Dict[str, Dict[str, str]]:
         """Get mount mappings for all running containers."""
         try:
@@ -119,19 +146,39 @@ class DockerProvider(BaseSocketProvider):
     async def detect_storage_root(self) -> Optional[str]:
         """Detect where storage is mounted inside containers."""
         try:
-            if not self.client:
+            container = self._get_current_container()
+            if not container:
                 return None
 
-            for container in self.client.containers.list():
-                mounts = self._extract_container_mounts(container)
-                if "/data/storage" in mounts:
-                    return mounts["/data/storage"]
-                if "/data" in mounts:
-                    return mounts["/data"]
+            mounts = self._extract_container_mounts(container)
+            if "/data/storage" in mounts:
+                return mounts["/data/storage"]
+            if "/data" in mounts:
+                return mounts["/data"]
         except Exception as e:
             self.logger.error(f"Failed to detect storage root: {e}")
 
         return None
+
+    async def resolve_current_mounts(self, required_targets: Optional[List[str]] = None) -> Dict[str, str]:
+        """Resolve host sources for mount targets inside the current container."""
+        container = self._get_current_container()
+        if not container:
+            return {}
+
+        mounts = self._extract_container_mounts(container)
+        targets = required_targets or [
+            "/data/storage/git_repos",
+            "/data/storage/services",
+            "/data/storage/terraform-providers",
+            "/data/security",
+        ]
+        resolved = {}
+        for target in targets:
+            source = self._resolve_mount_source(target, mounts)
+            if source:
+                resolved[target] = source
+        return resolved
 
     async def spawn_runner(
         self,
@@ -152,6 +199,15 @@ class DockerProvider(BaseSocketProvider):
                     status="failed",
                     error="Docker client unavailable",
                 )
+
+            existing = self._find_container_by_name(name)
+            if existing is not None:
+                try:
+                    if existing.status == "running":
+                        existing.stop(timeout=5)
+                    existing.remove(force=True)
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove existing container {name}: {e}")
 
             env_dict = {ev.key: ev.value for ev in (env_vars or [])}
             volumes_dict = {
@@ -201,3 +257,64 @@ class DockerProvider(BaseSocketProvider):
         except Exception:
             pass
         return mounts
+
+    def _get_current_container(self):
+        """Best-effort lookup for the running Lyndrix core container."""
+        if not self.client:
+            return None
+
+        identifiers = [
+            os.getenv("HOSTNAME"),
+            socket.gethostname(),
+        ]
+        seen = set()
+        for identifier in identifiers:
+            if not identifier or identifier in seen:
+                continue
+            seen.add(identifier)
+            try:
+                return self.client.containers.get(identifier)
+            except Exception:
+                pass
+
+        current_id = socket.gethostname()
+        for container in self.client.containers.list():
+            cid = getattr(container, "id", "")
+            if cid.startswith(current_id):
+                return container
+        return None
+
+    def _find_container_by_name(self, name: str):
+        if not self.client:
+            return None
+        try:
+            return self.client.containers.get(name)
+        except Exception:
+            for container in self.client.containers.list(all=True):
+                if getattr(container, "name", None) == name:
+                    return container
+        return None
+
+    @staticmethod
+    def _resolve_mount_source(target: str, mounts: Dict[str, str]) -> Optional[str]:
+        """Resolve a target path to the best matching host source path."""
+        target = target.rstrip("/")
+        best_match = None
+        best_len = -1
+        for mount_target, mount_source in mounts.items():
+            norm_target = mount_target.rstrip("/")
+            if target == norm_target:
+                return mount_source
+            prefix = norm_target + "/"
+            if target.startswith(prefix) and len(norm_target) > best_len:
+                best_match = (norm_target, mount_source)
+                best_len = len(norm_target)
+
+        if not best_match:
+            return None
+
+        mount_target, mount_source = best_match
+        suffix = target[len(mount_target):].lstrip("/")
+        if not suffix:
+            return mount_source
+        return str(Path(mount_source) / suffix)
