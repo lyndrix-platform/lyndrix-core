@@ -27,6 +27,8 @@ from core.api import (
 )
 from core.api.permissions_api import permissions_router
 from core.socket_manager.api.socket_api import socket_router
+from core.socket_manager.providers.docker_provider import DockerProvider
+from core.socket_manager.registry import get_registry
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
@@ -43,6 +45,11 @@ from ui.maintenance import attach_maintenance_overlay
 from version import __version__
 
 setup_logging()
+
+# Register core socket providers
+registry = get_registry()
+registry.register(DockerProvider, plugin_name="core")
+
 app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",

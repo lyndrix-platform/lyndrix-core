@@ -9,6 +9,7 @@ from typing import Optional
 from core.api import optional_api_auth, require_permission
 from ..logic.mount_guardian import MountGuardian
 from ..providers.docker_provider import DockerProvider
+from ..registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -72,24 +73,16 @@ async def socket_health(
 async def list_providers(
     auth=Depends(optional_api_auth),
 ):
-    """List available socket providers."""
-    providers = []
+    """List all registered socket providers (available and unavailable)."""
+    registry = get_registry()
+    all_providers = registry.list_all()
+    available = registry.list_available()
     
-    docker = get_docker_provider()
-    if docker.is_available:
-        providers.append({
-            "name": docker.name,
-            "socket_path": docker.socket_path,
-            "available": True,
-            "capabilities": {
-                "can_spawn": docker.capabilities.can_spawn,
-                "can_cleanup": docker.capabilities.can_cleanup,
-                "can_query_mounts": docker.capabilities.can_query_mounts,
-                "can_verify_mounts": docker.capabilities.can_verify_mounts,
-            }
-        })
-
-    return {"providers": providers}
+    return {
+        "providers": all_providers,
+        "available": list(available.keys()),
+        "total": len(all_providers),
+    }
 
 
 @socket_router.get("/docker/health")
