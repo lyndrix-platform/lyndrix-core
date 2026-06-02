@@ -209,11 +209,11 @@ class DockerProvider(BaseSocketProvider):
             if remove:
                 cmd.append("--rm")
 
-            for ev in (env_vars or []):
-                cmd.extend(["-e", f"{ev.key}={ev.value}"])
+            for ev in self._normalize_env_vars(env_vars or []):
+                cmd.extend(["-e", f"{ev['key']}={ev['value']}"])
 
-            for mount in (mounts or []):
-                cmd.extend(["-v", f"{mount.source}:{mount.target}:{mount.mode}"])
+            for mount in self._normalize_mounts(mounts or []):
+                cmd.extend(["-v", f"{mount['source']}:{mount['target']}:{mount['mode']}"])
 
             if networks:
                 cmd.extend(["--network", networks[0]])
@@ -250,6 +250,38 @@ class DockerProvider(BaseSocketProvider):
                 status="failed",
                 error=str(e),
             )
+
+    @staticmethod
+    def _normalize_env_vars(items: list) -> list[dict]:
+        normalized = []
+        for item in items:
+            if isinstance(item, dict):
+                key = item.get("key")
+                value = item.get("value")
+            else:
+                key = getattr(item, "key", None)
+                value = getattr(item, "value", None)
+            if key is None or value is None:
+                continue
+            normalized.append({"key": str(key), "value": str(value)})
+        return normalized
+
+    @staticmethod
+    def _normalize_mounts(items: list) -> list[dict]:
+        normalized = []
+        for item in items:
+            if isinstance(item, dict):
+                source = item.get("source")
+                target = item.get("target")
+                mode = item.get("mode", "rw")
+            else:
+                source = getattr(item, "source", None)
+                target = getattr(item, "target", None)
+                mode = getattr(item, "mode", "rw")
+            if not source or not target:
+                continue
+            normalized.append({"source": str(source), "target": str(target), "mode": str(mode or "rw")})
+        return normalized
 
     async def _run_docker(self, *args: str) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
