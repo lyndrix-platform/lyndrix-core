@@ -44,6 +44,7 @@ class NotificationService:
     def _process_notification(self, payload: dict, broadcast: bool):
         notif_id = payload.get("id", str(time.time()))
         action = payload.get("action", "upsert")
+        persist = payload.get("persist", True)
 
         if action == "clear":
             self.remove_notification(notif_id)
@@ -55,27 +56,30 @@ class NotificationService:
         user_id = payload.get("user_id") if not broadcast else None
         
         existing = next((n for n in self.history if n['id'] == notif_id), None)
-        
-        if existing:
-            # Update an existing notification in place and bump it to the top
-            existing.update({
-                'message': message, 'type': type_, 'title': title,
-                'timestamp': time.time(), 'read': False
-            })
-            self.history.remove(existing)
-            self.history.appendleft(existing)
-            notif = existing
-            if self.ctx:
-                self.ctx.log.info(f"[UPDATE: {title}] {message}")
-        else:
-            notif = {
-                "id": notif_id, "timestamp": time.time(), "title": title,
-                "message": message, "type": type_, "user_id": user_id,
-                "read": False
-            }
-            self.history.appendleft(notif)
-            if self.ctx:
-                self.ctx.log.info(f"[{title}] {message}")
+        notif = {
+            "id": notif_id, "timestamp": time.time(), "title": title,
+            "message": message, "type": type_, "user_id": user_id,
+            "read": False
+        }
+
+        if persist:
+            if existing:
+                # Update an existing notification in place and bump it to the top.
+                existing.update({
+                    'message': message, 'type': type_, 'title': title,
+                    'timestamp': time.time(), 'read': False
+                })
+                self.history.remove(existing)
+                self.history.appendleft(existing)
+                notif = existing
+                if self.ctx:
+                    self.ctx.log.info(f"[UPDATE: {title}] {message}")
+            else:
+                self.history.appendleft(notif)
+                if self.ctx:
+                    self.ctx.log.info(f"[{title}] {message}")
+        elif self.ctx:
+            self.ctx.log.info(f"[TRANSIENT: {title}] {message}")
 
         # Only show a floating toast if explicitly requested and NOT an ongoing background task
         if broadcast and payload.get("toast", True) and type_ != "ongoing":
@@ -84,7 +88,8 @@ class NotificationService:
         if self.ctx and payload.get("emit_outbound", True):
             self.ctx.emit("notification:outbound", notif)
 
-        self._save()
+        if persist:
+            self._save()
 
     def broadcast_toast(self, message: str, type_: str):
         toast_type = type_ if type_ in ['positive', 'negative', 'warning', 'info'] else 'info'

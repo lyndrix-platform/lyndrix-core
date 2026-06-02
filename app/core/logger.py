@@ -2,7 +2,6 @@ import logging
 import os
 import sys
 import re
-import json
 from logging.handlers import RotatingFileHandler
 from collections import deque
 
@@ -90,10 +89,10 @@ def setup_logging():
     # Externe Logger dämpfen
     silent_loggers = ["uvicorn", "uvicorn.access", "sqlalchemy.engine", "hvac", "urllib3", "nicegui", "httpx"]
     for name in silent_loggers:
-        l = logging.getLogger(name)
-        l.setLevel(logging.WARNING if not IS_DEBUG else logging.DEBUG)
-        l.propagate = False
-        l.handlers = root_logger.handlers
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.WARNING if not IS_DEBUG else logging.DEBUG)
+        lg.propagate = False
+        lg.handlers = root_logger.handlers
 
     logging.info(f"LOGGING: Initialized with level {'DEBUG' if IS_DEBUG else 'INFO'}")
 

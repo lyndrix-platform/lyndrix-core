@@ -1,9 +1,9 @@
 import os
 import logging
 import re
-from pathlib import Path
-from typing import Optional, List, Dict
-from pydantic import Field, BaseModel
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, List, Dict, Optional
+from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
     # Custom plugin providers must also be listed here to be registered at startup.
     LYNDRIX_AUTH_PROVIDERS: str = "local"
+
+    # --- SYSTEM API KEY ---
+    # Master API key for machine-to-machine access to protected HTTP endpoints.
+    # Unset by default: when neither this env var nor the Vault-stored
+    # `system_api_key` is configured, the API-key auth method is DISABLED entirely
+    # (no implicit/empty key is ever accepted). Can also be set via the Settings UI,
+    # which persists it to Vault under lyndrix/core/settings → system_api_key.
+    # Resolution order: this env var > Vault > disabled.
+    LYNDRIX_SYSTEM_API_KEY: Optional[str] = None
 
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
@@ -200,6 +209,47 @@ class Settings(BaseSettings):
             return []
         return [g.strip() for g in self.LYNDRIX_OIDC_ADMIN_GROUPS.split(",") if g.strip()]
 
+    def hydrate_from_vault(self) -> int:
+        """
+        Apply Vault-stored values (lyndrix/core/settings) onto editable fields.
+
+        Environment variables always win: a field whose OS environment variable
+        is set is never overridden here.  This is what makes UI-saved settings
+        survive a reboot while keeping env vars authoritative.
+
+        Returns the number of fields that were applied.
+        """
+        try:
+            from core.services import vault_instance
+        except Exception:
+            return 0
+        if not getattr(vault_instance, "is_connected", False):
+            return 0
+        try:
+            resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                path="core/settings", mount_point="lyndrix"
+            )
+            data = resp["data"]["data"] or {}
+        except Exception:
+            return 0
+
+        applied = 0
+        for spec in EDITABLE_SETTINGS:
+            if spec.field not in data:
+                continue
+            if os.getenv(spec.field) is not None:
+                continue  # env var takes precedence — never override
+            try:
+                setattr(self, spec.field, spec.coerce(data[spec.field]))
+                applied += 1
+            except Exception:
+                _config_log.warning(
+                    f"CONFIG: Could not apply Vault value for '{spec.field}' — skipped."
+                )
+        if applied:
+            _config_log.info(f"CONFIG: Hydrated {applied} setting(s) from Vault.")
+        return applied
+
     def get(self, env_var: str, vault_key: str = None, default: str = None) -> str:
         """
         Cloud-Native Configuration Hierarchy (ENV First):
@@ -240,3 +290,82 @@ class Settings(BaseSettings):
 
 # Singleton for the entire application
 settings = Settings()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Editable settings registry (System tab in the Settings UI)
+#
+# These are the runtime-relevant application settings that may be changed from
+# the dashboard.  Each entry's `field` is BOTH the Settings attribute and the OS
+# environment variable name (pydantic-settings reads env vars matching the field
+# name).  Values saved from the UI are persisted to Vault (lyndrix/core/settings)
+# and re-applied on boot via Settings.hydrate_from_vault(), unless the matching
+# environment variable is set — in which case the env var always wins.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class EditableSetting:
+    field: str                 # Settings attribute == OS env var name
+    label: str                 # human-friendly label
+    description: str           # shown in the UI (env var key is appended automatically)
+    kind: str = "str"          # "str" | "bool" | "int" | "select"
+    options: List[str] = dataclass_field(default_factory=list)  # for kind == "select"
+    category: str = "Application"
+    sensitive: bool = False
+
+    @property
+    def env_var(self) -> str:
+        return self.field
+
+    def coerce(self, raw: Any) -> Any:
+        """Convert a raw (UI / Vault) value into the proper Python type."""
+        if self.kind == "bool":
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+        if self.kind == "int":
+            return int(raw)
+        return "" if raw is None else str(raw)
+
+
+EDITABLE_SETTINGS: List[EditableSetting] = [
+    # ── Application ──────────────────────────────────────────────────────────
+    EditableSetting("APP_NAME", "Application Name",
+                    "Internal application name used across the platform.",
+                    category="Application"),
+    EditableSetting("APP_TITLE", "Application Title",
+                    "Title shown in the browser tab and UI header.",
+                    category="Application"),
+    EditableSetting("LOG_LEVEL", "Log Level",
+                    "Root logging verbosity. Applied immediately on save.",
+                    kind="select",
+                    options=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                    category="Application"),
+    # ── Localization ─────────────────────────────────────────────────────────
+    EditableSetting("DEFAULT_LOCALE", "Default Locale",
+                    "BCP-47 language tag used when a user has no preference (e.g. en, de).",
+                    category="Localization"),
+    EditableSetting("SUPPORTED_LOCALES", "Supported Locales",
+                    "Comma-separated list of locales offered in the language switcher.",
+                    category="Localization"),
+    # ── Theming ──────────────────────────────────────────────────────────────
+    EditableSetting("THEME_ENGINE_ENABLED", "Theme Engine Enabled",
+                    "Enable the dynamic theme engine.",
+                    kind="bool", category="Theming"),
+    EditableSetting("THEME_DB_OVERRIDES_ENABLED", "Theme DB Overrides Enabled",
+                    "Allow theme overrides stored in the database to take effect.",
+                    kind="bool", category="Theming"),
+    EditableSetting("DEFAULT_THEME_ID", "Default Theme ID",
+                    "Identifier of the theme applied by default.",
+                    category="Theming"),
+    # ── Plugins ──────────────────────────────────────────────────────────────
+    EditableSetting("LYNDRIX_PLUGINS_DESIRED", "Desired Plugins",
+                    "Comma-separated plugin specs to reconcile on boot: "
+                    "https://github.com/org/repo[@version].",
+                    category="Plugins"),
+    EditableSetting("LYNDRIX_PLUGINS_AUTO_UPDATE", "Auto-Update Plugins On Boot",
+                    "Automatically update installed plugins to the latest version on reboot.",
+                    kind="bool", category="Plugins"),
+]
+
+EDITABLE_SETTING_CATEGORIES: List[str] = ["Application", "Localization", "Theming", "Plugins"]

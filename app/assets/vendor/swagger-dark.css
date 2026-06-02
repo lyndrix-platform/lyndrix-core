@@ -1,0 +1,210 @@
+/*
+ * Lyndrix dark theme for Swagger UI.
+ * Loaded after the stock swagger-ui.css to override its light palette with the
+ * zinc/amber palette used across the Lyndrix dashboard.
+ */
+:root {
+  --lx-bg:        #09090b; /* zinc-950 */
+  --lx-surface:   #18181b; /* zinc-900 */
+  --lx-surface-2: #27272a; /* zinc-800 */
+  --lx-border:    #3f3f46; /* zinc-700 */
+  --lx-text:      #e4e4e7; /* zinc-200 */
+  --lx-muted:     #a1a1aa; /* zinc-400 */
+  --lx-accent:    #f59e0b; /* amber-500 */
+  --lx-accent-2:  #fbbf24; /* amber-400 */
+}
+
+body,
+.swagger-ui {
+  background-color: var(--lx-bg) !important;
+  color: var(--lx-text) !important;
+}
+
+/* Top bar */
+.swagger-ui .topbar {
+  background-color: var(--lx-surface) !important;
+  border-bottom: 1px solid var(--lx-border);
+}
+.swagger-ui .topbar .download-url-wrapper .select-label select {
+  border-color: var(--lx-accent);
+}
+
+/* Generic text */
+.swagger-ui,
+.swagger-ui .info li,
+.swagger-ui .info p,
+.swagger-ui .info table,
+.swagger-ui label,
+.swagger-ui .info .title,
+.swagger-ui .opblock-tag,
+.swagger-ui .opblock .opblock-section-header h4,
+.swagger-ui .opblock .opblock-summary-operation-id,
+.swagger-ui .opblock .opblock-summary-path,
+.swagger-ui .opblock .opblock-summary-path__deprecated,
+.swagger-ui .opblock .opblock-summary-description,
+.swagger-ui .opblock-description-wrapper p,
+.swagger-ui .opblock-external-docs-wrapper p,
+.swagger-ui .opblock-title_normal p,
+.swagger-ui table thead tr td,
+.swagger-ui table thead tr th,
+.swagger-ui .parameter__name,
+.swagger-ui .parameter__type,
+.swagger-ui .response-col_status,
+.swagger-ui .response-col_links,
+.swagger-ui .tab li,
+.swagger-ui .scheme-container .schemes > label,
+.swagger-ui .model-title,
+.swagger-ui .model,
+.swagger-ui section.models h4,
+.swagger-ui section.models h5,
+.swagger-ui .responses-inner h4,
+.swagger-ui .responses-inner h5 {
+  color: var(--lx-text) !important;
+}
+
+.swagger-ui .opblock-tag small,
+.swagger-ui .parameter__in,
+.swagger-ui .parameter__extension,
+.swagger-ui .info .base-url,
+.swagger-ui .info .url {
+  color: var(--lx-muted) !important;
+}
+
+/* Links + accents */
+.swagger-ui a,
+.swagger-ui .info a,
+.swagger-ui .info a.link {
+  color: var(--lx-accent-2) !important;
+}
+
+/* Section borders */
+.swagger-ui .opblock-tag {
+  border-bottom: 1px solid var(--lx-border);
+}
+
+/* Operation blocks */
+.swagger-ui .opblock {
+  background: var(--lx-surface) !important;
+  border: 1px solid var(--lx-border);
+  box-shadow: none;
+}
+.swagger-ui .opblock .opblock-section-header {
+  background: var(--lx-surface-2) !important;
+  border-bottom: 1px solid var(--lx-border);
+}
+.swagger-ui .opblock .opblock-summary {
+  border-color: var(--lx-border);
+}
+
+/* Method colour chips kept vivid but on dark surface */
+.swagger-ui .opblock.opblock-get    { background: rgba(56,189,248,.07)  !important; border-color: #38bdf8; }
+.swagger-ui .opblock.opblock-post   { background: rgba(52,211,153,.07)  !important; border-color: #34d399; }
+.swagger-ui .opblock.opblock-put    { background: rgba(251,146,60,.07)  !important; border-color: #fb923c; }
+.swagger-ui .opblock.opblock-patch  { background: rgba(45,212,191,.07)  !important; border-color: #2dd4bf; }
+.swagger-ui .opblock.opblock-delete { background: rgba(248,113,113,.07) !important; border-color: #f87171; }
+
+/* Models / schemas */
+.swagger-ui section.models,
+.swagger-ui section.models.is-open h4 {
+  background: var(--lx-surface) !important;
+  border-color: var(--lx-border);
+}
+.swagger-ui .model-box {
+  background: var(--lx-surface-2) !important;
+}
+.swagger-ui .prop-type   { color: #2dd4bf !important; }
+.swagger-ui .prop-format  { color: var(--lx-muted) !important; }
+.swagger-ui .model .property.primitive { color: var(--lx-muted) !important; }
+
+/* Tables */
+.swagger-ui table tbody tr td {
+  border-color: var(--lx-border);
+  color: var(--lx-text);
+}
+
+/* Inputs / selects / textareas */
+.swagger-ui input[type=text],
+.swagger-ui input[type=password],
+.swagger-ui input[type=search],
+.swagger-ui input[type=email],
+.swagger-ui input[type=file],
+.swagger-ui textarea,
+.swagger-ui select {
+  background: var(--lx-surface-2) !important;
+  color: var(--lx-text) !important;
+  border: 1px solid var(--lx-border) !important;
+}
+.swagger-ui textarea {
+  background: #0d0d0f !important;
+}
+.swagger-ui input::placeholder,
+.swagger-ui textarea::placeholder { color: #71717a !important; }
+
+/* Buttons */
+.swagger-ui .btn {
+  color: var(--lx-text);
+  border-color: var(--lx-border);
+  background: var(--lx-surface-2);
+}
+.swagger-ui .btn:hover { box-shadow: none; border-color: var(--lx-accent); }
+.swagger-ui .btn.authorize {
+  color: var(--lx-accent-2);
+  border-color: var(--lx-accent);
+  background: rgba(245,158,11,.08);
+}
+.swagger-ui .btn.authorize svg { fill: var(--lx-accent-2); }
+.swagger-ui .btn.execute {
+  background: var(--lx-accent);
+  border-color: var(--lx-accent);
+  color: #18181b;
+}
+
+/* Authorize modal */
+.swagger-ui .dialog-ux .modal-ux {
+  background: var(--lx-surface) !important;
+  border: 1px solid var(--lx-border);
+}
+.swagger-ui .dialog-ux .modal-ux-header h3,
+.swagger-ui .dialog-ux .modal-ux-content h4,
+.swagger-ui .dialog-ux .modal-ux-content p,
+.swagger-ui .dialog-ux .modal-ux-content label {
+  color: var(--lx-text) !important;
+}
+.swagger-ui .auth-container { border-color: var(--lx-border); }
+
+/* Scheme / servers container */
+.swagger-ui .scheme-container {
+  background: var(--lx-surface) !important;
+  box-shadow: 0 1px 0 var(--lx-border);
+}
+
+/* Code / highlighted blocks */
+.swagger-ui .highlight-code,
+.swagger-ui .microlight,
+.swagger-ui .responses-inner pre,
+.swagger-ui .opblock-body pre.microlight {
+  background: #0d0d0f !important;
+  color: #e4e4e7 !important;
+}
+
+/* Response status colours */
+.swagger-ui .response-col_status { color: var(--lx-text) !important; }
+
+/* Markdown blocks */
+.swagger-ui .renderedMarkdown code,
+.swagger-ui code {
+  background: var(--lx-surface-2);
+  color: var(--lx-accent-2);
+}
+
+/* Loading / errors */
+.swagger-ui .errors-wrapper {
+  background: rgba(248,113,113,.08);
+  border-color: #f87171;
+}
+.swagger-ui .errors-wrapper .error-wrapper * { color: #fecaca !important; }
+
+/* Filter input */
+.swagger-ui .filter .operation-filter-input {
+  border-color: var(--lx-border);
+}

@@ -1,6 +1,6 @@
 import os
 import json
-from argon2 import PasswordHasher, low_level
+from argon2 import low_level
 from Crypto.Cipher import AES
 from config import settings
 

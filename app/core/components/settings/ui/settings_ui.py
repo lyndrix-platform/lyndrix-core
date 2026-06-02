@@ -1,4 +1,5 @@
 import sys
+import os
 import platform
 import psutil
 from nicegui import ui
@@ -27,6 +28,116 @@ def _kv_row(label: str, value: str, mono: bool = False, value_cls: str = ''):
         cls = 'text-sm font-mono' if mono else 'text-sm'
         cls += f' {value_cls}' if value_cls else ' text-zinc-100'
         ui.label(value).classes(cls)
+
+
+def _render_editable_settings_card() -> None:
+    """
+    Render the editable application settings.
+
+    Values are persisted to Vault (lyndrix/core/settings) and applied to the live
+    Settings object immediately.  Fields whose OS environment variable is set are
+    shown read-only because the env var overrides them on the next boot.
+    """
+    from config import EDITABLE_SETTINGS, EDITABLE_SETTING_CATEGORIES, settings
+
+    widgets: dict = {}
+    locked: dict = {}
+
+    with ui.card().classes(UIStyles.CARD_GLASS + ' w-full').style('padding: 0; flex-wrap: nowrap'):
+        ui.element('div').classes('h-1 w-full bg-gradient-to-r from-indigo-400 via-sky-400 to-cyan-400')
+        with ui.column().classes('w-full flex-grow p-5 gap-2'):
+            with ui.row().classes('items-center gap-2 mb-1'):
+                ui.icon('tune', size='18px').classes('text-indigo-400')
+                ui.label('Application Settings').classes(UIStyles.TITLE_H3)
+
+            for category in EDITABLE_SETTING_CATEGORIES:
+                specs = [s for s in EDITABLE_SETTINGS if s.category == category]
+                if not specs:
+                    continue
+                ui.label(category).classes(
+                    'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mt-3'
+                )
+                for spec in specs:
+                    is_locked = os.getenv(spec.field) is not None
+                    locked[spec.field] = is_locked
+                    current = getattr(settings, spec.field, '')
+
+                    with ui.column().classes('w-full gap-0 py-2 border-b border-zinc-800/30 last:border-0'):
+                        with ui.row().classes('w-full items-center justify-between gap-4'):
+                            with ui.column().classes('gap-0 flex-grow min-w-0'):
+                                ui.label(spec.label).classes('text-sm font-bold text-zinc-200')
+                                ui.label(f'{spec.description}  ·  Env: {spec.env_var}').classes(
+                                    'text-xs text-zinc-500'
+                                )
+
+                            if spec.kind == 'bool':
+                                widget = ui.switch(value=bool(current))
+                            elif spec.kind == 'select':
+                                widget = ui.select(
+                                    options=spec.options, value=str(current),
+                                ).props('dense options-dense outlined').classes('w-44')
+                            elif spec.kind == 'int':
+                                widget = ui.number(value=current).props('dense outlined').classes('w-44')
+                            else:
+                                widget = ui.input(
+                                    value='' if current is None else str(current),
+                                    password=spec.sensitive,
+                                ).props('outlined dark dense').classes('w-72 max-w-full')
+
+                            if is_locked:
+                                widget.props('readonly disable').classes('opacity-60')
+                            widgets[spec.field] = widget
+
+                        if is_locked:
+                            with ui.row().classes('items-center gap-1 text-amber-400 mt-1'):
+                                ui.icon('lock', size='12px')
+                                ui.label('Locked by environment variable').classes('text-[11px]')
+
+            def _save():
+                if not vault_instance.is_connected:
+                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+                    return
+                data = {}
+                try:
+                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                        path='core/settings', mount_point='lyndrix')
+                    data = resp['data']['data'] or {}
+                except Exception:
+                    data = {}
+
+                applied = []
+                for spec in EDITABLE_SETTINGS:
+                    if locked.get(spec.field):
+                        continue  # env-locked — never persist/override
+                    widget = widgets.get(spec.field)
+                    if widget is None:
+                        continue
+                    try:
+                        value = spec.coerce(widget.value)
+                    except Exception:
+                        ui.notify(f'Invalid value for {spec.label}.', type='negative')
+                        return
+                    data[spec.field] = value
+                    setattr(settings, spec.field, value)
+                    applied.append(spec.field)
+                    if spec.field == 'LOG_LEVEL':
+                        import logging
+                        logging.getLogger().setLevel(getattr(logging, str(value), logging.INFO))
+
+                try:
+                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                        path='core/settings', mount_point='lyndrix', secret=data)
+                except Exception as e:
+                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+                    return
+                ui.notify(
+                    f'Saved {len(applied)} setting(s) — applied now and persisted for next boot.',
+                    type='positive',
+                )
+
+            with ui.row().classes('w-full justify-end mt-3'):
+                ui.button('Save settings', icon='save', on_click=_save).props(
+                    'unelevated size=sm color=primary')
 
 async def render_settings_page():
     """Renders the complete Settings dashboard."""
@@ -61,34 +172,36 @@ async def render_settings_page():
             with ui.tab_panel(tab_system).classes('p-0'):
                 with ui.column().classes('w-full gap-4'):
 
-                    # Application Config
+                    # Disclaimer — env vars override UI-saved settings on boot
+                    with ui.row().classes(
+                        'w-full items-start gap-3 p-4 '
+                        'bg-amber-500/10 border border-amber-500/30 rounded-xl'
+                    ):
+                        ui.icon('warning_amber', size='20px').classes('text-amber-400 shrink-0 mt-0.5')
+                        with ui.column().classes('gap-0'):
+                            ui.label('Environment variables take precedence').classes(
+                                'text-sm font-bold text-amber-300'
+                            )
+                            ui.label(
+                                'Settings saved here are stored in Vault and re-applied on the next boot. '
+                                'However, any setting that is also provided via its environment variable will '
+                                'be overridden by that environment variable on the next boot — the env var '
+                                'always wins. Fields locked by an environment variable are read-only below.'
+                            ).classes('text-xs text-amber-200/80')
+
+                    # Editable application settings
+                    _render_editable_settings_card()
+
+                    # Read-only system info (not runtime-editable)
                     with ui.card().classes(UIStyles.CARD_GLASS + ' w-full').style('padding: 0; flex-wrap: nowrap'):
-                        ui.element('div').classes('h-1 w-full bg-gradient-to-r from-indigo-400 via-sky-400 to-cyan-400')
+                        ui.element('div').classes('h-1 w-full bg-gradient-to-r from-zinc-500 via-zinc-400 to-zinc-500')
                         with ui.column().classes('w-full flex-grow p-5 gap-1'):
                             with ui.row().classes('items-center gap-2 mb-3'):
-                                ui.icon('tune', size='18px').classes('text-indigo-400')
-                                ui.label(t('core.settings.system.application')).classes(UIStyles.TITLE_H3)
+                                ui.icon('dns', size='18px').classes('text-zinc-400')
+                                ui.label('System Info').classes(UIStyles.TITLE_H3)
                             env_cls = 'text-amber-400 font-bold' if settings.ENV_TYPE == 'dev' else 'text-emerald-400 font-bold'
-                            _kv_row(t('core.settings.system.app_name'), settings.APP_NAME)
-                            _kv_row(t('core.settings.system.environment'), settings.ENV_TYPE.upper(), value_cls=env_cls)
-                            _kv_row(t('core.settings.system.port'), str(settings.PORT), mono=True)
-                            _kv_row(t('core.settings.system.log_level'), settings.LOG_LEVEL, mono=True)
-                            ui.separator().classes('my-2 bg-zinc-800/40')
-                            with ui.row().classes('w-full items-center justify-between gap-4'):
-                                with ui.column().classes('gap-0'):
-                                    ui.label(t('core.settings.system.log_level_session')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold')
-                                    ui.label(t('core.settings.system.log_level_env_hint')).classes('text-xs text-zinc-600')
-                                log_select = ui.select(
-                                    options=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                                    value=settings.LOG_LEVEL,
-                                ).classes('w-40').props('dense options-dense outlined')
-
-                            def apply_log_level():
-                                import logging
-                                logging.getLogger().setLevel(getattr(logging, log_select.value, logging.INFO))
-                                ui.notify(t('core.settings.system.log_level_applied', level=log_select.value), type='positive')
-
-                            ui.button(t('core.settings.system.apply'), icon='check', on_click=apply_log_level).props('unelevated size=sm color=primary').classes('mt-2 self-end')
+                            _kv_row('Environment  ·  Env: ENV_TYPE', settings.ENV_TYPE.upper(), value_cls=env_cls)
+                            _kv_row('Port  ·  Env: PORT', str(settings.PORT), mono=True)
 
                     # Plugin Reconciliation
                     with ui.card().classes(UIStyles.CARD_GLASS + ' w-full').style('padding: 0; flex-wrap: nowrap'):
@@ -124,6 +237,7 @@ async def render_settings_page():
                                 ui.icon('api', size='18px').classes('text-sky-400')
                                 ui.label(t('core.settings.system.api_integration')).classes(UIStyles.TITLE_H3)
                             ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                            ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes('text-xs text-zinc-500')
 
                             current_token = ''
                             if vault_instance.is_connected:
@@ -162,6 +276,85 @@ async def render_settings_page():
                                 with ui.row().classes(f'items-center gap-1 {vault_cls}'):
                                     ui.icon('lock' if vault_ok else 'lock_open', size='14px')
                                     ui.label(t('core.settings.system.vault_connected') if vault_ok else t('core.settings.system.vault_offline')).classes('text-xs')
+
+                            # ── System API Key ───────────────────────────────
+                            ui.separator().classes('my-3 bg-zinc-800/40')
+                            with ui.row().classes('items-center gap-2 mb-1'):
+                                ui.icon('vpn_key', size='18px').classes('text-amber-400')
+                                ui.label('System API Key').classes(UIStyles.TITLE_H3)
+                            ui.label('Env: LYNDRIX_SYSTEM_API_KEY').classes('text-xs text-zinc-500')
+
+                            env_key = os.getenv('LYNDRIX_SYSTEM_API_KEY')
+                            env_locked = bool(env_key and env_key.strip())
+
+                            if env_locked:
+                                ui.label(
+                                    'Set via the LYNDRIX_SYSTEM_API_KEY environment variable. '
+                                    'The environment value takes precedence and cannot be overridden here.'
+                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                            else:
+                                ui.label(
+                                    'Master key for machine-to-machine API access (header X-API-Key or '
+                                    'Authorization: Bearer). Unset by default — leave empty to keep the '
+                                    'API-key method disabled.'
+                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+
+                            current_api_key = ''
+                            if vault_instance.is_connected:
+                                try:
+                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                                        path='core/settings', mount_point='lyndrix')
+                                    current_api_key = resp['data']['data'].get('system_api_key', '')
+                                except Exception:
+                                    pass
+
+                            api_key_input = ui.input(
+                                'System API Key',
+                                value=current_api_key,
+                                password=True,
+                            ).classes('w-full max-w-md').props('outlined dark')
+                            if env_locked:
+                                api_key_input.props('readonly').classes('opacity-60')
+
+                            def save_api_key():
+                                if env_locked:
+                                    ui.notify(
+                                        'Key is locked by the LYNDRIX_SYSTEM_API_KEY environment variable.',
+                                        type='warning',
+                                    )
+                                    return
+                                if not vault_instance.is_connected:
+                                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+                                    return
+                                try:
+                                    data = {}
+                                    try:
+                                        resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                                            path='core/settings', mount_point='lyndrix')
+                                        data = resp['data']['data']
+                                    except Exception:
+                                        pass
+                                    new_value = (api_key_input.value or '').strip()
+                                    if new_value:
+                                        data['system_api_key'] = new_value
+                                    else:
+                                        data.pop('system_api_key', None)
+                                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                                        path='core/settings', mount_point='lyndrix', secret=data)
+                                    ui.notify(
+                                        'System API key saved.' if new_value else 'System API key cleared (API-key method disabled).',
+                                        type='positive',
+                                    )
+                                except Exception as e:
+                                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+
+                            with ui.row().classes('items-center gap-3 mt-1'):
+                                save_btn = ui.button('Save API Key', icon='save', on_click=save_api_key).props('outline size=sm color=primary')
+                                if env_locked:
+                                    save_btn.props('disable')
+                                    with ui.row().classes('items-center gap-1 text-amber-400'):
+                                        ui.icon('lock', size='14px')
+                                        ui.label('Locked by environment').classes('text-xs')
 
             # ── AUTH ─────────────────────────────────────────────────────────
             with ui.tab_panel(tab_auth).classes('p-0'):

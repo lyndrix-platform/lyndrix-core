@@ -104,7 +104,6 @@ async def render_dashboard_page():
             for entry in module_manager.registry.values():
                 if entry.get("status") == "active" and hasattr(entry["module"], 'render_dashboard_widget'):
                     widget_rendered = True
-                    manifest = entry["manifest"]
                     try:
                         with ui.card().classes(f'{UIStyles.CARD_GLASS} flex flex-col').style('padding: 0; flex-wrap: nowrap'):
                             ui.element('div').classes('h-1 w-full bg-gradient-to-r from-rose-400 via-pink-400 to-indigo-400')
