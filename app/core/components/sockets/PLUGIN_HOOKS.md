@@ -9,8 +9,8 @@ Example: KEA DHCP Plugin
 
 File: plugin.py
 ---------------
-from core.socket_manager.logic.base_socket_provider import BaseSocketProvider, ProviderCapabilities
-from core.socket_manager.registry import get_registry
+from core.components.sockets.logic.base_socket_provider import BaseSocketProvider, ProviderCapabilities
+from core.components.sockets.registry import get_registry
 
 
 class KeaProvider(BaseSocketProvider):

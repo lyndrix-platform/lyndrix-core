@@ -26,9 +26,9 @@ from core.api import (
     system_api_key_configured,
 )
 from core.api.permissions_api import permissions_router
-from core.socket_manager.api.socket_api import socket_router
-from core.socket_manager.providers.docker_provider import DockerProvider
-from core.socket_manager.registry import get_registry
+from core.components.sockets.api.socket_api import socket_router
+from core.components.sockets.providers.docker_provider import DockerProvider
+from core.components.sockets.registry import get_registry
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
