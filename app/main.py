@@ -26,7 +26,7 @@ from core.api import (
     system_api_key_configured,
 )
 from core.api.permissions_api import permissions_router
-from core.components.docker.api.docker_api import docker_router
+from core.socket_manager.api.socket_api import socket_router
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
@@ -269,8 +269,8 @@ router_registry.mount_all(app)
 # Permissions management API (groups, group permissions, per-user direct grants).
 app.include_router(permissions_router)
 
-# Docker socket management API (container lifecycle, mounts, health).
-app.include_router(docker_router)
+# Socket management API (Docker, systemd, etc. with permission guards).
+app.include_router(socket_router)
 
 
 # ==========================================

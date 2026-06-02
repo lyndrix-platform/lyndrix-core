@@ -6,7 +6,7 @@ import subprocess
 import stat
 from typing import Dict, List, Optional
 
-from ..models.docker_models import MountStatus, HealthCheckResult
+from ..models.socket_models import MountStatus, HealthCheckResult
 
 
 class MountGuardian:
@@ -20,16 +20,14 @@ class MountGuardian:
         Verify that required directories are mounted and writable.
 
         Args:
-            required_dirs: List of paths to check (e.g., ["/data/storage/git_repos", "/data/security"])
+            required_dirs: List of paths to check
 
         Returns:
             Dict {path: MountStatus}
         """
         results = {}
-
         for directory in required_dirs:
             results[directory] = self._check_mount(directory)
-
         return results
 
     def repair_permissions(
@@ -51,7 +49,6 @@ class MountGuardian:
             return f"Directory does not exist: {target_dir}"
 
         try:
-            # Fix ownership
             result = subprocess.run(
                 ["sudo", "chown", "-R", user, target_dir],
                 capture_output=True,
@@ -63,7 +60,6 @@ class MountGuardian:
                 self.logger.error(error_msg)
                 return error_msg
 
-            # Fix permissions
             result = subprocess.run(
                 ["sudo", "chmod", "-R", oct(mode)[2:], target_dir],
                 capture_output=True,
@@ -98,7 +94,6 @@ class MountGuardian:
         mount_statuses = self.verify_mounts(required_dirs)
         repairs_made = {}
 
-        # Attempt to repair unhealthy mounts
         for path, status in mount_statuses.items():
             if not status.healthy and not status.error:
                 error = self.repair_permissions(path)
@@ -106,7 +101,9 @@ class MountGuardian:
                     repairs_made[path] = "permissions_repaired"
                     status.writable = True
 
-        overall_healthy = all(s.mounted and s.writable for s in mount_statuses.values())
+        overall_healthy = all(
+            s.mounted and s.writable for s in mount_statuses.values()
+        )
 
         return HealthCheckResult(
             healthy=overall_healthy,
@@ -117,7 +114,6 @@ class MountGuardian:
     def _check_mount(self, directory: str) -> MountStatus:
         """Check a single mount point."""
         try:
-            # Check if exists and readable
             if not os.path.exists(directory):
                 return MountStatus(
                     path=directory,
@@ -126,24 +122,21 @@ class MountGuardian:
                     error="Directory does not exist",
                 )
 
-            # Check if mounted (compare inode with parent)
             try:
                 dir_stat = os.stat(directory)
                 parent_stat = os.stat(os.path.dirname(directory))
                 is_mounted = dir_stat.st_dev != parent_stat.st_dev
             except Exception:
-                is_mounted = True  # Assume mounted if we can stat it
+                is_mounted = True
 
-            # Check if writable
             is_writable = os.access(directory, os.W_OK)
 
-            # Get owner and permissions
             try:
                 dir_stat = os.stat(directory)
                 owner_uid = dir_stat.st_uid
                 owner = self._get_username(owner_uid)
                 permissions = oct(stat.S_IMODE(dir_stat.st_mode))[2:]
-            except Exception as e:
+            except Exception:
                 owner = None
                 permissions = None
 
@@ -170,6 +163,7 @@ class MountGuardian:
         """Get username from UID, fallback to numeric UID."""
         try:
             import pwd
+
             return pwd.getpwuid(uid).pw_name
         except Exception:
             return str(uid)

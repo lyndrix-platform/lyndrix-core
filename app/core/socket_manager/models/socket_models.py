@@ -1,4 +1,4 @@
-"""Data models for Docker socket management."""
+"""Data models for socket management."""
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -58,6 +58,10 @@ class MountStatus:
     permissions: Optional[str] = None
     error: Optional[str] = None
 
+    @property
+    def healthy(self) -> bool:
+        return self.mounted and self.writable
+
     def to_dict(self) -> Dict:
         return {
             "path": self.path,
@@ -71,7 +75,7 @@ class MountStatus:
 
 @dataclass
 class HealthCheckResult:
-    """Overall health status of Docker socket management."""
+    """Overall health status of socket management."""
     healthy: bool
     mounts: Dict[str, MountStatus] = field(default_factory=dict)
     cleanup_errors: Optional[str] = None
