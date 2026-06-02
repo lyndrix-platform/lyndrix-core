@@ -46,7 +46,14 @@ class DockerProvider(BaseSocketProvider):
         """Lazy-load Docker client."""
         if self._client is None:
             try:
-                self._client = docker.from_env()
+                if not Path(self.socket_path).exists():
+                    self.logger.error(f"Docker socket missing at {self.socket_path}")
+                    return None
+                self._client = docker.DockerClient(
+                    base_url=f"unix://{self.socket_path}",
+                    version="auto",
+                )
+                self._client.ping()
             except Exception as e:
                 self.logger.error(f"Failed to connect to Docker socket: {e}")
                 return None
