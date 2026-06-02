@@ -1,10 +1,12 @@
 """Docker socket provider implementation."""
 
-import docker
+import asyncio
+import json
 import logging
 import os
+import shutil
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -17,7 +19,6 @@ class DockerProvider(BaseSocketProvider):
 
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger(__name__)
-        self._client = None
 
     @property
     def name(self) -> str:
@@ -29,7 +30,7 @@ class DockerProvider(BaseSocketProvider):
 
     @property
     def is_available(self) -> bool:
-        return Path(self.socket_path).exists() and self.client is not None
+        return Path(self.socket_path).exists() and shutil.which("docker") is not None
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -38,142 +39,137 @@ class DockerProvider(BaseSocketProvider):
             can_cleanup=True,
             can_query_mounts=True,
             can_verify_mounts=True,
-            can_repair_permissions=False,  # Handled by mount_guardian
+            can_repair_permissions=False,
         )
-
-    @property
-    def client(self) -> docker.DockerClient:
-        """Lazy-load Docker client."""
-        if self._client is None:
-            try:
-                if not Path(self.socket_path).exists():
-                    self.logger.error(f"Docker socket missing at {self.socket_path}")
-                    return None
-                self._client = docker.DockerClient(
-                    base_url=f"unix://{self.socket_path}",
-                    version="auto",
-                )
-                self._client.ping()
-            except Exception as e:
-                self.logger.error(f"Failed to connect to Docker socket: {e}")
-                return None
-        return self._client
 
     async def health_check(self) -> Dict:
         """Check Docker daemon health."""
+        if not self.is_available:
+            return {"healthy": False, "error": "Docker socket or CLI unavailable"}
+        code, stdout, stderr = await self._run_docker("info", "--format", "{{json .}}")
+        if code != 0:
+            return {"healthy": False, "error": stderr or stdout or "docker info failed"}
         try:
-            if not self.client:
-                return {"healthy": False, "error": "Docker client unavailable"}
-            info = self.client.info()
-            return {
-                "healthy": True,
-                "containers_running": info.get("ContainersRunning", 0),
-                "containers_total": info.get("Containers", 0),
-                "images": info.get("Images", 0),
-            }
-        except Exception as e:
-            return {"healthy": False, "error": str(e)}
+            info = json.loads(stdout or "{}")
+        except json.JSONDecodeError:
+            info = {}
+        return {
+            "healthy": True,
+            "containers_running": info.get("ContainersRunning", 0),
+            "containers_total": info.get("Containers", 0),
+            "images": info.get("Images", 0),
+        }
 
     async def cleanup_stale(
         self, prefix: str = "aac-runner-", max_age_minutes: int = 60
     ) -> Tuple[int, Optional[str]]:
         """Clean up stale Docker containers."""
-        try:
-            if not self.client:
-                return 0, "Docker client unavailable"
+        if not self.is_available:
+            return 0, "Docker socket or CLI unavailable"
 
-            cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
-            removed_count = 0
-            errors = []
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        removed_count = 0
+        errors = []
 
-            for container in self.client.containers.list(all=True):
-                if not container.name.startswith(prefix):
-                    continue
+        code, stdout, stderr = await self._run_docker(
+            "ps",
+            "-a",
+            "--filter",
+            f"name=^{prefix}",
+            "--format",
+            "{{.ID}}|{{.Names}}|{{.Status}}|{{.Label \"iac_job_id\"}}|{{.Label \"iac_task_name\"}}",
+        )
+        if code != 0:
+            return 0, stderr or stdout or "docker ps failed"
 
-                created = datetime.fromisoformat(
-                    container.attrs["Created"].replace("Z", "+00:00")
-                )
-                if created < cutoff_time:
-                    try:
-                        if container.status == "running":
-                            container.stop(timeout=5)
-                        container.remove(force=True)
-                        self.logger.info(f"Removed stale container: {container.name}")
-                        removed_count += 1
-                    except Exception as e:
-                        errors.append(f"{container.name}: {str(e)}")
+        for line in [l.strip() for l in stdout.splitlines() if l.strip()]:
+            parts = line.split("|")
+            if len(parts) < 1:
+                continue
+            container_id = parts[0]
+            container_name = parts[1] if len(parts) > 1 else container_id
+            try:
+                created_at = await self._get_container_created_at(container_id)
+                if created_at < cutoff_time:
+                    await self._remove_container(container_id)
+                    self.logger.info(f"Removed stale container: {container_name}")
+                    removed_count += 1
+            except Exception as e:
+                errors.append(f"{container_name}: {str(e)}")
 
-            error_msg = "; ".join(errors) if errors else None
-            return removed_count, error_msg
-
-        except Exception as e:
-            return 0, str(e)
+        error_msg = "; ".join(errors) if errors else None
+        return removed_count, error_msg
 
     async def list_containers(self, prefix: str = "aac-runner-") -> list[dict]:
         """List containers that match a prefix, including runner labels."""
-        try:
-            if not self.client:
-                return []
-
-            result = []
-            for container in self.client.containers.list(all=True):
-                name = getattr(container, "name", "")
-                if not name.startswith(prefix):
-                    continue
-                labels = container.labels or {}
-                result.append(
-                    {
-                        "name": name,
-                        "id": container.id,
-                        "status": container.status,
-                        "labels": labels,
-                    }
-                )
-            return result
-        except Exception as e:
-            self.logger.error(f"Failed to list containers: {e}")
+        if not self.is_available:
             return []
+
+        code, stdout, stderr = await self._run_docker(
+            "ps",
+            "-a",
+            "--filter",
+            f"name=^{prefix}",
+            "--format",
+            "{{.ID}}|{{.Names}}|{{.Label \"iac_job_id\"}}|{{.Label \"iac_task_name\"}}|{{.Status}}",
+        )
+        if code != 0:
+            self.logger.error(f"Failed to list containers: {stderr or stdout}")
+            return []
+
+        result = []
+        for line in [l.strip() for l in stdout.splitlines() if l.strip()]:
+            parts = line.split("|")
+            if not parts:
+                continue
+            result.append(
+                {
+                    "id": parts[0],
+                    "name": parts[1] if len(parts) > 1 else parts[0],
+                    "job_id": parts[2] if len(parts) > 2 else "",
+                    "task_name": parts[3] if len(parts) > 3 else "",
+                    "status": parts[4] if len(parts) > 4 else "",
+                    "labels": {
+                        "iac_job_id": parts[2] if len(parts) > 2 else "",
+                        "iac_task_name": parts[3] if len(parts) > 3 else "",
+                    },
+                }
+            )
+        return result
 
     async def get_mounts(self) -> Dict[str, Dict[str, str]]:
         """Get mount mappings for all running containers."""
-        try:
-            if not self.client:
-                return {}
-
-            result = {}
-            for container in self.client.containers.list():
-                mounts = self._extract_container_mounts(container)
-                if mounts:
-                    result[container.id[:12]] = mounts
-            return result
-        except Exception as e:
-            self.logger.error(f"Failed to get container mounts: {e}")
+        if not self.is_available:
             return {}
 
+        result = {}
+        code, stdout, stderr = await self._run_docker(
+            "ps",
+            "--format",
+            "{{.ID}}|{{.Names}}",
+        )
+        if code != 0:
+            self.logger.error(f"Failed to list running containers: {stderr or stdout}")
+            return {}
+
+        for line in [l.strip() for l in stdout.splitlines() if l.strip()]:
+            cid = line.split("|", 1)[0]
+            mounts = await self._inspect_mounts(cid)
+            if mounts:
+                result[cid[:12]] = mounts
+        return result
+
     async def detect_storage_root(self) -> Optional[str]:
-        """Detect where storage is mounted inside containers."""
-        try:
-            container = self._get_current_container()
-            if not container:
-                return None
-
-            mounts = self._extract_container_mounts(container)
-            if "/data/storage" in mounts:
-                return mounts["/data/storage"]
-            if "/data" in mounts:
-                return mounts["/data"]
-        except Exception as e:
-            self.logger.error(f"Failed to detect storage root: {e}")
-
-        return None
+        """Detect where storage is mounted inside the current container."""
+        mounts = await self.resolve_current_mounts(["/data/storage", "/data"])
+        return mounts.get("/data/storage") or mounts.get("/data")
 
     async def resolve_current_mounts(self, required_targets: Optional[List[str]] = None) -> Dict[str, str]:
         """Resolve host sources for mount targets inside the current container."""
-        container = self._get_current_container()
-        if not container:
+        mounts = await self._inspect_mounts(self._current_container_id())
+        if not mounts:
             return {}
 
-        mounts = self._extract_container_mounts(container)
         targets = required_targets or [
             "/data/storage/git_repos",
             "/data/storage/services",
@@ -199,44 +195,48 @@ class DockerProvider(BaseSocketProvider):
     ) -> SpawnResult:
         """Spawn a Docker container."""
         try:
-            if not self.client:
+            if not self.is_available:
                 return SpawnResult(
                     container_id="",
                     name=name,
                     status="failed",
-                    error="Docker client unavailable",
+                    error="Docker socket or CLI unavailable",
                 )
 
-            existing = self._find_container_by_name(name)
-            if existing is not None:
-                try:
-                    if existing.status == "running":
-                        existing.stop(timeout=5)
-                    existing.remove(force=True)
-                except Exception as e:
-                    self.logger.warning(f"Failed to remove existing container {name}: {e}")
+            await self._remove_container_by_name(name)
 
-            env_dict = {ev.key: ev.value for ev in (env_vars or [])}
-            volumes_dict = {
-                m.source: {"bind": m.target, "mode": m.mode} for m in (mounts or [])
-            }
+            cmd = ["run", "-d", "--name", name, "--pull", "always"]
+            if remove:
+                cmd.append("--rm")
 
-            container = self.client.containers.run(
-                image,
-                command=command,
-                name=name,
-                environment=env_dict,
-                volumes=volumes_dict,
-                detach=True,
-                remove=remove,
-                network=networks[0] if networks else None,
-            )
+            for ev in (env_vars or []):
+                cmd.extend(["-e", f"{ev.key}={ev.value}"])
 
-            self.logger.info(f"Spawned container {name} (ID: {container.id[:12]})")
-            container_mounts = self._extract_container_mounts(container)
+            for mount in (mounts or []):
+                cmd.extend(["-v", f"{mount.source}:{mount.target}:{mount.mode}"])
+
+            if networks:
+                cmd.extend(["--network", networks[0]])
+
+            cmd.extend(["--entrypoint", "", image])
+            if command:
+                cmd.extend(command)
+
+            code, stdout, stderr = await self._run_docker(*cmd)
+            if code != 0:
+                return SpawnResult(
+                    container_id="",
+                    name=name,
+                    status="failed",
+                    error=stderr or stdout or "docker run failed",
+                )
+
+            container_id = stdout.strip()
+            self.logger.info(f"Spawned container {name} (ID: {container_id[:12]})")
+            container_mounts = await self._inspect_mounts(container_id)
 
             return SpawnResult(
-                container_id=container.id,
+                container_id=container_id,
                 name=name,
                 status="running",
                 mounts=container_mounts,
@@ -251,56 +251,74 @@ class DockerProvider(BaseSocketProvider):
                 error=str(e),
             )
 
-    @staticmethod
-    def _extract_container_mounts(container) -> Dict[str, str]:
-        """Extract mount mappings from a container."""
-        mounts = {}
+    async def _run_docker(self, *args: str) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        return (
+            proc.returncode,
+            stdout.decode("utf-8", errors="replace").strip(),
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+
+    async def _remove_container(self, container_id_or_name: str) -> None:
+        code, stdout, stderr = await self._run_docker("rm", "-f", container_id_or_name)
+        if code != 0 and stderr:
+            self.logger.debug(f"Container removal ignored for {container_id_or_name}: {stderr}")
+
+    async def _remove_container_by_name(self, name: str) -> None:
+        code, stdout, stderr = await self._run_docker("ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.ID}}")
+        if code != 0:
+            return
+        for container_id in [line.strip() for line in stdout.splitlines() if line.strip()]:
+            await self._remove_container(container_id)
+
+    async def _get_container_created_at(self, container_id: str) -> datetime:
+        code, stdout, stderr = await self._run_docker(
+            "inspect",
+            "--format",
+            "{{.Created}}",
+            container_id,
+        )
+        if code != 0 or not stdout:
+            raise RuntimeError(stderr or stdout or f"Unable to inspect container {container_id}")
+        value = stdout.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(value)
+
+    async def _inspect_mounts(self, container_id: Optional[str]) -> Dict[str, str]:
+        if not container_id:
+            return {}
+        code, stdout, stderr = await self._run_docker(
+            "inspect",
+            "--format",
+            "{{json .Mounts}}",
+            container_id,
+        )
+        if code != 0 or not stdout:
+            if stderr:
+                self.logger.debug(f"Failed to inspect mounts for {container_id}: {stderr}")
+            return {}
         try:
-            for mount in container.attrs.get("Mounts", []):
-                target = mount.get("Destination")
-                source = mount.get("Source")
-                if target and source:
-                    mounts[target] = source
-        except Exception:
-            pass
-        return mounts
+            mounts = json.loads(stdout)
+        except json.JSONDecodeError:
+            return {}
+        result = {}
+        for mount in mounts:
+            target = mount.get("Destination")
+            source = mount.get("Source")
+            if target and source:
+                result[target] = source
+        return result
 
-    def _get_current_container(self):
-        """Best-effort lookup for the running Lyndrix core container."""
-        if not self.client:
+    def _current_container_id(self) -> Optional[str]:
+        identifier = os.getenv("HOSTNAME") or socket.gethostname()
+        if not identifier:
             return None
-
-        identifiers = [
-            os.getenv("HOSTNAME"),
-            socket.gethostname(),
-        ]
-        seen = set()
-        for identifier in identifiers:
-            if not identifier or identifier in seen:
-                continue
-            seen.add(identifier)
-            try:
-                return self.client.containers.get(identifier)
-            except Exception:
-                pass
-
-        current_id = socket.gethostname()
-        for container in self.client.containers.list():
-            cid = getattr(container, "id", "")
-            if cid.startswith(current_id):
-                return container
-        return None
-
-    def _find_container_by_name(self, name: str):
-        if not self.client:
-            return None
-        try:
-            return self.client.containers.get(name)
-        except Exception:
-            for container in self.client.containers.list(all=True):
-                if getattr(container, "name", None) == name:
-                    return container
-        return None
+        return identifier
 
     @staticmethod
     def _resolve_mount_source(target: str, mounts: Dict[str, str]) -> Optional[str]:
