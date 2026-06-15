@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -242,7 +243,13 @@ def entry_point():
                 "text-zinc-600 text-xs tracking-wide uppercase"
             )
 
-        ui.timer(1.0, lambda: ui.navigate.to("/"), once=True)
+        # Poll and navigate when boot completes or vault state changes
+        async def poll_boot_complete():
+            while (boot_service.is_booting or vault_instance.ui_state == "loading"):
+                await asyncio.sleep(0.2)
+            ui.navigate.to("/")
+        
+        asyncio.create_task(poll_boot_complete())
         return
 
     # 3. System is ready
