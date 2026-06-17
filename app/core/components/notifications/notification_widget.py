@@ -9,12 +9,12 @@ def render_notification_bell(user_id: str = "admin"):
     with ui.button(icon='notifications').props('flat round color=slate-300') as btn:
         badge = ui.badge('', color='red').props('floating').classes('hidden')
         
-        with ui.menu().classes(f'w-96 max-h-[75vh] p-0 flex flex-col {UIStyles.MENU_CONTAINER}'):
+        with ui.menu().classes(f'lyndrix-notif-popup max-h-[75vh] p-0 flex flex-col {UIStyles.MENU_CONTAINER}').style('width: min(24rem, calc(100vw - 1rem))').props('anchor="bottom right" self="top right" transition-show="jump-down" transition-hide="jump-up"'):
             with ui.row().classes('w-full justify-between items-center p-3 border-b border-zinc-800 bg-zinc-900 shrink-0'):
                 ui.label(t('notifications.title')).classes('text-sm font-bold text-slate-200 tracking-wide')
                 ui.button(t('notifications.clear_all'), on_click=lambda: [notification_service.remove_notification(n['id']) for n in notification_service.get_unread_for_user(user_id)]).props('flat dense size=xs color=zinc-400')
             
-            list_container = ui.column().classes('w-full p-2 gap-2 overflow-y-auto flex-nowrap flex-1 min-h-0')
+            list_container = ui.column().classes('w-full p-2 gap-2 overflow-y-auto flex-nowrap max-h-[calc(75vh-56px)]')
 
     def update_ui():
         nonlocal last_state_hash

@@ -55,7 +55,7 @@ async def render_groups_card() -> None:
                 editor_col = ui.column().classes('flex-grow gap-3')
 
             # ── New group row ─────────────────────────────────────────────────
-            with ui.row().classes('w-full items-center gap-2 mt-2 pt-3 border-t border-zinc-800/40'):
+            with ui.row().classes('w-full items-center gap-2 mt-2 pt-3 border-t border-slate-200 dark:border-white/10'):
                 new_name_input = ui.input(
                     placeholder=t('auth.groups.new_placeholder')
                 ).props('outlined dark dense').classes('flex-grow max-w-xs')
@@ -95,10 +95,10 @@ async def render_groups_card() -> None:
             ).props('outlined dark dense').classes('w-full max-w-md')
 
             # ── Permissions ──────────────────────────────────────
-            ui.label(t('auth.groups.permissions.title')).classes('text-xs font-bold text-zinc-400 uppercase tracking-wider mt-2')
+            ui.label(t('auth.groups.permissions.title')).classes(UIStyles.LABEL_MINI + ' mt-2')
             ui.label(
                 t('auth.groups.permissions.hint', example='bereich.aktion')
-            ).classes('text-[10px] text-zinc-600')
+            ).classes(UIStyles.TEXT_HINT)
 
             perm_input = ui.input(
                 placeholder=t('auth.groups.permissions.placeholder')
@@ -149,17 +149,17 @@ async def render_groups_card() -> None:
                             _render_perms(),
                         ],
                     ).props('outline dense size=xs').classes(
-                        'text-[10px] font-mono text-zinc-500 '
+                        UIStyles.TEXT_HINT + ' font-mono '
                         + ('opacity-40' if suggestion in current_perms else '')
                     )
 
             # ── LDAP Mappings ─────────────────────────────────────────────────
             ui.label(t('auth.groups.ldap.title')).classes(
-                'text-xs font-bold text-zinc-400 uppercase tracking-wider mt-3'
+                UIStyles.LABEL_MINI + ' mt-3'
             )
             ui.label(
                 t('auth.groups.ldap.hint')
-            ).classes('text-[10px] text-zinc-600')
+            ).classes(UIStyles.TEXT_HINT)
 
             ldap_input = ui.input(
                 placeholder=t('auth.groups.ldap.placeholder')
@@ -202,11 +202,11 @@ async def render_groups_card() -> None:
 
             # ── Mitglieder ───────────────────────────────────────────
             ui.label(t('auth.groups.members.title')).classes(
-                'text-xs font-bold text-zinc-400 uppercase tracking-wider mt-3'
+                UIStyles.LABEL_MINI + ' mt-3'
             )
             ui.label(
                 t('auth.groups.members.hint')
-            ).classes('text-[10px] text-zinc-600')
+            ).classes(UIStyles.TEXT_HINT)
 
             members_container = ui.column().classes('gap-1 mt-1')
 
@@ -216,19 +216,19 @@ async def render_groups_card() -> None:
                 with members_container:
                     if not members:
                         ui.label(t('auth.groups.members.empty')).classes(
-                            'text-xs text-zinc-600 italic py-1'
+                            UIStyles.TEXT_HINT + ' italic py-1'
                         )
                     for member in members:
                         with ui.row().classes(
-                            'items-center gap-2 bg-zinc-800/40 border border-zinc-700/30 '
+                            'items-center gap-2 bg-slate-200 dark:bg-white/10 border border-slate-200 dark:border-white/10 '
                             'rounded-lg px-3 py-1.5'
                         ):
                             ui.icon('person', size='14px').classes('text-zinc-500 shrink-0')
                             ui.label(member.username).classes(
-                                'text-xs font-semibold text-zinc-200 flex-grow'
+                                'text-xs font-semibold text-slate-800 dark:text-zinc-200 flex-grow'
                             )
                             if member.full_name and member.full_name != member.username:
-                                ui.label(member.full_name).classes('text-[10px] text-zinc-500')
+                                ui.label(member.full_name).classes(UIStyles.TEXT_HINT)
                             ui.button(
                                 icon='person_remove',
                                 on_click=lambda _, m=member: _remove_member(m.username),
@@ -269,7 +269,7 @@ async def render_groups_card() -> None:
                 ).tooltip(t('auth.groups.members.add_tooltip'))
 
             # ── Save / Delete row ─────────────────────────────────────────────
-            with ui.row().classes('w-full items-center gap-3 mt-4 pt-3 border-t border-zinc-800/40'):
+            with ui.row().classes('w-full items-center gap-3 mt-4 pt-3 border-t border-slate-200 dark:border-white/10'):
                 def save_group():
                     group_service.update(
                         grp.id,
@@ -305,7 +305,7 @@ async def render_groups_card() -> None:
             if not groups:
                 with group_list_col:
                     ui.label(t('auth.groups.list_empty')).classes(
-                        'text-xs text-zinc-600 italic p-2'
+                        UIStyles.TEXT_HINT + ' italic p-2'
                     )
                 return
             with group_list_col:
@@ -316,7 +316,7 @@ async def render_groups_card() -> None:
                         'cursor-pointer '
                     )
                     active_cls = 'bg-teal-500/20 text-teal-200 border border-teal-500/30'
-                    inactive_cls = 'text-zinc-300 hover:bg-zinc-800/50'
+                    inactive_cls = 'text-slate-700 dark:text-zinc-300 hover:bg-slate-200 dark:hover:bg-white/10'
                     with ui.row().classes(
                         base_cls + (active_cls if is_selected else inactive_cls)
                     ).on('click', lambda _, g=grp: _open_editor(g)):
@@ -326,7 +326,7 @@ async def render_groups_card() -> None:
                             ldap_count = len(grp.ldap_mappings or [])
                             ui.label(
                                 t('auth.groups.list_summary', perm_count=perm_count, ldap_count=ldap_count)
-                            ).classes('text-[10px] text-zinc-500')
+                            ).classes(UIStyles.TEXT_HINT)
 
         # Initial list render
         _refresh_list()

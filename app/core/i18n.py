@@ -165,6 +165,17 @@ def set_locale(locale: str) -> None:
     set_user_value("locale", locale)
 
 
+def reload_core_locales() -> None:
+    """Force a re-scan of the core locales directory.
+
+    Useful when new locale files are added while the process is running
+    (e.g. a new core component ships its own ``{namespace}.{locale}.json``).
+    Safe to call multiple times — only new/changed files are added.
+    """
+    _registered_dirs.discard(str(_LOCALES_DIR))
+    _load_dir(_LOCALES_DIR)
+
+
 def register_plugin_locales(plugin_path: Path) -> None:
     """Scan *plugin_path*/locales/ and load any JSON locale files found.
 

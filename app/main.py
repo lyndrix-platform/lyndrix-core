@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -27,6 +28,7 @@ from core.api import (
 )
 from core.api.permissions_api import permissions_router
 from core.components.sockets.api.socket_api import socket_router
+from core.components.notification_router.api import notification_router_api
 
 # --- Route Registrations ---
 from core.components.auth.ui.routes import (
@@ -36,6 +38,7 @@ from core.components.auth.ui.routes import (
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
+from core.components.notifications.api import register_notification_fastapi_routes
 
 # --- Global UI ---
 from ui.theme import apply_theme
@@ -242,7 +245,13 @@ def entry_point():
                 "text-zinc-600 text-xs tracking-wide uppercase"
             )
 
-        ui.timer(1.0, lambda: ui.navigate.to("/"), once=True)
+        # Poll and navigate when boot completes or vault state changes
+        async def poll_boot_complete():
+            while (boot_service.is_booting or vault_instance.ui_state == "loading"):
+                await asyncio.sleep(0.2)
+            ui.navigate.to("/")
+        
+        asyncio.create_task(poll_boot_complete())
         return
 
     # 3. System is ready
@@ -262,6 +271,7 @@ register_oidc_fastapi_routes(app)
 register_settings_routes()
 register_vault_routes()
 register_dashboard_routes()
+register_notification_fastapi_routes(app)
 
 # Bind the running app to the plugin router registry so plugins that call
 # ctx.register_routes() after startup get mounted immediately.
@@ -272,6 +282,9 @@ app.include_router(permissions_router)
 
 # Socket management API (Docker, systemd, etc. with permission guards).
 app.include_router(socket_router)
+
+# Notification routing API (endpoint discovery, bindings, env-lock surface).
+app.include_router(notification_router_api)
 
 
 # ==========================================

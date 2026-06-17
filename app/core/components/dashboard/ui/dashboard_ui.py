@@ -27,7 +27,7 @@ async def render_dashboard_page():
                 with ui.row().classes('items-center gap-4 p-4'):
                     ui.icon('lock', size='28px').classes('text-indigo-400 shrink-0')
                     with ui.column().classes('gap-0'):
-                        ui.label('Vault Service').classes('font-bold text-slate-200')
+                        ui.label('Vault Service').classes(UIStyles.TITLE_H3)
                         if vault_instance.is_connected:
                             ui.label('Online & Unsealed').classes('text-xs text-emerald-400 font-mono')
                         else:
@@ -39,7 +39,7 @@ async def render_dashboard_page():
                 with ui.row().classes('items-center gap-4 p-4'):
                     ui.icon('storage', size='28px').classes('text-sky-400 shrink-0')
                     with ui.column().classes('gap-0'):
-                        ui.label('MariaDB Engine').classes('font-bold text-slate-200')
+                        ui.label('MariaDB Engine').classes(UIStyles.TITLE_H3)
                         if db_instance.is_connected:
                             ui.label('Connected').classes('text-xs text-emerald-400 font-mono')
                         else:
@@ -54,7 +54,7 @@ async def render_dashboard_page():
                 with ui.row().classes('items-center gap-4 p-4'):
                     ui.icon('extension', size='28px').classes('text-emerald-400 shrink-0')
                     with ui.column().classes('gap-0'):
-                        ui.label('Plugin Subsystem').classes('font-bold text-slate-200')
+                        ui.label('Plugin Subsystem').classes(UIStyles.TITLE_H3)
                         ui.label(f'{active_plugins} / {total_plugins} Active').classes('text-xs text-emerald-400 font-mono')
 
         # --- STACK 2: HARDWARE METRICS ---
@@ -67,7 +67,7 @@ async def render_dashboard_page():
                 ui.element('div').classes('h-1 w-full bg-gradient-to-r from-indigo-400 via-violet-400 to-indigo-600')
                 with ui.column().classes('flex-grow p-5 gap-2'):
                     with ui.row().classes('w-full justify-between items-center'):
-                        ui.label('CPU Usage').classes('font-bold text-slate-300 text-sm uppercase tracking-widest')
+                        ui.label('CPU Usage').classes(UIStyles.LABEL_MINI)
                         ui.icon('memory', size='18px').classes('text-indigo-400')
                     cpu_prog = ui.linear_progress(value=0, show_value=False).props('color=indigo size=6px')
                     ui.label().classes('text-3xl font-black font-mono text-indigo-400').bind_text_from(monitor_service.stats, 'cpu', lambda v: f"{v:.1f}%")
@@ -78,7 +78,7 @@ async def render_dashboard_page():
                 ui.element('div').classes('h-1 w-full bg-gradient-to-r from-emerald-400 via-teal-400 to-green-500')
                 with ui.column().classes('flex-grow p-5 gap-2'):
                     with ui.row().classes('w-full justify-between items-center'):
-                        ui.label('Memory (RAM)').classes('font-bold text-slate-300 text-sm uppercase tracking-widest')
+                        ui.label('Memory (RAM)').classes(UIStyles.LABEL_MINI)
                         ui.icon('dns', size='18px').classes('text-emerald-400')
                     ram_prog = ui.linear_progress(value=0, show_value=False).props('color=emerald size=6px')
                     ui.label().classes('text-3xl font-black font-mono text-emerald-400').bind_text_from(monitor_service.stats, 'ram', lambda v: f"{v:.1f}%")
@@ -89,7 +89,7 @@ async def render_dashboard_page():
                 ui.element('div').classes('h-1 w-full bg-gradient-to-r from-amber-400 via-orange-400 to-yellow-500')
                 with ui.column().classes('flex-grow p-5 gap-2'):
                     with ui.row().classes('w-full justify-between items-center'):
-                        ui.label('Disk IO').classes('font-bold text-slate-300 text-sm uppercase tracking-widest')
+                        ui.label('Disk IO').classes(UIStyles.LABEL_MINI)
                         ui.icon('save', size='18px').classes('text-amber-400')
                     disk_prog = ui.linear_progress(value=0, show_value=False).props('color=amber size=6px')
                     ui.label().classes('text-3xl font-black font-mono text-amber-400').bind_text_from(monitor_service.stats, 'disk', lambda v: f"{v:.1f}%")

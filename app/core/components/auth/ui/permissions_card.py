@@ -31,12 +31,12 @@ async def render_permissions_card() -> None:
         # ── Header info ───────────────────────────────────────────────────────
         with ui.row().classes(
             'w-full items-start gap-3 p-4 '
-            'bg-zinc-800/30 border border-zinc-700/30 rounded-xl'
+            'bg-slate-200 dark:bg-white/10 border border-slate-200 dark:border-white/10 rounded-xl'
         ):
             ui.icon('info_outline', size='18px').classes('text-zinc-500 shrink-0 mt-0.5')
             ui.label(
                 t('auth.permissions.intro')
-            ).classes('text-xs text-zinc-500')
+            ).classes(UIStyles.TEXT_HINT)
 
         # ── Per-category cards ────────────────────────────────────────────────
         for category in permission_registry.categories():
@@ -85,14 +85,14 @@ def _render_permission_row(
         icon=pdef.icon,
         caption=pdef.id,
     ).classes(
-        'w-full border-b border-zinc-800/30 last:border-0 text-zinc-200'
+        'w-full border-b border-slate-200 dark:border-white/10 last:border-0 text-slate-800 dark:text-zinc-200'
     ):
         with ui.column().classes('w-full gap-4 pb-2 pt-1 pl-8'):
 
             # ── Current group assignments ─────────────────────────────────────
             with ui.column().classes('w-full gap-1'):
                 ui.label(t('auth.permissions.groups_section')).classes(
-                    'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1'
+                    UIStyles.LABEL_MINI + ' mb-1'
                 )
                 grp_container = ui.row().classes('flex-wrap gap-1')
 
@@ -102,7 +102,7 @@ def _render_permission_row(
                     with container:
                         if not _groups:
                             ui.label(t('auth.permissions.no_groups')).classes(
-                                'text-xs text-zinc-600 italic py-1'
+                                UIStyles.TEXT_HINT + ' italic py-1'
                             )
                         for grp in _groups:
                             with ui.row().classes(
@@ -154,7 +154,7 @@ def _render_permission_row(
             # ── Direct user grants ────────────────────────────────────────────
             with ui.column().classes('w-full gap-1'):
                 ui.label(t('auth.permissions.users_section')).classes(
-                    'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1'
+                    UIStyles.LABEL_MINI + ' mb-1'
                 )
                 usr_container = ui.row().classes('flex-wrap gap-1')
 
@@ -165,7 +165,7 @@ def _render_permission_row(
                     with container:
                         if not _users:
                             ui.label(t('auth.permissions.no_users')).classes(
-                                'text-xs text-zinc-600 italic py-1'
+                                UIStyles.TEXT_HINT + ' italic py-1'
                             )
                         for usr in _users:
                             with ui.row().classes(

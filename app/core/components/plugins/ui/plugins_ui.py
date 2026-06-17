@@ -149,9 +149,9 @@ def render_plugins_page():
 
             with log_container:
                 if not found_logs:
-                    ui.label(t('plugins.installed.no_logs')).classes('text-zinc-600 italic')
+                    ui.label(t('plugins.installed.no_logs')).classes(UIStyles.TEXT_HINT + ' italic')
                 for _, level, message in found_logs:
-                    color = 'text-red-500' if level in ['ERROR', 'CRITICAL'] else 'text-zinc-300'
+                    color = 'text-red-500' if level in ['ERROR', 'CRITICAL'] else 'text-slate-700 dark:text-zinc-300'
                     ui.label(message).classes(f'{color} whitespace-pre-wrap mb-1')
 
         log_dialog.open()
@@ -181,14 +181,14 @@ def render_plugins_page():
                         module = entry.get('module')
                         ctx = entry.get('context')
                         if module and hasattr(module, 'render_settings_ui'):
-                            ui.separator().classes('bg-zinc-800 my-2')
-                            ui.label(t('plugins.installed.settings')).classes('text-xs font-bold uppercase tracking-widest text-zinc-500')
+                            ui.separator().classes('bg-slate-200 dark:bg-white/10 my-2')
+                            ui.label(t('plugins.installed.settings')).classes(UIStyles.LABEL_MINI)
                             try:
                                 module.render_settings_ui(ctx)
                             except Exception as exc:
                                 ui.label(t('plugins.notify.reload_failed', error=str(exc))).classes('text-red-500 text-xs')
 
-                    ui.separator().classes('bg-zinc-800')
+                    ui.separator().classes('bg-slate-200 dark:bg-white/10')
 
                     if manifest.type == 'PLUGIN':
                         async def reload_plugin_inner():
@@ -259,7 +259,7 @@ def render_plugins_page():
 
                     with installed_container:
                         if not records:
-                            ui.label(t('plugins.installed.empty')).classes('col-span-3 text-zinc-500 italic p-4')
+                            ui.label(t('plugins.installed.empty')).classes('col-span-3 p-4 ' + UIStyles.TEXT_MUTED + ' italic')
                             return
 
                         for record in records:
@@ -277,7 +277,7 @@ def render_plugins_page():
                                             ui.icon(manifest.icon, size='30px').classes('text-primary shrink-0')
                                             with ui.column().classes('gap-0 min-w-0'):
                                                 ui.label(manifest.name).classes('font-bold text-lg leading-tight truncate')
-                                                ui.label(f'by {manifest.author}').classes('text-[10px] text-zinc-500 uppercase tracking-widest')
+                                                ui.label(f'by {manifest.author}').classes(UIStyles.LABEL_MINI)
                                         ui.label(manifest.type).classes('text-[9px] font-bold px-2 py-1 rounded-full bg-zinc-800/80 text-zinc-200 shrink-0')
 
                                     with ui.row().classes('w-full items-center gap-2 flex-wrap'):
@@ -286,9 +286,9 @@ def render_plugins_page():
                                         if record['folder_name']:
                                             ui.label(record['folder_name']).classes('text-[10px] font-mono px-2 py-1 rounded-full bg-black/20 text-zinc-300')
 
-                                    ui.label(manifest.description).classes('text-sm text-zinc-400 leading-relaxed min-h-[72px] flex-grow')
+                                    ui.label(manifest.description).classes(UIStyles.TEXT_MUTED + ' leading-relaxed min-h-[72px] flex-grow')
 
-                                    with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-zinc-800/60 flex-wrap'):
+                                    with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-slate-200 dark:border-white/10 flex-wrap'):
                                         with ui.row().classes('items-center gap-2 flex-wrap'):
                                             version_select = ui.select(options=[current_version], value=current_version).classes('w-32').props('dense options-dense outlined borderless')
 
@@ -350,7 +350,7 @@ def render_plugins_page():
                     shop_container.clear()
                     with shop_container:
                         if not filtered_plugins:
-                            ui.label(t('plugins.marketplace.empty')).classes('col-span-3 text-center text-zinc-500')
+                            ui.label(t('plugins.marketplace.empty')).classes('col-span-3 text-center ' + UIStyles.TEXT_MUTED)
                             return
 
                         for plugin in filtered_plugins:
@@ -370,7 +370,7 @@ def render_plugins_page():
                                     with ui.row().classes('w-full justify-between items-start gap-3'):
                                         with ui.column().classes('gap-1 min-w-0'):
                                             ui.label(plugin['name']).classes(UIStyles.TITLE_H3 + ' truncate')
-                                            ui.label(f"by {plugin['author']}").classes('text-[10px] text-zinc-500 uppercase tracking-widest')
+                                            ui.label(f"by {plugin['author']}").classes(UIStyles.LABEL_MINI)
                                         with ui.row().classes('items-center gap-2 shrink-0'):
                                             with ui.row().classes('items-center gap-1 text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full'):
                                                 ui.icon('star', size='14px')
@@ -386,9 +386,9 @@ def render_plugins_page():
                                         if plugin.get('metadata_source') == 'fallback':
                                             ui.label(t('plugins.marketplace.cached')).classes('text-[10px] font-bold px-2 py-1 rounded-full bg-zinc-700/40 text-zinc-200 border border-zinc-600/60')
 
-                                    ui.label(plugin['description']).classes('text-sm text-zinc-400 leading-relaxed min-h-[72px] flex-grow')
+                                    ui.label(plugin['description']).classes(UIStyles.TEXT_MUTED + ' leading-relaxed min-h-[72px] flex-grow')
 
-                                    with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-zinc-800/60 flex-wrap'):
+                                    with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-slate-200 dark:border-white/10 flex-wrap'):
                                         with ui.row().classes('items-center gap-2 flex-wrap'):
                                             version_select = ui.select(
                                                 options=[installed_version if installed_record else 'latest'],

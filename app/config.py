@@ -121,6 +121,20 @@ class Settings(BaseSettings):
     # are offered in the language switcher.
     SUPPORTED_LOCALES: str = "en,de"
 
+    # --- MESSAGING GATEWAY ---
+    # Comma-separated list of provider instances in the format "type:instance_id".
+    # Multiple instances of the same type are supported (e.g. two Discord webhooks).
+    # Example: "discord:ops,discord:alerts,slack:team"
+    # Per-instance config is read from env vars: LYNDRIX_GATEWAY_{TYPE}_{INSTANCE_ID}_{SETTING}
+    LYNDRIX_GATEWAY_PROVIDERS: str = ""
+    # Maximum seconds to wait for a single adapter.send() call before timing out.
+    # Adapters can override this per-class via send_timeout: ClassVar[float].
+    LYNDRIX_GATEWAY_SEND_TIMEOUT_SECONDS: float = 30.0
+    # Maximum number of retry attempts for a failed dispatch (background retry worker).
+    LYNDRIX_GATEWAY_MAX_RETRY_ATTEMPTS: int = 3
+    # TTL in seconds for pending correlation actions (interactive button responses).
+    LYNDRIX_GATEWAY_CORRELATION_TTL_SECONDS: int = 3600
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"
@@ -167,6 +181,59 @@ class Settings(BaseSettings):
             specs.append({"url": url, "version": version})
 
         return specs
+
+    @property
+    def gateway_provider_specs(self) -> List[Dict[str, str]]:
+        """Parse LYNDRIX_GATEWAY_PROVIDERS into structured provider configs.
+
+        Each entry contains::
+
+            {"type": "discord", "instance_id": "ops",
+             "env_prefix": "LYNDRIX_GATEWAY_DISCORD_OPS"}
+
+        Returns an empty list when LYNDRIX_GATEWAY_PROVIDERS is unset.
+        """
+        if not self.LYNDRIX_GATEWAY_PROVIDERS:
+            return []
+        specs: List[Dict[str, str]] = []
+        for raw in self.LYNDRIX_GATEWAY_PROVIDERS.split(","):
+            entry = raw.strip()
+            if not entry:
+                continue
+            if ":" not in entry:
+                import logging as _logging
+                _logging.getLogger("Core:Config").warning(
+                    "LYNDRIX_GATEWAY_PROVIDERS: ignoring malformed entry '%s' "
+                    "(expected format 'type:instance_id', e.g. 'discord:ops')",
+                    entry,
+                )
+                continue
+            ptype, _, instance_id = entry.partition(":")
+            ptype       = ptype.strip()
+            instance_id = instance_id.strip()
+            prefix = (
+                f"LYNDRIX_GATEWAY_{ptype.upper()}_"
+                f"{instance_id.upper().replace('-', '_').replace(' ', '_')}"
+            )
+            specs.append({"type": ptype, "instance_id": instance_id, "env_prefix": prefix})
+        return specs
+
+    def get_gateway_provider_setting(self, env_prefix: str, key: str) -> Optional[str]:
+        """Return the env var value for a per-instance provider setting.
+
+        Looks up ``{env_prefix}_{key.upper()}`` from the OS environment.
+        Returns ``None`` when the variable is not set; callers should fall back
+        to Vault via ``ctx.get_secret()`` in that case.
+
+        Example::
+
+            # LYNDRIX_GATEWAY_DISCORD_OPS_WEBHOOK_URL=https://…
+            val = settings.get_gateway_provider_setting(
+                "LYNDRIX_GATEWAY_DISCORD_OPS", "WEBHOOK_URL"
+            )
+        """
+        full_key = f"{env_prefix}_{key.upper().replace('-', '_')}"
+        return os.getenv(full_key)
 
     def warn_insecure_defaults(self):
         """Emits log warnings when production-unsafe defaults are active."""

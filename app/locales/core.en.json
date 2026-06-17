@@ -38,6 +38,7 @@
     "tabs": {
       "profile": "Profile",
       "system": "System",
+      "notifications": "Notifications",
       "auth": "Auth",
       "groups": "Groups",
       "permissions": "Permissions",

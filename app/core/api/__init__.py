@@ -40,7 +40,7 @@ Plugins can expose HTTP endpoints without touching main.py::
         # Routes are mounted under /api/plugins/<plugin-id>/
 """
 
-__api_version__ = "1.1.0"
+__api_version__ = "1.2.0"
 
 from typing import Any, Dict, Literal, Optional
 
@@ -49,7 +49,11 @@ from fastapi import APIRouter  # re-exported so plugins don't need a direct fast
 
 from core.bus import bus as event_bus, GlobalEventBus
 from core.logger import get_logger
-from core.components.plugins.logic.models import ModuleManifest, ModulePermissions
+from core.components.plugins.logic.models import (
+    ModuleManifest,
+    ModulePermissions,
+    NotificationEndpoint,
+)
 from core.components.plugins.logic.context import ModuleContext
 from core.components.database.logic.db_service import db_instance, Base
 from core.api.router_registry import router_registry
@@ -102,6 +106,32 @@ auth_service = _lazy("core.components.auth.logic.auth_service.auth_service")
 monitor_service = _lazy("core.components.system.logic.monitor_service.monitor_service")
 plugin_service = _lazy("core.components.plugins.logic.plugin_service.plugin_service")
 
+# Theming — stable plugin surface
+# Import after services to avoid circular-import issues at module load time.
+from ui.theme import UIStyles  # noqa: E402
+from core.theming import get_theme_engine  # noqa: E402
+from core.theming.engine import ThemeEngine  # noqa: E402
+from core.theming.models import ThemePack, ThemeTokens, ThemeComponents  # noqa: E402
+from core.theming.loader import load_theme_pack  # noqa: E402
+
+# Messaging Gateway — stable plugin surface
+from core.components.messaging.adapter import GatewayAdapter, GatewayCapability, ProviderConfigField  # noqa: E402
+from core.components.messaging.models import (  # noqa: E402
+    OutboundMessage,
+    InboundMessage,
+    ActionButton,
+    MessageSeverity,
+    DeliveryResult,
+)
+from core.components.messaging.correlation import CorrelationStore, PendingAction  # noqa: E402
+from core.components.messaging.gateway import messaging_gateway, StreamBridge  # noqa: E402
+
+# Notification routing — stable plugin surface
+from core.components.notification_router.models import (  # noqa: E402
+    NotificationEnvelope,
+    ResolvedState,
+)
+
 
 __all__ = [
     "__api_version__",
@@ -115,6 +145,7 @@ __all__ = [
     "ModuleManifest",
     "ModulePermissions",
     "ModuleContext",
+    "NotificationEndpoint",
     # Database
     "db_instance",
     "Base",
@@ -136,4 +167,28 @@ __all__ = [
     "auth_service",
     "monitor_service",
     "plugin_service",
+    # Theming
+    "UIStyles",
+    "ThemeEngine",
+    "get_theme_engine",
+    "ThemePack",
+    "ThemeTokens",
+    "ThemeComponents",
+    "load_theme_pack",
+    # Messaging Gateway
+    "GatewayAdapter",
+    "GatewayCapability",
+    "ProviderConfigField",
+    "OutboundMessage",
+    "InboundMessage",
+    "ActionButton",
+    "MessageSeverity",
+    "DeliveryResult",
+    "CorrelationStore",
+    "PendingAction",
+    "messaging_gateway",
+    "StreamBridge",
+    # Notification routing
+    "NotificationEnvelope",
+    "ResolvedState",
 ]

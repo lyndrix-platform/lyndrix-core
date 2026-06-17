@@ -1,5 +1,7 @@
 from collections import defaultdict
+from datetime import datetime, timezone
 import threading
+from uuid import UUID
 
 from fastapi import APIRouter
 from core.bus import bus as global_bus
@@ -53,7 +55,92 @@ class ModuleContext:
         task_name = name or f"module:{self.manifest.id}"
         return global_bus.create_tracked_task(coro, name=task_name)
 
+    def notify(
+        self,
+        endpoint_name: str,
+        payload: dict | None = None,
+        *,
+        notification_id: str | None = None,
+        correlation_id: UUID | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        severity: str = "info",
+        clear: bool = False,
+    ) -> None:
+        """Emit a notification through the central router.
+
+        The endpoint must be declared in this plugin's manifest
+        ``notification_endpoints`` list. The router consumes the resulting
+        envelope on the ``notification:routed`` topic and applies the user's
+        configured routing (internal toast/history and/or external provider).
+        """
+        declared_names = {ep.name for ep in self.manifest.notification_endpoints}
+        if endpoint_name not in declared_names:
+            message = (
+                f"Plugin '{self.manifest.id}' is not permitted to notify endpoint "
+                f"'{endpoint_name}'. Declare it in manifest.notification_endpoints."
+            )
+            self.log.error(message)
+            raise PermissionError(message)
+
+        envelope = {
+            "envelope_version": "1",
+            "source_plugin_id": self.manifest.id,
+            "endpoint_name": endpoint_name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload or {},
+            "notification_id": notification_id,
+            "correlation_id": str(correlation_id) if correlation_id else None,
+            "title": title,
+            "body": body,
+            "severity": severity,
+            "clear": clear,
+        }
+        global_bus.emit("notification:routed", envelope)
+
+    def register_gateway_adapter(self, adapter) -> None:
+        """Register a GatewayAdapter into the central MessagingGateway.
+
+        Call this in your plugin's ``setup()`` hook after constructing the
+        adapter::
+
+            from core.api import GatewayAdapter, GatewayCapability, OutboundMessage
+
+            class MyAdapter(GatewayAdapter):
+                provider_id  = "myservice"
+                display_name = "My Service"
+                capabilities = GatewayCapability.TEXT
+
+                async def send(self, message: OutboundMessage) -> str | None:
+                    ...
+
+            def setup(ctx):
+                ctx.register_gateway_adapter(MyAdapter(ctx))
+        """
+        from core.components.messaging.gateway import messaging_gateway
+        messaging_gateway.register(adapter)
+        self.log.info("GATEWAY: Registered adapter '%s'.", adapter.provider_id)
+
     # --- HTTP ROUTE REGISTRATION ---
+
+    def register_theme_overrides(self, overrides: dict) -> None:
+        """Register partial UIStyles overrides scoped to this plugin.
+
+        Keys must match UIStyles class attribute names (e.g. ``"CARD_BASE"``).
+        Overrides are applied only when the plugin's own pages call
+        ``resolve_component_styles(plugin_id=self.manifest.id)``.
+        They do not affect the global UIStyles class or other plugins.
+
+        Example::
+
+            def setup(ctx):
+                ctx.register_theme_overrides({
+                    "CARD_BASE": "p-4 rounded-xl border border-zinc-700 bg-zinc-900",
+                })
+        """
+        from core.theming import get_theme_engine
+        get_theme_engine().register_plugin_overrides(self.manifest.id, overrides)
+        self.log.debug("THEME: Registered %d style override(s).", len(overrides))
 
     def register_routes(self, router: APIRouter) -> None:
         """
