@@ -42,7 +42,7 @@ class NotificationService:
         self._process_notification(payload, broadcast=False)
 
     def _process_notification(self, payload: dict, broadcast: bool):
-        notif_id = payload.get("id", str(time.time()))
+        notif_id = payload.get("id") or str(time.time())
         action = payload.get("action", "upsert")
         persist = payload.get("persist", True)
 

@@ -153,7 +153,14 @@ def open_plugin_settings_modal(manifest_id: str):
     settings_dialog.open()
 
 
-def main_layout(page_title: str):
+def main_layout(page_title: str, *, wide: bool = False):
+    """Wrap a page in the standard Lyndrix chrome.
+
+    ``wide=True`` lets the content area span the entire viewport width
+    (with mild padding) instead of being constrained to a centered
+    ``max-w-7xl`` column. Use it for data-dense pages like monitoring
+    dashboards where the centered column wastes screen real estate.
+    """
     def decorator(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -195,125 +202,166 @@ def main_layout(page_title: str):
                     active_manifest_id = item["id"]
                     break
 
+            # Detect whether current plugin has a settings UI (used in both header and popup)
+            _plugin_has_settings = False
+            if active_manifest_id and active_manifest_id != "core.settings":
+                _entry = module_manager.registry.get(active_manifest_id)
+                _plugin_has_settings = bool(
+                    _entry and hasattr(_entry.get("module"), "render_settings_ui")
+                )
+
             # --- HEADER ---
             with ui.header(elevated=False).classes(UIStyles.HEADER).props("dense"):
-                with ui.row().classes("items-center gap-2 w-full"):
+                with ui.row().classes("items-center gap-1 w-full"):
+
                     ui.button(icon="menu").props(
                         "flat round dense text-color=current"
                     ).on("click", lambda: left_drawer.toggle())
-                    ui.label(settings.APP_TITLE).classes(
+
+                    ui.label(page_title).classes(
                         "text-xs font-bold tracking-widest uppercase text-primary"
                     )
+
                     ui.space()
 
-                    with ui.row().classes("items-center gap-2"):
+                    render_notification_bell()
 
-                        # --- DYNAMISCHER SETTINGS BUTTON ---
-                        if active_manifest_id and active_manifest_id != "core.settings":
-                            entry = module_manager.registry.get(active_manifest_id)
-                            if entry and hasattr(
-                                entry.get("module"), "render_settings_ui"
+                    with ui.button(icon="account_circle").props(
+                        "flat round text-color=current"
+                    ):
+                        with ui.menu().classes(
+                            f"p-0 flex flex-col {UIStyles.MENU_CONTAINER}"
+                        ).style("width: 18rem").props('transition-show="jump-down" transition-hide="jump-up"'):
+                            # ── Profile header ────────────────────────────────
+                            with ui.row().classes(
+                                "w-full items-center p-4 gap-3 shrink-0 "
+                                "border-b border-slate-200 dark:border-zinc-800 "
+                                "bg-slate-50 dark:bg-zinc-900"
                             ):
-                                # FIX: text-color=current passt sich dem Theme an!
-                                ui.button(
-                                    icon="settings_applications",
-                                    on_click=lambda: open_plugin_settings_modal(
-                                        active_manifest_id
-                                    ),
-                                ).props("flat round text-color=current").tooltip(
-                                    f"{page_title} Einstellungen"
+                                ui.icon("admin_panel_settings", size="28px").classes(
+                                    "text-indigo-400"
                                 )
-                                ui.separator().props("vertical").classes(
-                                    "mx-1 h-6 self-center opacity-30"
-                                )
-
-                        with ui.row().classes(
-                            "items-center bg-slate-100 dark:bg-zinc-800 px-2 py-0.5 rounded-full border border-slate-200 dark:border-zinc-700 mr-2"
-                        ):
-                            ui.icon("light_mode", size="14px").classes(
-                                "text-orange-500"
-                            )
-                            ui.switch(value=is_dark, on_change=on_theme_switch).props(
-                                "dense color=primary"
-                            )
-                            ui.icon("dark_mode", size="14px").classes("text-indigo-400")
-
-                        ui.label(page_title).classes(UIStyles.LABEL_MINI)
-                        render_notification_bell()
-                        with ui.button(icon="account_circle").props(
-                            "flat round text-color=current"
-                        ):
-                            with ui.menu().classes(
-                                f"w-64 p-0 flex flex-col {UIStyles.MENU_CONTAINER}"
-                            ):
-                                with ui.row().classes(
-                                    "w-full items-center p-4 border-b border-zinc-800 bg-zinc-900 shrink-0 gap-3"
-                                ):
-                                    ui.icon(
-                                        "admin_panel_settings", size="28px"
-                                    ).classes("text-indigo-400")
-                                    with ui.column().classes("gap-0"):
-                                        username = _safe_user_value(
-                                            "username", "Administrator"
-                                        )
-                                        ui.label(username).classes(
-                                            "text-sm font-bold text-slate-200 tracking-wide capitalize"
-                                        )
-                                        ui.label("System Owner").classes(
-                                            "text-[10px] text-slate-500 uppercase tracking-widest"
-                                        )
-
-                                with ui.column().classes("w-full p-2 gap-1"):
-                                    # --- Language switcher ---
-                                    supported = [
-                                        s.strip()
-                                        for s in settings.SUPPORTED_LOCALES.split(",")
-                                        if s.strip()
-                                    ]
-                                    locale_labels = {
-                                        "en": "🇬🇧 English",
-                                        "de": "🇩🇪 Deutsch",
-                                    }
-                                    current_locale = get_locale()
-
-                                    def on_locale_change(e):
-                                        set_locale(e.value)
-                                        ui.run_javascript("window.location.reload()")
-
-                                    ui.select(
-                                        options={
-                                            loc: locale_labels.get(loc, loc.upper())
-                                            for loc in supported
-                                        },
-                                        value=current_locale,
-                                        on_change=on_locale_change,
-                                    ).props("dense outlined dark borderless").classes(
-                                        "w-full text-xs mb-1"
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    username = _safe_user_value("username", "Administrator")
+                                    ui.label(username).classes(
+                                        "text-sm font-bold text-slate-800 dark:text-slate-200 "
+                                        "tracking-wide capitalize truncate"
+                                    )
+                                    ui.label("System Owner").classes(
+                                        "text-[10px] text-slate-500 uppercase tracking-widest"
                                     )
 
-                                    ui.separator().classes("bg-zinc-800 my-1")
-
-                                    with ui.button(on_click=trigger_reload).props(
-                                        "flat dense"
-                                    ).classes(
-                                        "w-full justify-start px-3 py-2 text-slate-300 hover:bg-zinc-800 hover:text-white rounded transition-colors"
+                            # ── Page context + settings + theme (always) ──────
+                            with ui.column().classes(
+                                "w-full p-2 gap-0.5 "
+                                "border-b border-slate-200 dark:border-zinc-800"
+                            ):
+                                if _plugin_has_settings:
+                                    with ui.button(
+                                        on_click=lambda: open_plugin_settings_modal(
+                                            active_manifest_id
+                                        )
+                                    ).props("flat dense").classes(
+                                        "w-full justify-start px-3 py-2 "
+                                        "text-slate-700 dark:text-slate-300 "
+                                        "hover:bg-slate-100 dark:hover:bg-zinc-800 "
+                                        "hover:text-slate-900 dark:hover:text-white "
+                                        "rounded transition-colors"
                                     ):
-                                        ui.icon("refresh", size="16px").classes(
-                                            "mr-2 text-slate-400"
+                                        ui.icon("settings_applications", size="16px").classes(
+                                            "mr-2 text-primary"
                                         )
-                                        ui.label(t("core.header.refresh_ui")).classes(
-                                            "text-xs font-bold capitalize"
+                                        ui.label(f"{page_title} Settings").classes(
+                                            "text-xs font-bold"
                                         )
 
-                                    with ui.button(on_click=logout).props(
-                                        "flat dense"
-                                    ).classes(
-                                        "w-full justify-start px-3 py-2 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded transition-colors mt-1"
-                                    ):
-                                        ui.icon("logout", size="16px").classes("mr-2")
-                                        ui.label(t("core.header.logout")).classes(
-                                            "text-xs font-bold capitalize"
+                                with ui.row().classes(
+                                    "w-full items-center justify-between px-3 py-2"
+                                ):
+                                    with ui.row().classes("items-center gap-2"):
+                                        ui.icon("brightness_medium", size="16px").classes(
+                                            "text-slate-400"
                                         )
+                                        ui.label("Theme").classes(
+                                            "text-xs font-bold "
+                                            "text-slate-700 dark:text-slate-300"
+                                        )
+                                    with ui.row().classes(
+                                        "items-center bg-slate-100 dark:bg-zinc-800 "
+                                        "px-1.5 py-0.5 rounded-full "
+                                        "border border-slate-200 dark:border-zinc-700"
+                                    ):
+                                        ui.icon("light_mode", size="13px").classes(
+                                            "text-orange-500"
+                                        )
+                                        ui.switch(
+                                            value=is_dark, on_change=on_theme_switch
+                                        ).props("dense color=primary")
+                                        ui.icon("dark_mode", size="13px").classes(
+                                            "text-indigo-400"
+                                        )
+
+                            # ── Language / actions ────────────────────────────
+                            with ui.column().classes("w-full p-2 gap-1"):
+                                supported = [
+                                    s.strip()
+                                    for s in settings.SUPPORTED_LOCALES.split(",")
+                                    if s.strip()
+                                ]
+                                locale_labels = {
+                                    "en": "🇬🇧 English",
+                                    "de": "🇩🇪 Deutsch",
+                                }
+                                current_locale = get_locale()
+
+                                def on_locale_change(e):
+                                    set_locale(e.value)
+                                    ui.run_javascript("window.location.reload()")
+
+                                ui.select(
+                                    options={
+                                        loc: locale_labels.get(loc, loc.upper())
+                                        for loc in supported
+                                    },
+                                    value=current_locale,
+                                    on_change=on_locale_change,
+                                ).props("dense outlined dark borderless").classes(
+                                    "w-full text-xs mb-1"
+                                )
+
+                                ui.separator().classes(
+                                    "bg-slate-200 dark:bg-zinc-800 my-1"
+                                )
+
+                                with ui.button(on_click=trigger_reload).props(
+                                    "flat dense"
+                                ).classes(
+                                    "w-full justify-start px-3 py-2 "
+                                    "text-slate-700 dark:text-slate-300 "
+                                    "hover:bg-slate-100 dark:hover:bg-zinc-800 "
+                                    "hover:text-slate-900 dark:hover:text-white "
+                                    "rounded transition-colors"
+                                ):
+                                    ui.icon("refresh", size="16px").classes(
+                                        "mr-2 text-slate-400"
+                                    )
+                                    ui.label(t("core.header.refresh_ui")).classes(
+                                        "text-xs font-bold capitalize"
+                                    )
+
+                                with ui.button(on_click=logout).props(
+                                    "flat dense"
+                                ).classes(
+                                    "w-full justify-start px-3 py-2 mt-1 "
+                                    "text-red-500 dark:text-red-400 "
+                                    "hover:bg-red-50 dark:hover:bg-red-500/10 "
+                                    "hover:text-red-600 dark:hover:text-red-300 "
+                                    "rounded transition-colors"
+                                ):
+                                    ui.icon("logout", size="16px").classes("mr-2")
+                                    ui.label(t("core.header.logout")).classes(
+                                        "text-xs font-bold capitalize"
+                                    )
 
             # --- SIDEBAR ---
             with ui.left_drawer(value=False).classes(UIStyles.SIDEBAR) as left_drawer:
@@ -361,7 +409,12 @@ def main_layout(page_title: str):
                                     )
 
             # --- CONTENT ---
-            with ui.column().classes("p-4 md:p-8 w-full max-w-7xl mx-auto flex-grow"):
+            content_cls = (
+                "p-4 md:p-6 w-full flex-grow"
+                if wide
+                else "p-4 md:p-8 w-full max-w-7xl mx-auto flex-grow"
+            )
+            with ui.column().classes(content_cls):
                 if inspect.iscoroutinefunction(fn):
                     return await fn(*args, **kwargs)
                 else:

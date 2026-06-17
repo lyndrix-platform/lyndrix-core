@@ -10,46 +10,63 @@ class UIStyles:
     # ----------------------------------------------------
     # 1. KARTEN & CONTAINER
     # ----------------------------------------------------
-    CARD_BASE = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 overflow-hidden lyndrix-card'
-    CARD_GLASS = 'p-6 rounded-none shadow-lg border border-slate-200 dark:border-zinc-800 overflow-hidden lyndrix-glass-card'
-    CARD_HIGHLIGHT = 'p-6 rounded-none border-2 border-primary bg-indigo-50/50 dark:bg-indigo-900/20'
-    MODAL_CONTAINER = '!bg-slate-50 dark:!bg-zinc-950 border border-slate-200 dark:border-zinc-800 shadow-2xl rounded-2xl'
+    CARD_BASE = 'p-6 rounded-2xl shadow-lg border border-slate-200 dark:border-white/5 overflow-hidden lyndrix-card'
+    CARD_GLASS = 'p-6 rounded-2xl shadow-lg border border-slate-200 dark:border-white/5 overflow-hidden lyndrix-glass-card'
+    CARD_HIGHLIGHT = 'p-6 rounded-2xl border-2 border-primary bg-sky-50/50 dark:bg-cyan-500/5'
+    CARD_COMPACT = 'p-4 rounded-xl border border-slate-200 dark:border-white/5 lyndrix-card'
+    MODAL_CONTAINER = '!bg-slate-50 dark:!bg-[#0f1629] border border-slate-200 dark:border-white/5 shadow-2xl rounded-2xl'
+    PANEL_SUBTLE = 'border border-slate-200 dark:border-white/5 bg-slate-50 dark:bg-white/[0.03]'
+
+    # ----------------------------------------------------
+    # 1b. SELECTABLE TILES (border+bg+text per state; layout/size at call site)
+    # ----------------------------------------------------
+    TILE_BASE = 'rounded-lg border transition-colors select-none'
+    TILE_SELECTED = 'border-primary bg-primary/10 text-primary'
+    TILE_DEFAULT = 'border-slate-300 dark:border-white/10 hover:border-primary/50 bg-slate-50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-zinc-200 cursor-pointer'
+    TILE_DISABLED = 'border-slate-200 dark:border-white/5 bg-slate-100 dark:bg-white/[0.02] opacity-40 cursor-not-allowed text-slate-400 dark:text-zinc-600'
+    TILE_WARNING = 'border-amber-500/60 hover:border-amber-400 bg-amber-500/10 text-amber-300 cursor-pointer'
 
     # ----------------------------------------------------
     # 2. STRUKTUR & LAYOUT
     # ----------------------------------------------------
-    HEADER = '!bg-white/80 dark:!bg-zinc-950/80 backdrop-blur-md border-b border-slate-200 dark:border-zinc-800 text-slate-800 dark:text-white'    
-    TAB_BAR = 'w-full justify-start border-b border-slate-200 dark:border-zinc-800 text-slate-500 dark:text-zinc-400'
+    HEADER = '!bg-white/80 dark:!bg-[#0a0e1a]/80 backdrop-blur-md border-b border-slate-200 dark:border-white/5 text-slate-800 dark:text-white'
+    TAB_BAR = 'w-full justify-start border-b border-slate-200 dark:border-white/5 text-slate-500 dark:text-zinc-400'
     # ----------------------------------------------------
     # 3. TYPOGRAFIE
     # ----------------------------------------------------
     TITLE_H1 = 'text-3xl font-bold tracking-tight text-slate-900 dark:text-white'
     TITLE_H2 = 'text-2xl font-bold tracking-tight text-slate-800 dark:text-zinc-100'
     TITLE_H3 = 'text-lg font-bold text-slate-800 dark:text-zinc-100'
-    TEXT_MUTED = 'text-sm text-slate-500 dark:text-zinc-400'
-    LABEL_MINI = 'text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-zinc-500'
+    TEXT_MUTED = 'text-sm text-slate-600 dark:text-zinc-200'
+    TEXT_HINT = 'text-xs text-slate-600 dark:text-zinc-300'
+    LABEL_HEADING = 'text-sm font-semibold text-slate-800 dark:text-zinc-200'
+    LABEL_FIELD = 'text-xs font-semibold text-slate-600 dark:text-zinc-300'
+    LABEL_MINI = 'text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-zinc-400'
 
     # ----------------------------------------------------
     # 4. BUTTONS
     # ----------------------------------------------------
-    BUTTON_PRIMARY = 'w-full py-4 bg-primary hover:bg-opacity-80 rounded-xl font-bold transition-all text-white'
-    BUTTON_SECONDARY = 'w-full py-4 bg-slate-200 dark:bg-zinc-800 hover:bg-slate-300 dark:hover:bg-zinc-700 rounded-xl font-bold transition-all text-slate-900 dark:text-white'
+    BUTTON_PRIMARY = 'w-full py-4 rounded-xl font-bold transition-all text-white lyndrix-btn-primary'
+    BUTTON_SECONDARY = 'w-full py-4 bg-slate-200 dark:bg-white/5 hover:bg-slate-300 dark:hover:bg-white/10 rounded-xl font-bold transition-all text-slate-900 dark:text-white'
+
+    # Standard input props string (pass via .props(f"{UIStyles.INPUT_PROPS} ..."))
+    INPUT_PROPS = 'outlined dense'
 
     # ----------------------------------------------------
     # 5. DROPDOWN MENÜS
     # ----------------------------------------------------
-    MENU_CONTAINER = 'lyndrix-menu shadow-2xl rounded-2xl overflow-hidden border border-slate-200 dark:border-zinc-800'
-    MENU_ITEM = 'text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors px-4 py-2'
+    MENU_CONTAINER = 'lyndrix-menu shadow-2xl rounded-2xl overflow-hidden border border-slate-200 dark:border-white/5'
+    MENU_ITEM = 'text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors px-4 py-2'
     MENU_ITEM_DANGER = 'text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors px-4 py-2'
 
     # ----------------------------------------------------
     # 6. SIDEBAR & NAVIGATION
     # ----------------------------------------------------
-    SIDEBAR = '!bg-slate-50 dark:!bg-zinc-950 border-r border-slate-200 dark:border-zinc-800 !p-4 flex flex-col transition-colors'
+    SIDEBAR = '!bg-slate-50 dark:!bg-[#0a0e1a] border-r border-slate-200 dark:border-white/5 !p-4 flex flex-col transition-colors'
     NAV_CATEGORY = 'px-3 mb-2 mt-4 text-[11px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-widest'
     NAV_LINK_BASE = 'w-full flex items-center px-3 py-2 no-underline transition-all'
-    NAV_LINK_ACTIVE = 'bg-blue-50 dark:bg-blue-900/10 text-primary border-l-2 border-primary rounded-r-xl'
-    NAV_LINK_INACTIVE = 'text-slate-500 dark:text-zinc-400 hover:bg-slate-200 dark:hover:bg-zinc-800 rounded-xl'
+    NAV_LINK_ACTIVE = 'bg-sky-50 dark:bg-cyan-500/10 text-primary border-l-2 border-primary rounded-r-xl'
+    NAV_LINK_INACTIVE = 'text-slate-500 dark:text-zinc-400 hover:bg-slate-200 dark:hover:bg-white/5 rounded-xl'
 
     # ----------------------------------------------------
     # 7. AUTH SURFACES (login, unseal, profile)
@@ -81,6 +98,8 @@ class UIStyles:
     BADGE_ACCENT = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
     BADGE_ACCENT_VIOLET = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30'
     BADGE_SUCCESS = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+    BADGE_WARNING = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30'
+    BADGE_DANGER = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 border border-red-500/30'
 
     CHIP_ROLE = 'text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/5 text-zinc-400 border border-white/10'
     CHIP_OVERFLOW = 'text-[9px] text-zinc-500'
@@ -97,6 +116,7 @@ class UIStyles:
 
     STATUS_TEXT_SUCCESS = 'text-xs text-emerald-400'
     STATUS_TEXT_ERROR = 'text-xs text-red-400'
+    STATUS_TEXT_WARNING = 'text-xs text-amber-400'
     STATUS_TEXT_NEUTRAL = 'text-xs text-zinc-500'
 
 
@@ -333,6 +353,23 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
             .body--dark .bg-white, .dark .bg-white {{
                 background-color: var(--lx-surface) !important;
                 color: var(--lx-text) !important;
+            }}
+
+            /* ── Notification popup — centered on small screens ────────────── */
+            @media (max-width: 639px) {{
+                .q-menu.lyndrix-notif-popup {{
+                    left: 50% !important;
+                    right: auto !important;
+                    transform: translateX(-50%) !important;
+                }}
+            }}
+
+            /* ── State colours (used by monitoring plugin and similar) ────── */
+            :root {{
+                --lx-state-up:      #10b981;
+                --lx-state-down:    #f43f5e;
+                --lx-state-paused:  #f59e0b;
+                --lx-state-unknown: #0ea5e9;
             }}
 
             ::-webkit-scrollbar {{ width: 8px; height: 8px; }}

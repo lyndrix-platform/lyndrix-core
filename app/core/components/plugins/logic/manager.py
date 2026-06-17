@@ -160,6 +160,22 @@ class ModuleManager:
             if manifest.id in self.registry:
                 return False
 
+            # Eagerly register declared notification endpoints so plugins can
+            # call ctx.notify(...) during setup() before the router runs its
+            # db:connected sync pass. The router's later sync is idempotent.
+            if getattr(manifest, "notification_endpoints", None):
+                try:
+                    from core.components.notification_router.logic.endpoint_registry import (
+                        endpoint_registry,
+                    )
+                    for ep in manifest.notification_endpoints:
+                        endpoint_registry.upsert(manifest.id, ep)
+                except Exception as exc:
+                    log.debug(
+                        f"NOTIFY: deferred endpoint registration for '{manifest.id}' "
+                        f"(router not ready): {exc}"
+                    )
+
             ctx = ModuleContext(manifest)
 
             # Register plugin locale files so t() works with this plugin's namespace.
@@ -477,6 +493,16 @@ class ModuleManager:
 
         self._teardown_ui(module_id)
         entry = self.registry[module_id]
+
+        # Drop notification endpoints for this plugin (router sync_declared_endpoints
+        # will clean up DB rows on next ui:needs_refresh / db:connected pass).
+        try:
+            from core.components.notification_router.logic.router_service import (
+                notification_router,
+            )
+            notification_router.forget_plugin(module_id)
+        except Exception:
+            pass
 
         # --- VENDORING: Clean up the plugin's private dependency path ---
         if entry["manifest"].type == "PLUGIN":

@@ -10,12 +10,12 @@ def render_setup_wizard():
     attach_maintenance_overlay() 
     ui.query('body').style('background-color: #09090b;') 
     
-    with ui.column().classes('w-full h-screen items-center justify-center bg-slate-50 dark:bg-zinc-950'):
-        with ui.card().classes('shadow-2xl p-8 rounded-3xl border border-zinc-800 bg-zinc-900 text-zinc-100 w-full max-w-md'):
+    with ui.column().classes('w-full h-screen items-center justify-center ' + UIStyles.AUTH_PAGE_BG):
+        with ui.card().classes(UIStyles.AUTH_CARD):
             with ui.column().classes('items-center w-full gap-4'):
                 ui.icon('auto_awesome', size='48px').classes('text-emerald-500 mb-2')
                 ui.label("System Initialisierung").classes('text-2xl font-bold tracking-tight')
-                ui.label("Bitte lege einen sicheren Master-Key fest.").classes('text-center text-sm text-zinc-400 mb-4')
+                ui.label("Bitte lege einen sicheren Master-Key fest.").classes(UIStyles.AUTH_SUBTITLE)
                 
                 master_key_input = ui.input("Neuer Master-Key").props('type=password outlined dark').classes('w-full mb-2')
                 status_label = ui.label('').classes('text-xs font-mono')

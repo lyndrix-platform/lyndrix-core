@@ -1,12 +1,18 @@
-import sys
+import io
 import os
 import platform
+import sys
+import zipfile
+from pathlib import Path
+
 import psutil
 from nicegui import ui
 
 from config import settings
 from core.i18n import t
 from core.logger import get_logger
+from core.theming import get_theme_engine
+from core.theming.engine import THEMES_BASE_DIR
 from ui.theme import UIStyles
 from version import __version__, __codename__, __release_date__, get_uptime
 
@@ -16,6 +22,9 @@ from core.components.auth.ui.groups_card import render_groups_card
 from core.components.auth.ui.permissions_card import render_permissions_card
 from core.components.plugins.ui.plugins_ui import render_plugin_manager
 from core.components.plugins.logic.manager import module_manager
+from core.components.notification_router.ui.notifications_settings import (
+    render_notifications_settings_card,
+)
 from core.services import vault_instance, db_instance
 
 log = get_logger("UI:Settings")
@@ -23,10 +32,10 @@ log = get_logger("UI:Settings")
 
 def _kv_row(label: str, value: str, mono: bool = False, value_cls: str = ''):
     """Renders a labeled key/value row inside a column container."""
-    with ui.row().classes('w-full items-center justify-between py-2 border-b border-zinc-800/40 last:border-0'):
-        ui.label(label).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold shrink-0')
+    with ui.row().classes('w-full items-center justify-between py-2 border-b border-slate-200 dark:border-white/10 last:border-0'):
+        ui.label(label).classes(UIStyles.LABEL_MINI + ' shrink-0')
         cls = 'text-sm font-mono' if mono else 'text-sm'
-        cls += f' {value_cls}' if value_cls else ' text-zinc-100'
+        cls += f' {value_cls}' if value_cls else ' text-slate-900 dark:text-zinc-100'
         ui.label(value).classes(cls)
 
 
@@ -55,19 +64,19 @@ def _render_editable_settings_card() -> None:
                 if not specs:
                     continue
                 ui.label(category).classes(
-                    'text-[10px] font-bold uppercase tracking-wider text-zinc-500 mt-3'
+                    UIStyles.LABEL_MINI + ' mt-3'
                 )
                 for spec in specs:
                     is_locked = os.getenv(spec.field) is not None
                     locked[spec.field] = is_locked
                     current = getattr(settings, spec.field, '')
 
-                    with ui.column().classes('w-full gap-0 py-2 border-b border-zinc-800/30 last:border-0'):
+                    with ui.column().classes('w-full gap-0 py-2 border-b border-slate-200 dark:border-white/10 last:border-0'):
                         with ui.row().classes('w-full items-center justify-between gap-4'):
                             with ui.column().classes('gap-0 flex-grow min-w-0'):
-                                ui.label(spec.label).classes('text-sm font-bold text-zinc-200')
+                                ui.label(spec.label).classes('text-sm font-bold text-slate-800 dark:text-zinc-200')
                                 ui.label(f'{spec.description}  ·  Env: {spec.env_var}').classes(
-                                    'text-xs text-zinc-500'
+                                    UIStyles.TEXT_HINT
                                 )
 
                             if spec.kind == 'bool':
@@ -139,6 +148,170 @@ def _render_editable_settings_card() -> None:
                 ui.button('Save settings', icon='save', on_click=_save).props(
                     'unelevated size=sm color=primary')
 
+def _render_theme_management_card() -> None:
+    """Theme selector, palette preview, upload and delete."""
+    engine = get_theme_engine()
+    available = engine.list_available_themes()
+    active_id = settings.DEFAULT_THEME_ID
+
+    with ui.card().classes(UIStyles.CARD_GLASS + ' w-full').style('padding: 0; flex-wrap: nowrap'):
+        ui.element('div').classes(UIStyles.GRAD_BAR_ACCENT)
+        with ui.column().classes('w-full flex-grow p-5 gap-4'):
+            with ui.row().classes('items-center gap-2 mb-1'):
+                ui.icon('palette', size='18px').classes(UIStyles.ICON_INFO)
+                ui.label('Active Theme').classes(UIStyles.TITLE_H3)
+
+            # ── Palette preview ──────────────────────────────────────────────
+            try:
+                theme = engine.resolve_theme(active_id)
+                palette = engine.resolve_runtime_palette(dark=True, theme_id=active_id)
+                with ui.row().classes('items-center gap-2 flex-wrap'):
+                    ui.label(active_id).classes(
+                        'text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full '
+                        'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                    )
+                    for name, color in palette.items():
+                        with ui.element('div').classes('flex flex-col items-center gap-1'):
+                            ui.element('div').style(
+                                f'width:20px;height:20px;border-radius:50%;background:{color};'
+                                f'border:1px solid rgba(255,255,255,0.15)'
+                            ).tooltip(f'{name}: {color}')
+            except Exception:
+                ui.label('Could not load theme preview.').classes(UIStyles.TEXT_MUTED)
+
+            ui.separator().classes('bg-slate-200 dark:bg-white/10')
+
+            # ── Theme switcher ───────────────────────────────────────────────
+            with ui.row().classes('items-center gap-3 w-full flex-wrap'):
+                ui.label('Switch Theme').classes('text-sm font-bold text-slate-800 dark:text-zinc-200 shrink-0')
+                theme_select = ui.select(
+                    options=available,
+                    value=active_id,
+                ).props('dense outlined options-dense').classes('w-48')
+
+                def _apply_theme():
+                    new_id = theme_select.value
+                    if not new_id or new_id == settings.DEFAULT_THEME_ID:
+                        return
+                    settings.DEFAULT_THEME_ID = new_id
+                    if vault_instance.is_connected:
+                        try:
+                            data: dict = {}
+                            try:
+                                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                                    path='core/settings', mount_point='lyndrix')
+                                data = resp['data']['data'] or {}
+                            except Exception:
+                                pass
+                            data['DEFAULT_THEME_ID'] = new_id
+                            vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                                path='core/settings', mount_point='lyndrix', secret=data)
+                        except Exception as e:
+                            ui.notify(f'Could not persist to Vault: {e}', type='warning')
+                    ui.notify(
+                        f'Theme switched to "{new_id}". Reload the page to apply.',
+                        type='positive',
+                    )
+
+                ui.button('Apply', icon='check', on_click=_apply_theme).props(
+                    'unelevated size=sm color=primary'
+                )
+
+            ui.separator().classes('bg-slate-200 dark:bg-white/10')
+
+            # ── Upload new theme ─────────────────────────────────────────────
+            with ui.column().classes('w-full gap-2'):
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('upload_file', size='18px').classes(UIStyles.ICON_MUTED)
+                    ui.label('Upload Theme').classes('text-sm font-bold text-slate-800 dark:text-zinc-200')
+                ui.label(
+                    'Upload a ZIP containing tokens.json and components.json. '
+                    'The ZIP filename (without .zip) becomes the theme ID.'
+                ).classes(UIStyles.TEXT_HINT)
+
+                def _handle_upload(e):
+                    try:
+                        data = e.content.read()
+                        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                            names = zf.namelist()
+                            if 'tokens.json' not in names or 'components.json' not in names:
+                                ui.notify(
+                                    'ZIP must contain tokens.json and components.json at root level.',
+                                    type='negative',
+                                )
+                                return
+                            theme_id = Path(e.name).stem
+                            if not theme_id or '/' in theme_id or '.' in theme_id:
+                                ui.notify('Invalid theme ID derived from filename.', type='negative')
+                                return
+                            dest = THEMES_BASE_DIR / theme_id
+                            dest.mkdir(parents=True, exist_ok=True)
+                            zf.extract('tokens.json', dest)
+                            zf.extract('components.json', dest)
+
+                        from core.theming.schema import validate_theme_pack
+                        from core.theming.loader import load_theme_pack
+                        try:
+                            pack = load_theme_pack(THEMES_BASE_DIR, theme_id)
+                            errors = validate_theme_pack(pack)
+                        except Exception as ve:
+                            ui.notify(f'Theme validation failed: {ve}', type='negative')
+                            return
+
+                        if errors:
+                            ui.notify(
+                                f'Theme "{theme_id}" uploaded with {len(errors)} missing key(s) '
+                                f'(backfilled with defaults). Reload to see it in the list.',
+                                type='warning',
+                            )
+                        else:
+                            ui.notify(
+                                f'Theme "{theme_id}" uploaded and validated. '
+                                f'Reload the page to select it.',
+                                type='positive',
+                            )
+                    except zipfile.BadZipFile:
+                        ui.notify('Invalid ZIP file.', type='negative')
+                    except Exception as ex:
+                        ui.notify(f'Upload failed: {ex}', type='negative')
+
+                ui.upload(
+                    label='Drop theme ZIP here',
+                    on_upload=_handle_upload,
+                    auto_upload=True,
+                ).props('accept=".zip" flat bordered').classes('w-full max-w-md')
+
+            ui.separator().classes('bg-slate-200 dark:bg-white/10')
+
+            # ── Delete theme ─────────────────────────────────────────────────
+            deletable = [t for t in available if t != 'default']
+            if deletable:
+                with ui.row().classes('items-center gap-3 flex-wrap'):
+                    ui.label('Delete Theme').classes('text-sm font-bold text-slate-800 dark:text-zinc-200 shrink-0')
+                    del_select = ui.select(
+                        options=deletable,
+                        value=deletable[0] if deletable else None,
+                    ).props('dense outlined options-dense').classes('w-48')
+
+                    def _delete_theme():
+                        tid = del_select.value
+                        if not tid or tid == 'default':
+                            return
+                        import shutil
+                        target = THEMES_BASE_DIR / tid
+                        if target.exists():
+                            shutil.rmtree(target)
+                        if settings.DEFAULT_THEME_ID == tid:
+                            settings.DEFAULT_THEME_ID = 'default'
+                        ui.notify(f'Theme "{tid}" deleted. Reload to apply.', type='positive')
+
+                    ui.button('Delete', icon='delete', on_click=_delete_theme).props(
+                        'outline size=sm color=negative'
+                    )
+            else:
+                ui.label('No custom themes installed yet.').classes(UIStyles.TEXT_HINT)
+
+
 async def render_settings_page():
     """Renders the complete Settings dashboard."""
 
@@ -150,17 +323,19 @@ async def render_settings_page():
                 ui.label(t('core.settings.page.title')).classes(UIStyles.TITLE_H2)
                 ui.label(t('core.settings.page.subtitle')).classes(UIStyles.TEXT_MUTED + ' uppercase tracking-widest text-xs')
 
-        ui.separator().classes('bg-zinc-800/60')
+        ui.separator().classes('bg-slate-200 dark:bg-white/10')
 
         # ── Tabs ────────────────────────────────────────────────────────────
         with ui.tabs().classes(UIStyles.TAB_BAR) as tabs:
-            tab_profile  = ui.tab(t('core.settings.tabs.profile'),      icon='person')
-            tab_system   = ui.tab(t('core.settings.tabs.system'),       icon='tune')
-            tab_auth     = ui.tab(t('core.settings.tabs.auth'),         icon='security')
-            tab_groups   = ui.tab(t('core.settings.tabs.groups'),       icon='group')
-            tab_perms    = ui.tab(t('core.settings.tabs.permissions'),  icon='verified_user')
-            tab_plugins  = ui.tab(t('core.settings.tabs.plugins'),      icon='extension')
-            tab_info     = ui.tab(t('core.settings.tabs.info'),         icon='info')
+            tab_profile       = ui.tab(t('core.settings.tabs.profile'),       icon='person')
+            tab_system        = ui.tab(t('core.settings.tabs.system'),        icon='tune')
+            tab_notifications = ui.tab(t('core.settings.tabs.notifications'), icon='campaign')
+            tab_appearance    = ui.tab('Appearance',                           icon='palette')
+            tab_auth          = ui.tab(t('core.settings.tabs.auth'),          icon='security')
+            tab_groups        = ui.tab(t('core.settings.tabs.groups'),        icon='group')
+            tab_perms         = ui.tab(t('core.settings.tabs.permissions'),   icon='verified_user')
+            tab_plugins       = ui.tab(t('core.settings.tabs.plugins'),       icon='extension')
+            tab_info          = ui.tab(t('core.settings.tabs.info'),          icon='info')
 
         with ui.tab_panels(tabs, value=tab_profile).classes('w-full bg-transparent p-0 mt-4'):
 
@@ -221,12 +396,12 @@ async def render_settings_page():
                             )
                             specs = settings.desired_plugin_specs
                             if specs:
-                                ui.separator().classes('my-2 bg-zinc-800/40')
-                                ui.label(t('core.settings.system.parsed_specs')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold mb-1')
+                                ui.separator().classes('my-2 bg-slate-200 dark:bg-white/10')
+                                ui.label(t('core.settings.system.parsed_specs')).classes(UIStyles.LABEL_MINI + ' mb-1')
                                 for spec in specs:
                                     with ui.row().classes('items-center gap-2 py-1'):
                                         ui.icon('subdirectory_arrow_right', size='14px').classes('text-zinc-600')
-                                        ui.label(spec['url']).classes('text-xs font-mono text-zinc-300 flex-grow truncate')
+                                        ui.label(spec['url']).classes(UIStyles.TEXT_HINT + ' font-mono flex-grow truncate')
                                         ui.label(f"@ {spec['version']}").classes('text-xs font-mono text-sky-400 shrink-0')
 
                     # API Integration
@@ -236,8 +411,8 @@ async def render_settings_page():
                             with ui.row().classes('items-center gap-2 mb-1'):
                                 ui.icon('api', size='18px').classes('text-sky-400')
                                 ui.label(t('core.settings.system.api_integration')).classes(UIStyles.TITLE_H3)
-                            ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_MUTED + ' text-xs')
-                            ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes('text-xs text-zinc-500')
+                            ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_HINT)
+                            ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
                             current_token = ''
                             if vault_instance.is_connected:
@@ -278,11 +453,11 @@ async def render_settings_page():
                                     ui.label(t('core.settings.system.vault_connected') if vault_ok else t('core.settings.system.vault_offline')).classes('text-xs')
 
                             # ── System API Key ───────────────────────────────
-                            ui.separator().classes('my-3 bg-zinc-800/40')
+                            ui.separator().classes('my-3 bg-slate-200 dark:bg-white/10')
                             with ui.row().classes('items-center gap-2 mb-1'):
                                 ui.icon('vpn_key', size='18px').classes('text-amber-400')
                                 ui.label('System API Key').classes(UIStyles.TITLE_H3)
-                            ui.label('Env: LYNDRIX_SYSTEM_API_KEY').classes('text-xs text-zinc-500')
+                            ui.label('Env: LYNDRIX_SYSTEM_API_KEY').classes(UIStyles.TEXT_HINT)
 
                             env_key = os.getenv('LYNDRIX_SYSTEM_API_KEY')
                             env_locked = bool(env_key and env_key.strip())
@@ -291,13 +466,13 @@ async def render_settings_page():
                                 ui.label(
                                     'Set via the LYNDRIX_SYSTEM_API_KEY environment variable. '
                                     'The environment value takes precedence and cannot be overridden here.'
-                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                                ).classes(UIStyles.TEXT_HINT)
                             else:
                                 ui.label(
                                     'Master key for machine-to-machine API access (header X-API-Key or '
                                     'Authorization: Bearer). Unset by default — leave empty to keep the '
                                     'API-key method disabled.'
-                                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                                ).classes(UIStyles.TEXT_HINT)
 
                             current_api_key = ''
                             if vault_instance.is_connected:
@@ -356,6 +531,15 @@ async def render_settings_page():
                                         ui.icon('lock', size='14px')
                                         ui.label('Locked by environment').classes('text-xs')
 
+            # ── NOTIFICATIONS ───────────────────────────────────────────────
+            with ui.tab_panel(tab_notifications).classes('p-0'):
+                render_notifications_settings_card()
+
+            # ── APPEARANCE ───────────────────────────────────────────────────
+            with ui.tab_panel(tab_appearance).classes('p-0'):
+                with ui.column().classes('w-full gap-4'):
+                    _render_theme_management_card()
+
             # ── AUTH ─────────────────────────────────────────────────────────
             with ui.tab_panel(tab_auth).classes('p-0'):
                 await render_auth_settings_card()
@@ -389,7 +573,7 @@ async def render_settings_page():
                                     ui.label(__codename__).classes(
                                         'text-xs font-bold px-3 py-0.5 rounded-full '
                                         'bg-violet-500/15 text-violet-300 border border-violet-500/30')
-                                    ui.label(t('core.settings.info.released', date=__release_date__)).classes('text-xs text-zinc-500')
+                                    ui.label(t('core.settings.info.released', date=__release_date__)).classes(UIStyles.TEXT_HINT)
 
                     # Runtime
                     with ui.card().classes(UIStyles.CARD_GLASS + ' w-full').style('padding: 0; flex-wrap: nowrap'):
@@ -403,8 +587,8 @@ async def render_settings_page():
                             _kv_row(t('core.settings.info.architecture'), platform.machine())
                             _kv_row(t('core.settings.info.node_hostname'), platform.node(), mono=True)
                             with ui.row().classes('w-full items-center justify-between py-2'):
-                                ui.label(t('core.settings.info.uptime')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold shrink-0')
-                                uptime_label = ui.label(get_uptime()).classes('text-sm font-mono text-zinc-100')
+                                ui.label(t('core.settings.info.uptime')).classes(UIStyles.LABEL_MINI + ' shrink-0')
+                                uptime_label = ui.label(get_uptime()).classes('text-sm font-mono text-slate-900 dark:text-zinc-100')
                             ui.timer(5.0, lambda: uptime_label.set_text(get_uptime()))
 
                     # System Resources
@@ -414,15 +598,15 @@ async def render_settings_page():
                             with ui.row().classes('items-center gap-2 mb-3'):
                                 ui.icon('memory', size='18px').classes('text-emerald-400')
                                 ui.label(t('core.settings.info.system_resources')).classes(UIStyles.TITLE_H3)
-                            with ui.row().classes('w-full items-center justify-between py-2 border-b border-zinc-800/40'):
-                                ui.label(t('core.settings.info.cpu')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold')
-                                cpu_label = ui.label('–').classes('text-sm font-mono text-zinc-100')
-                            with ui.row().classes('w-full items-center justify-between py-2 border-b border-zinc-800/40'):
-                                ui.label(t('core.settings.info.memory')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold')
-                                mem_label = ui.label('–').classes('text-sm font-mono text-zinc-100')
+                            with ui.row().classes('w-full items-center justify-between py-2 border-b border-slate-200 dark:border-white/10'):
+                                ui.label(t('core.settings.info.cpu')).classes(UIStyles.LABEL_MINI)
+                                cpu_label = ui.label('–').classes('text-sm font-mono text-slate-900 dark:text-zinc-100')
+                            with ui.row().classes('w-full items-center justify-between py-2 border-b border-slate-200 dark:border-white/10'):
+                                ui.label(t('core.settings.info.memory')).classes(UIStyles.LABEL_MINI)
+                                mem_label = ui.label('–').classes('text-sm font-mono text-slate-900 dark:text-zinc-100')
                             with ui.row().classes('w-full items-center justify-between py-2'):
-                                ui.label(t('core.settings.info.disk_root')).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold')
-                                disk_label = ui.label('–').classes('text-sm font-mono text-zinc-100')
+                                ui.label(t('core.settings.info.disk_root')).classes(UIStyles.LABEL_MINI)
+                                disk_label = ui.label('–').classes('text-sm font-mono text-slate-900 dark:text-zinc-100')
 
                         def update_resources():
                             cpu_pct = psutil.cpu_percent(interval=None)
@@ -460,12 +644,12 @@ async def render_settings_page():
                                 (t('core.settings.info.vault'), vault_instance.is_connected, settings.VAULT_URL),
                             ]:
                                 s_cls = 'text-emerald-400' if connected else 'text-red-400'
-                                with ui.row().classes('w-full items-center justify-between py-2 border-b border-zinc-800/40 last:border-0'):
+                                with ui.row().classes('w-full items-center justify-between py-2 border-b border-slate-200 dark:border-white/10 last:border-0'):
                                     with ui.row().classes('items-center gap-2'):
                                         ui.icon('circle', size='10px').classes(s_cls)
-                                        ui.label(svc_name).classes('text-xs uppercase tracking-widest text-zinc-500 font-bold')
+                                        ui.label(svc_name).classes(UIStyles.LABEL_MINI)
                                     with ui.row().classes('items-center gap-3'):
-                                        ui.label(detail).classes('text-xs font-mono text-zinc-600 truncate max-w-xs')
+                                        ui.label(detail).classes(UIStyles.TEXT_HINT + ' font-mono truncate max-w-xs')
                                         ui.label(t('core.settings.info.online') if connected else t('core.settings.info.offline')).classes(f'text-sm font-bold {s_cls}')
 
 

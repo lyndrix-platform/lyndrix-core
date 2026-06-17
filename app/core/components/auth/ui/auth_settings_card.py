@@ -53,12 +53,12 @@ def _field_row(spec: FieldSpec, value: str, source: str, inputs: dict) -> None:
     locked = source == "env"
 
     with ui.row().classes(
-        'w-full items-start gap-3 py-3 border-b border-zinc-800/30 last:border-0'
+        'w-full items-start gap-3 py-3 border-b border-slate-200 dark:border-white/10 last:border-0'
     ):
         # ── Label / env-var column ────────────────────────────────────────
         with ui.column().classes('gap-0 min-w-[190px] w-[190px] shrink-0 pt-1'):
-            ui.label(spec.label).classes('text-xs font-semibold text-zinc-200 leading-snug')
-            ui.label(spec.env_var).classes('text-[10px] font-mono text-zinc-600 leading-snug mt-0.5')
+            ui.label(spec.label).classes('text-xs font-semibold text-slate-800 dark:text-zinc-200 leading-snug')
+            ui.label(spec.env_var).classes(UIStyles.TEXT_HINT + ' font-mono leading-snug mt-0.5')
 
         # ── Input column ──────────────────────────────────────────────────
         with ui.column().classes('flex-grow gap-0.5'):
@@ -91,7 +91,7 @@ def _field_row(spec: FieldSpec, value: str, source: str, inputs: dict) -> None:
 
             if spec.hint:
                 ui.label(spec.hint).classes(
-                    'text-[10px] text-zinc-600 leading-snug'
+                    UIStyles.TEXT_HINT + ' leading-snug'
                     + (' mt-0.5' if not spec.is_bool else '')
                 )
 
@@ -181,12 +181,12 @@ async def render_auth_settings_card() -> None:
 
                 ui.label(
                     t('auth.settings.chain_hint')
-                ).classes(UIStyles.TEXT_MUTED + ' text-xs')
+                ).classes(UIStyles.TEXT_HINT)
 
                 all_providers = provider_registry.get_all()
                 if not all_providers:
                     ui.label(t('auth.settings.no_providers')).classes(
-                        'text-xs text-zinc-600 italic mt-1'
+                        UIStyles.TEXT_HINT + ' italic mt-1'
                     )
                 else:
                     with ui.column().classes('w-full gap-0 mt-1'):
@@ -195,16 +195,16 @@ async def render_auth_settings_card() -> None:
                             s_cls = 'text-emerald-400' if ok else 'text-amber-400'
                             with ui.row().classes(
                                 'w-full items-center gap-3 py-2 '
-                                'border-b border-zinc-800/30 last:border-0'
+                                'border-b border-slate-200 dark:border-white/10 last:border-0'
                             ):
                                 ui.label(str(idx + 1)).classes(
-                                    'text-xs font-mono text-zinc-600 w-4 text-center shrink-0'
+                                    UIStyles.TEXT_HINT + ' font-mono w-4 text-center shrink-0'
                                 )
                                 ui.icon('circle', size='8px').classes(s_cls + ' shrink-0')
                                 ui.label(p.provider_id).classes(
-                                    'text-sm font-mono font-bold text-zinc-200'
+                                    'text-sm font-mono font-bold text-slate-800 dark:text-zinc-200'
                                 )
-                                ui.label(p.display_name).classes('text-xs text-zinc-500 flex-grow')
+                                ui.label(p.display_name).classes(UIStyles.TEXT_HINT + ' flex-grow')
                                 if p.is_sso():
                                     ui.label('SSO').classes(
                                         'text-[9px] font-bold px-2 py-0.5 rounded-full '
@@ -311,12 +311,12 @@ async def render_auth_settings_card() -> None:
 
                 # ── Authentik quickstart reference ────────────────────────────
                 with ui.expansion(t('auth.settings.oidc.quickstart'), icon='help_outline').classes(
-                    'w-full text-zinc-500 mt-2'
+                    'w-full ' + UIStyles.TEXT_MUTED + ' mt-2'
                 ):
                     with ui.column().classes('gap-1 p-3'):
                         ui.label(
                             t('auth.settings.oidc.quickstart_text')
-                        ).classes('text-xs text-zinc-500 mb-2')
+                        ).classes(UIStyles.TEXT_HINT + ' mb-2')
                         for var, example in [
                             ('LYNDRIX_AUTH_PROVIDERS',   'local,oidc'),
                             ('LYNDRIX_OIDC_ISSUER',      'https://<authentik>/application/o/<slug>'),
@@ -331,7 +331,7 @@ async def render_auth_settings_card() -> None:
                                     'text-[10px] font-mono text-sky-400 shrink-0 w-64 pt-0.5'
                                 )
                                 ui.label(example).classes(
-                                    'text-[10px] font-mono text-zinc-500 break-all'
+                                    UIStyles.TEXT_HINT + ' font-mono break-all'
                                 )
 
                 # ── Action row ────────────────────────────────────────────────

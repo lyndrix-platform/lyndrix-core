@@ -32,14 +32,14 @@ def render_user_settings_card():
                     "text-2xl font-black shrink-0"
                 )
                 with ui.column().classes("gap-1 flex-grow"):
-                    ui.label(full_name).classes("text-xl font-bold text-zinc-100")
+                    ui.label(full_name).classes("text-xl font-bold text-slate-900 dark:text-zinc-100")
                     with ui.row().classes("items-center gap-2"):
                         ui.label(f"@{username}").classes(
-                            "text-sm font-mono text-zinc-400"
+                            UIStyles.TEXT_MUTED + " font-mono"
                         )
                         if email and email != "—":
-                            ui.label("·").classes("text-zinc-600")
-                            ui.label(email).classes("text-sm text-zinc-500")
+                            ui.label("·").classes("text-slate-400 dark:text-zinc-600")
+                            ui.label(email).classes(UIStyles.TEXT_MUTED)
 
                 with ui.column().classes("items-end gap-1 shrink-0"):
                     # Provider badge
@@ -72,7 +72,7 @@ def render_user_settings_card():
                             "auth.user_card.password_via_provider",
                             provider=provider,
                         )
-                    ).classes("text-sm text-zinc-500")
+                    ).classes(UIStyles.TEXT_MUTED)
 
         # ── API keys ─────────────────────────────────────────────────────────
         if username:
@@ -117,7 +117,7 @@ def _render_password_change_card(username: str) -> None:
             with ui.row().classes("items-center gap-2 mb-1"):
                 ui.icon("lock_reset", size="18px").classes(UIStyles.ICON_INFO)
                 ui.label(t("auth.password.title")).classes(
-                    "text-base font-bold text-zinc-100"
+                    UIStyles.TITLE_H3
                 )
 
             warn = user_service.env_override_warning(username)
@@ -191,12 +191,12 @@ def _render_api_keys_card(username: str) -> None:
         with ui.column().classes("w-full flex-grow p-5 gap-3"):
             with ui.row().classes("items-center gap-2 mb-1"):
                 ui.icon("vpn_key", size="18px").classes("text-amber-400")
-                ui.label("API Keys").classes("text-base font-bold text-zinc-100")
+                ui.label("API Keys").classes(UIStyles.TITLE_H3)
             ui.label(
                 "Personal API keys authenticate as you and inherit your permissions. "
                 "Send the key in the 'X-API-Key' header or as 'Authorization: Bearer <key>'. "
                 "The key is shown only once."
-            ).classes("text-xs text-zinc-500")
+            ).classes(UIStyles.TEXT_HINT)
 
             list_container = ui.column().classes("w-full gap-1")
 
@@ -214,17 +214,17 @@ def _render_api_keys_card(username: str) -> None:
                 with list_container:
                     if not keys:
                         ui.label("No API keys yet.").classes(
-                            "text-xs text-zinc-600 italic py-1"
+                            UIStyles.TEXT_HINT + " italic py-1"
                         )
                     for info in keys:
                         with ui.row().classes(
                             "w-full items-center gap-3 py-2 "
-                            "border-b border-zinc-800/40 last:border-0"
+                            "border-b border-slate-200 dark:border-white/10 last:border-0"
                         ):
                             with ui.column().classes("gap-0 flex-grow min-w-0"):
                                 with ui.row().classes("items-center gap-2"):
                                     ui.label(info.label).classes(
-                                        "text-sm font-bold text-zinc-200 truncate"
+                                        "text-sm font-bold text-slate-800 dark:text-zinc-200 truncate"
                                     )
                                     if info.revoked:
                                         ui.label("revoked").classes(
@@ -238,12 +238,12 @@ def _render_api_keys_card(username: str) -> None:
                                         )
                                     if not info.scopes:
                                         ui.label("inherits permissions").classes(
-                                            "text-[10px] text-zinc-600"
+                                            UIStyles.TEXT_HINT
                                         )
                                 ui.label(
                                     f"{info.prefix}…  ·  created {_format_dt(info.created_at)}"
                                     f"  ·  last used {_format_dt(info.last_used_at)}"
-                                ).classes("text-[11px] font-mono text-zinc-500 truncate")
+                                ).classes(UIStyles.TEXT_HINT + " font-mono truncate")
                             if not info.revoked:
                                 ui.button(
                                     icon="delete",
@@ -255,7 +255,7 @@ def _render_api_keys_card(username: str) -> None:
                 ui.notify("API key revoked.", type="warning")
                 _refresh_keys()
 
-            ui.separator().classes("my-1 bg-zinc-800/40")
+            ui.separator().classes("my-1 bg-slate-200 dark:bg-white/10")
 
             # ── Create new key ────────────────────────────────────────────────
             with ui.row().classes("w-full items-center gap-2 flex-wrap"):
