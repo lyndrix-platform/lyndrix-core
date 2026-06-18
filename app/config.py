@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     LYNDRIX_PLUGINS_DESIRED: Optional[str] = None
     # Whether to auto-update plugins to latest on reboot
     LYNDRIX_PLUGINS_AUTO_UPDATE: bool = False
+    # Git URL of the plugin collection/registry used by the marketplace.
+    LYNDRIX_PLUGIN_COLLECTION_URL: str = (
+        "https://github.com/lyndrix-platform/lyndrix-plugin-collection.git"
+    )
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
@@ -433,6 +437,9 @@ EDITABLE_SETTINGS: List[EditableSetting] = [
     EditableSetting("LYNDRIX_PLUGINS_AUTO_UPDATE", "Auto-Update Plugins On Boot",
                     "Automatically update installed plugins to the latest version on reboot.",
                     kind="bool", category="Plugins"),
+    EditableSetting("LYNDRIX_PLUGIN_COLLECTION_URL", "Plugin Collection URL",
+                    "Git URL of the plugin collection/registry used by the marketplace.",
+                    category="Plugins"),
 ]
 
 EDITABLE_SETTING_CATEGORIES: List[str] = ["Application", "Localization", "Theming", "Plugins"]
