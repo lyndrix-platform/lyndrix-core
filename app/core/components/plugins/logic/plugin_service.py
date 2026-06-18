@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import sys
@@ -7,10 +8,10 @@ import zipfile
 import time
 import tempfile
 import subprocess
-import importlib.util
 import httpx
 import re
 from pathlib import Path
+from config import settings
 from core.logger import get_logger
 from core.bus import bus
 
@@ -19,16 +20,30 @@ log = get_logger("Core:PluginService")
 # --- Plugin collection source config ---
 # The collection is cloned locally by the git-manager plugin.
 # git-manager stores repos under /data/storage/git_repos/{repo_id}.
-COLLECTION_REPO_URL = "https://github.com/marvin1309/lyndrix-plugin-collection.git"
-COLLECTION_REPO_ID = "lyndrix-plugin-collection"
+# Source URL is configurable via LYNDRIX_PLUGIN_COLLECTION_URL (defaults to the
+# lyndrix-platform org); see config.Settings.
+COLLECTION_REPO_URL = settings.LYNDRIX_PLUGIN_COLLECTION_URL
+COLLECTION_REPO_ID = COLLECTION_REPO_URL.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
 COLLECTION_LOCAL_PATH = Path("/data/storage/git_repos") / COLLECTION_REPO_ID
 COLLECTION_JSON_PATH = COLLECTION_LOCAL_PATH / "plugin-directory" / "plugins.json"
 
+
+def _raw_collection_fallback_url(git_url: str) -> str:
+    """Derive the raw GitHub plugins.json URL from the collection git URL."""
+    base = git_url.rstrip("/").removesuffix(".git")
+    if base.startswith("https://github.com/"):
+        owner_repo = base[len("https://github.com/"):]
+        return (
+            f"https://raw.githubusercontent.com/{owner_repo}"
+            "/main/plugin-directory/plugins.json"
+        )
+    return base
+
 # HTTP fallback (used when the local clone is not yet available).
-# Override via PLUGIN_COLLECTION_URL env var.
+# Override via PLUGIN_COLLECTION_URL env var, else derived from the collection URL.
 COLLECTION_FALLBACK_URL = os.environ.get(
     "PLUGIN_COLLECTION_URL",
-    "https://raw.githubusercontent.com/marvin1309/lyndrix-plugin-collection/main/plugin-directory/plugins.json",
+    _raw_collection_fallback_url(COLLECTION_REPO_URL),
 )
 
 # How often to check for new commits on main (seconds).
@@ -63,58 +78,75 @@ class PluginService:
             return parts[-2], repo
         raise ValueError("Invalid GitHub URL format")
 
+    @staticmethod
+    def _extract_manifest_id(entrypoint_path: str) -> str | None:
+        """Statically extract ``manifest.id`` from an entrypoint.py by parsing
+        the source — never executing it.
+
+        Plugin entrypoints declare their manifest via a top-level
+        ``manifest = ModuleManifest(id="...", ...)`` call and routinely use
+        relative imports (``from .app... import ...``). Executing such a module
+        standalone raises "attempted relative import with no known parent
+        package", so the previous exec-based probe rejected every well-formed
+        plugin. AST parsing avoids that and is also safer: we read the identity
+        of untrusted code without running it.
+
+        Returns the id when it is declared as a string literal, else ``None``.
+        """
+        try:
+            source = Path(entrypoint_path).read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError, ValueError) as e:
+            log.error(f"Failed to parse entrypoint '{entrypoint_path}': {e}")
+            return None
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            func_name = (
+                func.attr if isinstance(func, ast.Attribute)
+                else func.id if isinstance(func, ast.Name)
+                else None
+            )
+            if func_name != "ModuleManifest":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "id" and isinstance(kw.value, ast.Constant) \
+                        and isinstance(kw.value.value, str):
+                    return kw.value.value
+        return None
+
     def _read_manifest_id(self, plugin_path: Path) -> str | None:
-        """Best-effort load of manifest.id from an entrypoint.py without
-        importing the module into the application's sys.modules namespace."""
+        """Best-effort read of manifest.id from an entrypoint.py without
+        importing or executing the module."""
         entrypoint_path = plugin_path / "entrypoint.py"
         if not entrypoint_path.exists():
             return None
-        try:
-            spec = importlib.util.spec_from_file_location(
-                f"_lyndrix_manifest_probe_{plugin_path.name}", str(entrypoint_path)
-            )
-            if spec is None or spec.loader is None:
-                return None
-            staged = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(staged)
-            manifest = getattr(staged, "manifest", None)
-            if isinstance(manifest, dict):
-                return manifest.get("id")
-            return getattr(manifest, "id", None)
-        except Exception as e:
-            log.error(f"Failed to read manifest id from '{plugin_path}': {e}")
-            return None
+        return self._extract_manifest_id(str(entrypoint_path))
 
     def _verify_plugin_identity(self, staging_path: str, expected_id: str) -> bool:
         """Verify the extracted plugin's manifest.id matches the expected
-        identity, to prevent install/upgrade-time substitution attacks."""
+        identity, to prevent install/upgrade-time substitution attacks.
+
+        The id is read statically (see ``_extract_manifest_id``) so plugins that
+        use relative imports in their entrypoint verify correctly."""
         entrypoint_path = os.path.join(staging_path, "entrypoint.py")
         if not os.path.exists(entrypoint_path):
             log.error("No entrypoint.py found in downloaded archive.")
             return False
-        try:
-            spec = importlib.util.spec_from_file_location("_staged_ep", entrypoint_path)
-            if spec is None or spec.loader is None:
-                log.error("Unable to load entrypoint.py from staged archive.")
-                return False
-            staged = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(staged)
-            raw_manifest = getattr(staged, "manifest", None)
-            actual_id = (
-                raw_manifest.get("id")
-                if isinstance(raw_manifest, dict)
-                else getattr(raw_manifest, "id", None)
-            )
-            if actual_id != expected_id:
-                log.error(
-                    f"Identity mismatch: expected '{expected_id}', "
-                    f"archive contains '{actual_id}'"
-                )
-                return False
-            return True
-        except Exception as e:
-            log.error(f"Failed to verify plugin identity: {e}")
+
+        actual_id = self._extract_manifest_id(entrypoint_path)
+        if actual_id is None:
+            log.error("Unable to read manifest id from staged entrypoint.py.")
             return False
+        if actual_id != expected_id:
+            log.error(
+                f"Identity mismatch: expected '{expected_id}', "
+                f"archive contains '{actual_id}'"
+            )
+            return False
+        return True
 
     def _normalize_repo_name(self, repo_name: str) -> str:
         return repo_name.replace("-", "_")

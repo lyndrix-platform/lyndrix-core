@@ -12,9 +12,13 @@ from ..logic.plugin_service import plugin_service
 log = get_logger("UI:Plugins")
 
 PLUGIN_DIALOG_CLASSES = (
-    f'w-[calc(100vw-40px)] h-[calc(100vh-40px)] max-w-none '
-    f'max-h-none p-[20px] flex flex-col {UIStyles.MODAL_CONTAINER}'
+    f'w-[calc(100vw-24px)] h-[calc(100dvh-24px)] sm:w-[calc(100vw-40px)] '
+    f'sm:h-[calc(100vh-40px)] max-w-none max-h-none p-4 sm:p-[20px] '
+    f'flex flex-col {UIStyles.MODAL_CONTAINER}'
 )
+
+# Responsive card grid: one column on phones, two on tablets, three on wide screens.
+PLUGIN_GRID_CLASSES = 'grid w-full gap-4 sm:gap-6 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3'
 
 
 def _module_folder_name(module):
@@ -138,7 +142,7 @@ def render_plugins_page():
             _safe_notify(t('plugins.notify.uninstall_failed', name=manifest.name), 'negative')
 
     def open_logs(manifest):
-        with ui.dialog() as log_dialog, ui.card().classes(f'w-full max-w-4xl h-[80vh] {UIStyles.MODAL_CONTAINER}'):
+        with ui.dialog() as log_dialog, ui.card().classes(f'w-[calc(100vw-24px)] max-w-4xl h-[85dvh] sm:h-[80vh] {UIStyles.MODAL_CONTAINER}'):
             with ui.row().classes('w-full justify-between items-center mb-4'):
                 ui.label(f"{t('plugins.installed.logs_title')}: {manifest.name}").classes('text-xl font-bold font-mono text-emerald-500')
                 ui.button(icon='close', on_click=log_dialog.close).props('flat round dense')
@@ -235,11 +239,11 @@ def render_plugins_page():
         _safe_notify(t('plugins.notify.checked'), 'positive')
 
     with ui.column().classes('w-full max-w-7xl gap-6 mx-auto'):
-        with ui.row().classes('w-full justify-between items-center'):
-            with ui.column().classes('gap-0'):
+        with ui.row().classes('w-full flex-col gap-3 sm:flex-row sm:justify-between sm:items-center'):
+            with ui.column().classes('gap-0 min-w-0'):
                 ui.label(t('plugins.title')).classes(UIStyles.TITLE_H2)
                 ui.label(t('plugins.subtitle')).classes(UIStyles.TEXT_MUTED)
-            ui.button(t('plugins.check_updates'), icon='update', on_click=check_all_updates).props('outline color=slate').tooltip(t('plugins.notify.checking'))
+            ui.button(t('plugins.check_updates'), icon='update', on_click=check_all_updates).props('outline color=slate').classes('w-full sm:w-auto').tooltip(t('plugins.notify.checking'))
 
         with ui.tabs().classes(UIStyles.TAB_BAR) as tabs:
             tab_installed = ui.tab(t('plugins.tabs.installed'), icon='extension')
@@ -248,9 +252,9 @@ def render_plugins_page():
         with ui.tab_panels(tabs, value=tab_installed).classes('w-full bg-transparent p-0 mt-4'):
             with ui.tab_panel(tab_installed).classes('p-0'):
                 ui.label(t('plugins.installed.title')).classes(UIStyles.TITLE_H3 + ' mb-4')
-                installed_container = ui.grid(columns=3).classes('w-full gap-6')
+                installed_container = ui.element('div').classes(PLUGIN_GRID_CLASSES)
                 with installed_container:
-                    ui.spinner('dots', size='lg').classes('col-span-3 mx-auto')
+                    ui.spinner('dots', size='lg').classes('col-span-full mx-auto')
 
                 async def load_installed(force_refresh=False):
                     del force_refresh
@@ -259,7 +263,7 @@ def render_plugins_page():
 
                     with installed_container:
                         if not records:
-                            ui.label(t('plugins.installed.empty')).classes('col-span-3 p-4 ' + UIStyles.TEXT_MUTED + ' italic')
+                            ui.label(t('plugins.installed.empty')).classes('col-span-full p-4 ' + UIStyles.TEXT_MUTED + ' italic')
                             return
 
                         for record in records:
@@ -289,8 +293,8 @@ def render_plugins_page():
                                     ui.label(manifest.description).classes(UIStyles.TEXT_MUTED + ' leading-relaxed min-h-[72px] flex-grow')
 
                                     with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-slate-200 dark:border-white/10 flex-wrap'):
-                                        with ui.row().classes('items-center gap-2 flex-wrap'):
-                                            version_select = ui.select(options=[current_version], value=current_version).classes('w-32').props('dense options-dense outlined borderless')
+                                        with ui.row().classes('items-center gap-2 flex-wrap grow'):
+                                            version_select = ui.select(options=[current_version], value=current_version).classes('w-full sm:w-32').props('dense options-dense outlined borderless')
 
                                             if record['source_url'] and record['source_kind'] == 'marketplace':
                                                 ui.button(
@@ -325,14 +329,14 @@ def render_plugins_page():
             with ui.tab_panel(tab_shop).classes('p-0'):
                 ui.label(t('plugins.marketplace.title')).classes(UIStyles.TITLE_H3 + ' mb-4')
                 search = ui.input(placeholder=t('plugins.marketplace.search_placeholder')).props('outlined dark dense icon=search').classes('w-full mb-6')
-                shop_container = ui.grid(columns=3).classes('w-full gap-6')
+                shop_container = ui.element('div').classes(PLUGIN_GRID_CLASSES)
                 with shop_container:
-                    ui.spinner('dots', size='lg').classes('col-span-3 mx-auto')
+                    ui.spinner('dots', size='lg').classes('col-span-full mx-auto')
 
                 async def load_shop(force_refresh=False):
                     shop_container.clear()
                     with shop_container:
-                        ui.spinner('dots', size='lg').classes('col-span-3 mx-auto')
+                        ui.spinner('dots', size='lg').classes('col-span-full mx-auto')
 
                     plugins = await plugin_service.fetch_marketplace_data(force_refresh=force_refresh)
                     _, registry_by_folder = collect_module_records()
@@ -350,7 +354,7 @@ def render_plugins_page():
                     shop_container.clear()
                     with shop_container:
                         if not filtered_plugins:
-                            ui.label(t('plugins.marketplace.empty')).classes('col-span-3 text-center ' + UIStyles.TEXT_MUTED)
+                            ui.label(t('plugins.marketplace.empty')).classes('col-span-full text-center ' + UIStyles.TEXT_MUTED)
                             return
 
                         for plugin in filtered_plugins:
@@ -389,11 +393,11 @@ def render_plugins_page():
                                     ui.label(plugin['description']).classes(UIStyles.TEXT_MUTED + ' leading-relaxed min-h-[72px] flex-grow')
 
                                     with ui.row().classes('w-full items-center justify-between gap-3 pt-2 border-t border-slate-200 dark:border-white/10 flex-wrap'):
-                                        with ui.row().classes('items-center gap-2 flex-wrap'):
+                                        with ui.row().classes('items-center gap-2 flex-wrap grow'):
                                             version_select = ui.select(
                                                 options=[installed_version if installed_record else 'latest'],
                                                 value=installed_version if installed_record else 'latest',
-                                            ).classes('w-32').props('dense options-dense outlined borderless')
+                                            ).classes('w-full sm:w-32').props('dense options-dense outlined borderless')
 
                                             ui.button(
                                                 icon='unfold_more',
