@@ -41,10 +41,7 @@ def login(page, base: str, user: str, password: str) -> None:
     page.goto(f"{base}/login", wait_until="networkidle")
     page.wait_for_selector("input", timeout=15000)
     time.sleep(0.5)
-    inputs = page.locator("input")
-    # NiceGUI renders a text input (username) and a password input.
     pw = page.locator("input[type=password]").first
-    # username = the first non-password text input
     user_box = page.locator("input:not([type=password])").first
     user_box.click()
     user_box.fill(user)
@@ -63,7 +60,12 @@ def login(page, base: str, user: str, password: str) -> None:
                 break
         page.wait_for_url(lambda u: "login" not in u, timeout=8000)
     page.wait_for_load_state("networkidle")
-    time.sleep(1.0)
+    # NiceGUI stores auth in app.storage.user, which is hydrated via the
+    # WebSocket connection. Each new page navigation opens a new WS, and the
+    # server must look up the session cookie before main_layout's
+    # is_authenticated() check runs. 2 s is enough; 1 s is not reliably enough
+    # for /plugins and /settings.
+    time.sleep(2.0)
 
 
 def shoot(page, base: str, route: str, viewport: dict, outdir: str, tag: str) -> str:
@@ -71,6 +73,16 @@ def shoot(page, base: str, route: str, viewport: dict, outdir: str, tag: str) ->
     page.goto(f"{base}{route}", wait_until="networkidle")
     # NiceGUI paints over the socket after load; give it a beat.
     time.sleep(1.5)
+    # If main_layout's auth check ran before the WS session was ready, we got
+    # redirected to /login. Retry once with a longer wait.
+    # (Skip the check for the login page itself — being at /login is correct there.)
+    if route != "/login" and "login" in page.url:
+        time.sleep(2.0)
+        page.goto(f"{base}{route}", wait_until="networkidle")
+        time.sleep(2.0)
+        if "login" in page.url:
+            print(f"warning: {route} redirected to login — screenshot will show login page",
+                  file=sys.stderr)
     path = f"{outdir}/{slug(route)}.{tag}.png"
     page.screenshot(path=path, full_page=True)
     return path

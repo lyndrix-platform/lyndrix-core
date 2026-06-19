@@ -1,6 +1,6 @@
 ---
 name: run-lyndrix-core
-description: Build, launch, and drive the lyndrix-core app (FastAPI + NiceGUI platform). Use to run/start lyndrix-core, screenshot its UI (login, dashboard, Plugin Manager) at desktop + mobile widths, smoke-test the HTTP API, or verify a UI/backend change in the actually-running app.
+description: Build, launch, and drive the lyndrix-core app (FastAPI + NiceGUI platform). Use to run/start lyndrix-core, screenshot its UI (login, dashboard, Plugin Manager, Settings) at desktop + mobile widths, smoke-test the HTTP API, or verify a UI/backend change in the actually-running app.
 ---
 
 # Run lyndrix-core
@@ -46,11 +46,12 @@ app is healthy (also prints the running version):
 
 ```bash
 curl -s http://localhost:8081/api/health
-# {"status":"unknown","core_version":"0.1.2","api_version":"1.2.0","plugins":{...6 plugins...}}
+# {"status":"ok","core_version":"0.1.3","api_version":"1.2.0","plugins":{}}
 ```
 
-> `status`/per-plugin `"unknown"` is the default health aggregation, not an error.
-> `core_version` + `api_version` are the useful signal.
+> `plugins: {}` means no *external* plugins are active — core modules (Dashboard,
+> Messaging Gateway, Plugin Manager, etc.) are always loaded and visible in the
+> Plugin Manager UI regardless. `core_version` + `api_version` are the useful signal.
 
 ## Run (agent path) — driver.py
 
@@ -67,8 +68,9 @@ python driver.py
 
 Output → `.claude/skills/run-lyndrix-core/shots/<route>.<desktop|mobile>.png`
 (plus `login.desktop.png`). Verified shots this session: `login`, `root`,
-`dashboard`, `plugins`, `settings` — the Plugin Manager renders a 3-col grid on
-desktop and a 1-col stack on mobile.
+`dashboard`, `plugins`, `settings` — the Plugin Manager renders a 3-col grid
+of core modules on desktop and a 1-col stack on mobile. Settings shows Profile,
+System, Notifications, Appearance, Auth, Groups, Permissions, Plugins, Info tabs.
 
 Useful variants:
 
@@ -80,7 +82,7 @@ python driver.py --base http://localhost:8081 --user admin   # explicit target/u
 ```
 
 After it runs, **open the PNGs and look** — a blank or login-looped image means
-the flow failed (usually a wrong password).
+the flow failed (usually a wrong password or the stack isn't up).
 
 ## Direct API smoke (no browser)
 
@@ -105,6 +107,14 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 
 ## Gotchas
 
+- **NiceGUI session race on page navigation.** NiceGUI stores auth in
+  `app.storage.user`, which is hydrated by the WebSocket connection opened when
+  a page loads. Each Playwright navigation creates a new WS, and the server's
+  `main_layout` decorator calls `is_authenticated()` synchronously before the WS
+  session lookup completes — causing a redirect to `/login`. The driver waits 2 s
+  after login (not 1 s) and retries once per route if it lands on `/login`. This
+  affects `/plugins` and `/settings`; `/dashboard` and `/` are fast enough to
+  survive 1 s.
 - **NiceGUI is a websocket SPA.** `curl` of any page returns a ~19 KB shell, not
   the UI (`x-nicegui-content: page`). Only the browser driver shows real content;
   the driver sleeps ~1.5 s after `networkidle` so the socket can paint.
@@ -113,7 +123,7 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 - **Login form has no stable names/ids** (Quasar-rendered). The driver targets
   the password field by `input[type=password]` and the username by the first
   `input:not([type=password])`, then submits with Enter (falling back to a
-  Login/Anmelden button). Works against the current "Lyndrix Login" card.
+  Sign In/Anmelden button). Works against the current "Lyndrix Login" card.
 - **Secrets stay out of the repo.** The driver refuses to run without
   `LYNDRIX_ADMIN_PASSWORD` in the env rather than carrying a default.
 - **Sibling plugin repos are volume-mounted** by `docker-compose.dev.yml`
@@ -129,4 +139,5 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 | `libnspr4.so: cannot open shared object file` / `TargetClosedError: BrowserType.launch` | Run `sudo $(which python) -m playwright install-deps chromium`. |
 | `error: set LYNDRIX_ADMIN_PASSWORD ...` | `export LYNDRIX_ADMIN_PASSWORD="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' docker/.env.dev \| cut -d= -f2-)"`. |
 | Driver hangs on `/login` / shots show the login card | Wrong password — re-check the value in `docker/.env.dev`. |
+| `/plugins` or `/settings` shot shows login page | NiceGUI session race — the driver already retries. If it persists, the stack may not have finished booting (`docker logs lyndrix-core-dev`). |
 | `curl: connection refused` on :8081 | Stack not up — `docker compose -f docker/docker-compose.dev.yml up -d`. |
