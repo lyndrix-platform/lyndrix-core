@@ -86,7 +86,7 @@ from core.api import __api_version__, ModuleManifest
 
 Current stable API version:
 
-- `__api_version__ = "1.0.0"`
+- `__api_version__ = "1.2.0"`
 
 The goal is to give plugin authors a stable surface even when the internal core structure evolves.
 
@@ -137,8 +137,9 @@ class MyRecord(Base):
 | `settings_schema` | optional | Reserved — not yet in stable use; omit or leave as `{}` |
 | `dependencies` | as needed | List of `{id, version_constraint}` entries for required plugins/modules |
 | `min_core_version` | recommended | Minimum Lyndrix API version required by this plugin |
-| `auto_enable_on_install` | recommended | Whether the plugin auto-activates on install — **default is `True`; set to `False` for plugins that require configuration before first use** |
+| `auto_enable_on_install` | recommended | Whether the plugin auto-activates on install — **default is `False`; the manifest defaults to not activating until configured** |
 | `repo_url` | recommended | Source repository URL — used for update checks and marketplace metadata — must point to the canonical `lyndrix-platform` org URL |
+| `notification_endpoints` | as needed | List of `NotificationEndpoint`s the plugin can route through the central [Notification Router](core-components/notification-router.md) |
 
 **Important notes on `repo_url`:**
 
@@ -203,6 +204,10 @@ Each plugin receives a `ModuleContext` instance named `ctx`. This is the support
 | `ctx.create_task(coro, name=...)` | Tracked async task creation |
 | `ctx.get_secret(key)` | Read from the plugin Vault namespace |
 | `ctx.set_secret(key, value)` | Write into the plugin Vault namespace |
+| `ctx.register_routes(router)` | Mount a FastAPI `APIRouter` under `/api/plugins/<id>/` |
+| `ctx.notify(endpoint_name, …)` | Emit a manifest-declared notification through the [Notification Router](core-components/notification-router.md) |
+| `ctx.register_gateway_adapter(adapter)` | Register a [Messaging Gateway](core-components/messaging.md) provider adapter |
+| `ctx.register_theme_overrides(overrides)` | Register plugin-scoped [theme](core-components/settings.md#theming) style overrides |
 
 ### Choosing the right storage mechanism
 
@@ -351,6 +356,20 @@ Relevant event:
 - `auth:register_provider` with payload `{"provider": <AuthProvider instance>}`
 
 If you do this, the provider ID must also be listed in `LYNDRIX_AUTH_PROVIDERS` so the provider chain can activate it.
+
+---
+
+## Extension points
+
+Beyond events and routes, plugins can extend several core subsystems through `ctx`:
+
+| Subsystem | How | Reference |
+|---|---|---|
+| **Messaging providers** | Subclass `GatewayAdapter` and call `ctx.register_gateway_adapter(...)` to add a delivery channel (Discord, Slack, …) | [Messaging Gateway](core-components/messaging.md) |
+| **Notifications** | Declare `notification_endpoints` in the manifest and emit via `ctx.notify(...)`; operators route them internally/externally | [Notification Router](core-components/notification-router.md) |
+| **Socket providers** | Subclass `BaseSocketProvider` and register it for privileged host-socket access behind core auth | [Sockets](core-components/sockets.md) |
+| **Theming** | Call `ctx.register_theme_overrides({...})` for plugin-scoped UI style overrides | [Settings → Theming](core-components/settings.md#theming) |
+| **API authorization** | Guard plugin routes with `require_api_auth` / `require_permission(...)` from `core.api` | [Auth → API authentication](core-components/auth.md#api-authentication-and-authorization) |
 
 ---
 

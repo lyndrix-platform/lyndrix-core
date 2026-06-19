@@ -16,6 +16,7 @@ This documentation set is written for three main audiences:
 
 - [Installation and deployment](deployment.md)
 - [Plugin development guide](plugins.md)
+- [Plugin ecosystem](ecosystem.md)
 - [Security and Vault](security.md)
 - [System architecture](architecture.md)
 - [Core components reference](core-components/index.md)
@@ -29,6 +30,9 @@ Lyndrix Core brings together the following building blocks:
 - **Vault-first secret handling** with bootstrap, unseal, and mount management
 - **SQLAlchemy + MariaDB** for persistent platform state and plugin activation status
 - **A plugin runtime** with lifecycle hooks, per-plugin dependency isolation, and update workflows
+- **A messaging gateway and notification router** for two-way provider messaging (Discord, …) and operator-controlled notification routing
+- **A theming engine** with token/component themes and plugin-scoped overrides
+- **API authentication** with a system key, per-user API keys, and a permission system
 
 ## Current capabilities
 

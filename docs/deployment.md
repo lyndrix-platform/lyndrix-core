@@ -78,6 +78,47 @@ Frequently used values include:
 
 For development, the defaults are intentionally convenient. For any shared or production-like environment, replace the default secrets and credentials with secure values.
 
+### API access
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LYNDRIX_SYSTEM_API_KEY` | unset | Master machine-to-machine API key. When unset (and no Vault `system_api_key`), the system-key auth method is disabled. See [Auth → API authentication](core-components/auth.md#api-authentication-and-authorization). |
+
+### Plugins and marketplace
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LYNDRIX_PLUGINS_DESIRED` | unset | Comma-separated plugin specs to reconcile on boot: `https://github.com/org/repo[@version]`. |
+| `LYNDRIX_PLUGINS_AUTO_UPDATE` | `false` | Auto-update `latest` plugins on reboot. |
+| `LYNDRIX_PLUGIN_COLLECTION_URL` | `…/lyndrix-plugin-collection.git` | Git URL of the plugin registry used by the marketplace. |
+
+### Theming
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `THEME_ENGINE_ENABLED` | `true` | Enable the dynamic theme engine. |
+| `THEME_DB_OVERRIDES_ENABLED` | `false` | Allow DB-stored theme overrides. |
+| `DEFAULT_THEME_ID` | `default` | Default theme id. |
+
+See [Settings → Theming](core-components/settings.md#theming).
+
+### Messaging gateway
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LYNDRIX_GATEWAY_PROVIDERS` | `""` | Provider instances as `type:instance_id` (e.g. `discord:ops,slack:team`). |
+| `LYNDRIX_GATEWAY_SEND_TIMEOUT_SECONDS` | `30.0` | Per-send timeout. |
+| `LYNDRIX_GATEWAY_MAX_RETRY_ATTEMPTS` | `3` | Background retry attempts on failure. |
+| `LYNDRIX_GATEWAY_CORRELATION_TTL_SECONDS` | `3600` | TTL for interactive pending actions. |
+
+Per-instance settings use `LYNDRIX_GATEWAY_{TYPE}_{INSTANCE_ID}_{SETTING}`. See [Messaging Gateway](core-components/messaging.md).
+
+### Notification routing
+
+Per-endpoint overrides follow `LYNDRIX_NOTIF__<PLUGIN_ID>__<ENDPOINT_NAME>__ACTIVE` / `__PROVIDER`, with a global `LYNDRIX_NOTIF_DEFAULT_PROVIDER`. See [Notification Router](core-components/notification-router.md#operator-configuration-and-precedence).
+
+> Many of these (theming, plugins, localization, app metadata) are also editable at runtime from the Settings UI and persisted to Vault. Environment variables always take precedence over Vault-stored values.
+
 ## Plugin-related mounts in development
 
 The development compose file supports plugin iteration and can be extended with additional bind mounts for external plugin repositories.

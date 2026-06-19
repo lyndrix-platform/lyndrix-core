@@ -57,7 +57,24 @@ This catalog summarizes the event topics currently used in Lyndrix Core.
 |---|---|---|---|
 | `system:notify` | Core and plugins | Notifications component | Broadcast notification |
 | `user:notify` | Core and plugins | Notifications component | User-targeted notification |
-| `notification:outbound` | Notifications component | External listeners or plugins | Normalized outbound notification stream |
+| `notification:outbound` | Notifications component | Messaging gateway (legacy bridge), external listeners | Normalized outbound notification stream; bridged into `messaging:outbound` for backward compatibility |
+| `notification:routed` | Plugins via `ctx.notify(...)` | Notification Router | A `NotificationEnvelope` for a declared endpoint; routed internally and/or externally |
+
+## Messaging gateway
+
+| Topic | Produced by | Consumed by | Notes |
+|---|---|---|---|
+| `messaging:outbound` | Core and plugins | Messaging Gateway | An `OutboundMessage`; dispatched to a target provider or broadcast to all adapters |
+| `messaging:action_response` | Messaging Gateway | Plugins | Declared for interactive button round-trips |
+| `<plugin>:action_response` | Messaging Gateway | Originating plugin | Resume topic emitted when an inbound correlation resolves (name derived from `source_plugin_id`) |
+
+## Sockets
+
+| Topic | Produced by | Consumed by | Notes |
+|---|---|---|---|
+| `socket:request` | Core and plugins | Sockets component | Run an operation (`docker:health`, `docker:spawn`, …) against a named provider |
+| `socket:response` | Sockets component | Requesters | Result of a `socket:request` |
+| `socket:provider:register` | Plugins | Sockets component | Register a plugin-supplied `BaseSocketProvider` |
 
 ## Monitoring-specific topics summarized in logs
 

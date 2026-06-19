@@ -38,10 +38,14 @@ nav:
       - Dashboard: core-components/dashboard.md
       - Database: core-components/database.md
       - Git: core-components/git.md
+      - Messaging Gateway: core-components/messaging.md
       - Notifications: core-components/notifications.md
+      - Notification Router: core-components/notification-router.md
       - Plugins: core-components/plugins.md
       - Settings: core-components/settings.md
+      - Sockets: core-components/sockets.md
       - System Monitoring: core-components/system.md
       - Vault: core-components/vault.md
+  - Plugin Ecosystem: ecosystem.md
   - Security: security.md
   - Architecture: architecture.md
