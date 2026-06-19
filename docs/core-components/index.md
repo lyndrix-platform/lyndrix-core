@@ -11,9 +11,12 @@ This section documents the internal core components of Lyndrix Core, together wi
 - [Dashboard Component](dashboard.md)
 - [Database Component](database.md)
 - [Git Component](git.md)
+- [Messaging Gateway Component](messaging.md)
 - [Notifications Component](notifications.md)
+- [Notification Router Component](notification-router.md)
 - [Plugins Component](plugins.md)
 - [Settings Component](settings.md)
+- [Sockets Component](sockets.md)
 - [System Monitoring Component](system.md)
 - [Vault Component](vault.md)
 
@@ -26,9 +29,12 @@ This section documents the internal core components of Lyndrix Core, together wi
 | Dashboard | Main authenticated landing page and widget host |
 | Database | SQLAlchemy engine lifecycle, connection retries, readiness signaling |
 | Git | Repository clone/pull/commit workflows triggered by events |
+| Messaging Gateway | Two-way messaging registry; plugin provider adapters, dispatch, retries, correlation, streaming |
 | Notifications | Notification persistence, UI toasts, and webhook ingestion |
+| Notification Router | Routes plugin notification endpoints to internal UI and/or external providers via precedence resolution |
 | Plugins | Discovery, lifecycle, install/update/uninstall, marketplace integration |
-| Settings | Runtime configuration UI |
+| Settings | Runtime configuration UI and the theming engine |
+| Sockets | Socket-provider registry (Docker, …); mount inspection and permission repair behind core auth |
 | System Monitoring | Periodic CPU, RAM, and disk metrics emission |
 | Vault | Vault health checks, init/unseal handling, secret-store readiness |
 

@@ -11,7 +11,10 @@ Lyndrix Core ist der zentrale Runtime-Core für modulare Internal-Platform-Workl
 - **Plugin-Abhängigkeiten mit Vendor-Ordnern** (`requirements.txt` → `vendor/` pro Plugin)
 - **Automatische Plugin-Reconciliation** über `LYNDRIX_PLUGINS_DESIRED`
 - **Auth-Provider-Chain** (`local`, `ldap`, `oidc` + Plugin-Provider via Bus)
-- **Stabile Plugin-API-Oberfläche** über `core.api` (`__api_version__ = 1.0.0`)
+- **API-Authentifizierung** (System-API-Key, User-API-Keys, Permission-System + Swagger-Authorize)
+- **Messaging Gateway & Notification Router** (Zwei-Wege-Messaging über Provider-Adapter wie Discord; konfigurierbares Notification-Routing)
+- **Theming-Engine** (Token-/Component-Themes, Plugin-spezifische Overrides)
+- **Stabile Plugin-API-Oberfläche** über `core.api` (`__api_version__ = 1.2.0`)
 
 ## Schnellstart (Development)
 
