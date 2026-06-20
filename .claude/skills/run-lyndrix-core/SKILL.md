@@ -76,10 +76,17 @@ Useful variants:
 
 ```bash
 python driver.py --routes /plugins                 # just the Plugin Manager
-python driver.py --routes /plugins --no-mobile     # desktop only
+python driver.py --routes /iac --no-mobile         # a plugin UI route (IaC Orchestrator)
 python driver.py --health-only                     # no browser; print /api/health and exit
 python driver.py --base http://localhost:8081 --user admin   # explicit target/user
 ```
+
+> **Plugin UI routes** (e.g. `/iac` for the IaC Orchestrator) only render if that
+> plugin is **enabled**. Mounted dev plugins are discovered at boot but, when their
+> manifest sets `auto_enable_on_install=False`, start **inactive** — toggle them on
+> in the Plugin Manager (`/plugins` → "Active"); the state persists in the MariaDB
+> volume. `/api/health` lists every active plugin id. See the
+> `run-iac-orchestrator` skill for the `/iac` path specifically.
 
 After it runs, **open the PNGs and look** — a blank or login-looped image means
 the flow failed (usually a wrong password or the stack isn't up).
@@ -141,3 +148,14 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 | Driver hangs on `/login` / shots show the login card | Wrong password — re-check the value in `docker/.env.dev`. |
 | `/plugins` or `/settings` shot shows login page | NiceGUI session race — the driver already retries. If it persists, the stack may not have finished booting (`docker logs lyndrix-core-dev`). |
 | `curl: connection refused` on :8081 | Stack not up — `docker compose -f docker/docker-compose.dev.yml up -d`. |
+| A plugin's UI route (`/iac`, …) screenshots as the dashboard/blank | Plugin not enabled — toggle it on in `/plugins`; confirm its id in `/api/health`. |
+
+## Stop
+
+```bash
+docker compose -f docker/docker-compose.dev.yml down
+```
+
+Leaves the named volumes (`.dev/db_data`, `.dev/vault_data`) intact, so plugin
+activation state and the unsealed Vault survive a restart. Add `-v` only if you
+want a truly clean boot (you will then re-enable plugins and re-unseal).
