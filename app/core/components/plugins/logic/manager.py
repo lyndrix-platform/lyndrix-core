@@ -340,6 +340,14 @@ class ModuleManager:
 
         self._ensure_plugin_state_schema()
 
+        # Custom plugin repositories live in their own table; create it on the
+        # same db:connected pass so the marketplace can read it immediately.
+        try:
+            from .custom_repo_service import custom_repo_service
+            custom_repo_service.ensure_schema()
+        except Exception as exc:
+            log.warning(f"PLUGIN_MANAGER: custom repo schema bootstrap failed: {exc}")
+
         enabled_plugin_ids = []
 
         with db_instance.SessionLocal() as session:

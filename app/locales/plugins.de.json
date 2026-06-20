@@ -26,7 +26,24 @@
     "install": "Installieren",
     "update": "Version ändern",
     "open_readme": "Readme öffnen",
-    "cached": "Zwischengespeichert / Fallback"
+    "cached": "Zwischengespeichert / Fallback",
+    "add_repo": "Repository hinzufügen",
+    "remove_repo": "Repository entfernen",
+    "repo_removed": "{name} entfernt.",
+    "repo_remove_failed": "{name} konnte nicht entfernt werden.",
+    "add_repo_title": "Eigenes Repository hinzufügen",
+    "add_repo_hint": "Füge ein Git-Repository (GitHub oder GitLab) hinzu, das ein Lyndrix-Plugin enthält. Es wird gespeichert, im Marketplace angezeigt und wie jedes andere Plugin installiert.",
+    "repo_url": "Repository-URL",
+    "detected_provider": "Erkannter Anbieter: {provider}",
+    "repo_name_optional": "Anzeigename (optional)",
+    "repo_token_optional": "API-Token (optional)",
+    "repo_token_hint": "Leer lassen, um das globale GitHub-/GitLab-Token zu verwenden.",
+    "repo_url_required": "Repository-URL ist erforderlich.",
+    "repo_add_failed": "Repository konnte nicht hinzugefügt werden: {error}",
+    "repo_added": "Repository hinzugefügt.",
+    "cancel": "Abbrechen",
+    "add": "Hinzufügen",
+    "no_description": "Keine Beschreibung verfügbar."
   },
   "status": {
     "active": "Aktiv",
@@ -38,7 +55,8 @@
   "source": {
     "core": "Kern",
     "marketplace": "Marketplace",
-    "local": "Lokal"
+    "local": "Lokal",
+    "custom": "Eigene"
   },
   "notify": {
     "checking": "Marketplace-Daten werden neu geladen...",

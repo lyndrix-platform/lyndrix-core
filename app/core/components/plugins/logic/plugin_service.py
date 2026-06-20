@@ -14,6 +14,7 @@ from pathlib import Path
 from config import settings
 from core.logger import get_logger
 from core.bus import bus
+from . import git_providers
 
 log = get_logger("Core:PluginService")
 
@@ -62,6 +63,10 @@ class PluginService:
         self._cache_timestamp = 0
         self._tag_cache = {}
         self._tag_cache_timestamp = {}
+        # Version tags shipped in the plugin-collection index, keyed by
+        # normalized repo URL. Refreshed whenever the collection is loaded; used
+        # to populate version pickers without hitting GitHub on every click.
+        self._collection_versions = {}
         self._cache_ttl = 900  # 15 Minuten Cache-Dauer
         self._repo_cache = {}
         self._repo_cache_timestamp = {}
@@ -154,8 +159,12 @@ class PluginService:
     def _repo_aliases(self, repo_name: str):
         normalized = self._normalize_repo_name(repo_name)
         aliases = {normalized}
-        if normalized.startswith("lyndrix_"):
-            aliases.add(normalized[len("lyndrix_"):])
+        # Plugins are mounted under their bare name (e.g. ``discord_notifier``)
+        # while the collection lists them as ``lyndrix-plugin-discord-notifier``.
+        # Add the prefix-stripped forms so installed records match.
+        for prefix in ("lyndrix_plugin_", "lyndrix_", "plugin_"):
+            if normalized.startswith(prefix):
+                aliases.add(normalized[len(prefix):])
         return aliases
 
     def _read_marketplace_urls(self):
@@ -259,6 +268,26 @@ class PluginService:
                 continue
         return repo_map
 
+    @staticmethod
+    def _norm_url_key(url: str) -> str:
+        """Host/owner/repo key for matching, ignoring scheme, .git and slashes."""
+        if not url:
+            return ""
+        key = url.strip().lower().rstrip("/")
+        for prefix in ("https://", "http://", "git@"):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                break
+        key = key.replace(":", "/")  # scp-style git@host:owner/repo
+        if key.endswith(".git"):
+            key = key[:-4]
+        return key
+
+    def _versions_with_latest(self, version_tags) -> list:
+        """['latest'] followed by the de-duplicated version tags."""
+        tags = [t for t in (version_tags or []) if t and t != "latest"]
+        return ["latest"] + tags
+
     def _collection_entry_to_marketplace(self, entry: dict) -> dict:
         """Convert a plugins.json entry from lyndrix-plugin-collection to marketplace format."""
         html_url = entry.get("html_url", "")
@@ -268,58 +297,151 @@ class PluginService:
         repo_safe = self._normalize_repo_name(name)
         return {
             "name": name.replace("-", " ").title(),
-            "description": entry.get("description") or "No description available.",
+            # Left empty when the collection has none; the UI falls back to the
+            # installed plugin's manifest description.
+            "description": entry.get("description") or "",
             "stars": entry.get("stargazers_count", 0),
             "url": html_url,
             "clone_url": entry.get("clone_url", html_url),
             "author": author,
             "repo_safe": repo_safe,
             "repo_aliases": sorted(self._repo_aliases(name)),
-            "tags": ["latest"],
+            # Version tags shipped by the collection — pre-populates the picker
+            # without a GitHub call; the refresh button fetches newer ones.
+            "versions": self._versions_with_latest(entry.get("version_tags")),
             "topics": entry.get("topics", []),
             "archived": entry.get("archived", False),
             "metadata_source": "collection",
         }
 
+    def _custom_repo_to_marketplace(self, row) -> dict:
+        """Convert a CustomPluginRepository row to the marketplace dict shape.
+
+        Mirrors :meth:`_collection_entry_to_marketplace` so custom repos render,
+        install, update and badge through the same code path as collection
+        plugins. ``metadata_source`` is ``"custom"`` and ``custom_id`` carries
+        the DB row id so the UI can offer a remove-source action.
+        """
+        try:
+            ref = git_providers.parse_repo(row.repo_url)
+            repo_name = ref.repo
+            author = ref.namespace.split("/")[0] if ref.namespace else ref.host
+        except ValueError:
+            repo_name = row.name
+            author = "Unknown"
+        repo_safe = self._normalize_repo_name(repo_name)
+        return {
+            "name": (row.name or repo_name.replace("-", " ").title()),
+            "description": row.description or "Custom repository.",
+            "stars": 0,
+            "url": row.repo_url,
+            "clone_url": row.repo_url,
+            "author": author,
+            "repo_safe": repo_safe,
+            "repo_aliases": sorted(self._repo_aliases(repo_name)),
+            "versions": ["latest"],  # fetched live via the refresh button
+            "topics": [],
+            "archived": False,
+            "metadata_source": "custom",
+            "custom_id": row.id,
+            "provider": row.provider,
+        }
+
     def _get_headers(self, include_auth: bool = True) -> dict:
-        """Build request headers. Set include_auth=False for public CDN URLs."""
+        """Build GitHub request headers (used for the public collection fallback).
+
+        Provider-aware install/version requests use :meth:`_auth_headers_for`.
+        """
         headers = {
             "User-Agent": "Lyndrix-Core/1.0",
             "Accept": "application/vnd.github.v3+json"
         }
         if not include_auth:
             return headers
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            try:
-                from core.services import vault_instance
-                if vault_instance.is_connected:
-                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(path="core/settings", mount_point="lyndrix")
-                    token = resp['data']['data'].get('github_token')
-            except Exception:
-                pass
-            
+        token = self._global_token(git_providers.GITHUB)
         if token:
             headers["Authorization"] = f"token {token}"
         return headers
 
+    @staticmethod
+    def _read_vault_setting(key: str) -> str | None:
+        try:
+            from core.services import vault_instance
+            if vault_instance.is_connected:
+                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                    path="core/settings", mount_point="lyndrix"
+                )
+                return resp['data']['data'].get(key)
+        except Exception:
+            pass
+        return None
+
+    def _global_token(self, provider: str) -> str | None:
+        """Global token for a provider: env var first, then Vault core/settings."""
+        if provider == git_providers.GITHUB:
+            return os.environ.get("GITHUB_TOKEN") or self._read_vault_setting("github_token")
+        return os.environ.get("GITLAB_TOKEN") or self._read_vault_setting("gitlab_token")
+
+    def _resolve_token(self, url: str, provider: str) -> str | None:
+        """Resolve the token for a repo URL.
+
+        Order: per-repo override (Vault, via the custom repo row) → global
+        provider token (env/Vault) → None (anonymous).
+        """
+        try:
+            from .custom_repo_service import custom_repo_service
+            row = custom_repo_service.get_by_url(url)
+            if row and row.has_token:
+                token = custom_repo_service.get_token(row.id)
+                if token:
+                    return token
+        except Exception:
+            pass
+        return self._global_token(provider)
+
+    def _auth_headers_for(self, url: str, provider: str) -> dict:
+        """Provider-appropriate request headers, including auth when available."""
+        headers = {"User-Agent": "Lyndrix-Core/1.0"}
+        headers.update(git_providers.accept_header(provider))
+        token = self._resolve_token(url, provider)
+        if token:
+            headers.update(git_providers.auth_header(provider, token))
+        return headers
+
+    def get_known_versions(self, url: str) -> list:
+        """Synchronously return cached versions for a repo URL — no network.
+
+        Prefers a recent live result (from a forced refresh) over the
+        collection-shipped tags. Returns ``[]`` when nothing is cached, so the
+        caller can fall back to a placeholder until the refresh button is used.
+        """
+        if url in self._tag_cache:
+            return self._versions_with_latest(self._tag_cache[url])
+        return list(self._collection_versions.get(self._norm_url_key(url), []))
+
     async def get_plugin_versions(self, github_url: str, force_refresh: bool = False):
-        if not force_refresh and github_url in self._tag_cache:
-            if time.time() - self._tag_cache_timestamp.get(github_url, 0) < self._cache_ttl:
+        if not force_refresh:
+            if github_url in self._tag_cache and (
+                time.time() - self._tag_cache_timestamp.get(github_url, 0) < self._cache_ttl
+            ):
                 return self._tag_cache[github_url]
+            # Fall back to collection-shipped tags rather than calling GitHub.
+            collection = self._collection_versions.get(self._norm_url_key(github_url))
+            if collection:
+                return [v for v in collection if v != "latest"]
 
         try:
-            user, repo = self._extract_repo_info(github_url)
+            ref = git_providers.parse_repo(github_url)
         except ValueError:
             return []
-            
-        api_url = f"{self.github_api_base}/{user}/{repo}/tags"
+
+        api_url = git_providers.tags_url(ref)
         try:
-            async with httpx.AsyncClient(headers=self._get_headers(), follow_redirects=True) as client:
+            headers = self._auth_headers_for(github_url, ref.provider)
+            async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
                 resp = await client.get(api_url)
                 if resp.status_code == 200:
-                    tags = resp.json()
-                    raw_tags = [t['name'] for t in tags]
+                    raw_tags = git_providers.tag_names(ref.provider, resp.json())
                     def parse_v(t):
                         c = t.lstrip('v')
                         parts = []
@@ -336,9 +458,11 @@ class PluginService:
         return []
 
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False):
-        """Downloads, extracts and registers a new plugin from GitHub."""
-        user, repo = self._extract_repo_info(github_url)
-        
+        """Downloads, extracts and registers a new plugin from GitHub or GitLab."""
+        ref = git_providers.parse_repo(github_url)
+        repo = ref.repo
+        provider = ref.provider
+
         # FIX: Python-kompatiblen Ordnernamen erzwingen (keine Bindestriche)
         safe_repo_name = repo.replace("-", "_")
         plugin_path = self.plugin_dir / safe_repo_name
@@ -358,11 +482,12 @@ class PluginService:
             return False
 
         try:
-            async with httpx.AsyncClient(follow_redirects=True, headers=self._get_headers()) as client:
-                # 1. Fetch Repository Metadata
-                api_url = f"{self.github_api_base}/{user}/{repo}"
+            headers = self._auth_headers_for(github_url, provider)
+            async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
+                # 1. Fetch Repository Metadata (to discover the default branch)
+                api_url = git_providers.metadata_url(ref)
                 resp = await client.get(api_url)
-                
+
                 if resp.status_code == 403:
                     log.warning("INSTALL: Rate limit hit for metadata. Assuming 'main' branch.")
                     default_branch = "main"
@@ -370,22 +495,26 @@ class PluginService:
                     resp.raise_for_status()
                     repo_info = resp.json()
                     default_branch = repo_info.get("default_branch", "main")
-                
+
                 # 2. Download Archive
-                if version == "latest":
-                    zip_url = f"https://github.com/{user}/{repo}/archive/refs/heads/{default_branch}.zip"
-                else:
-                    zip_url = f"https://github.com/{user}/{repo}/archive/refs/tags/{version}.zip"
+                is_latest = version == "latest"
+                ref_name = default_branch if is_latest else version
+                zip_url = git_providers.archive_url(ref, ref_name, is_tag=not is_latest)
 
                 log.info(f"DOWNLOAD: Fetching source from {zip_url}")
                 response = await client.get(zip_url)
-                
-                # Fallback falls der Branch falsch ist (z.B. master statt main)
-                if response.status_code == 404 and version == "latest" and default_branch == "main":
+
+                # GitHub fallback: many repos default to 'master' instead of 'main'.
+                if (
+                    response.status_code == 404
+                    and is_latest
+                    and provider == git_providers.GITHUB
+                    and default_branch == "main"
+                ):
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
-                    zip_url = f"https://github.com/{user}/{repo}/archive/refs/heads/master.zip"
+                    zip_url = git_providers.archive_url(ref, "master", is_tag=False)
                     response = await client.get(zip_url)
-                
+
                 response.raise_for_status()
                 
                 with open(zip_path, 'wb') as f:
@@ -551,16 +680,55 @@ class PluginService:
                     data = resp.json()
             except Exception as exc:
                 log.warning(f"MARKETPLACE: HTTP fallback also failed: {exc}")
-                return [dict(p) for p in self._marketplace_cache]
+                # Collection unavailable — still surface custom repos. Prefer a
+                # previously cached collection list if we have one.
+                if self._marketplace_cache:
+                    return [dict(p) for p in self._marketplace_cache]
+                custom = self._fetch_custom_marketplace_entries()
+                return [dict(p) for p in custom]
 
-        raw_plugins = data.get("plugins", [])
+        raw_plugins = (data or {}).get("plugins", [])
         plugins = [self._collection_entry_to_marketplace(entry) for entry in raw_plugins]
+
+        # Cache the collection's version tags by normalized URL so version
+        # pickers can be populated without contacting GitHub.
+        for entry in raw_plugins:
+            versions = self._versions_with_latest(entry.get("version_tags"))
+            for url in (entry.get("clone_url"), entry.get("html_url")):
+                key = self._norm_url_key(url)
+                if key:
+                    self._collection_versions[key] = versions
+
+        # Merge user-added custom repositories. Collection entries win on
+        # repo_safe collisions so a curated plugin is never shadowed.
+        custom = self._fetch_custom_marketplace_entries()
+        if custom:
+            seen = {p["repo_safe"] for p in plugins}
+            for entry in custom:
+                if entry["repo_safe"] not in seen:
+                    plugins.append(entry)
+                    seen.add(entry["repo_safe"])
 
         if plugins:
             self._marketplace_cache = plugins
             self._cache_timestamp = time.time()
-            log.info(f"MARKETPLACE: Loaded {len(plugins)} plugin(s) from collection index.")
+            log.info(
+                f"MARKETPLACE: Loaded {len(plugins)} plugin(s) "
+                f"({len(custom)} custom)."
+            )
 
         return [dict(p) for p in plugins]
+
+    def _fetch_custom_marketplace_entries(self) -> list:
+        """Marketplace entries for enabled custom repositories (DB-backed)."""
+        try:
+            from .custom_repo_service import custom_repo_service
+            return [
+                self._custom_repo_to_marketplace(row)
+                for row in custom_repo_service.list_enabled()
+            ]
+        except Exception as exc:
+            log.debug(f"MARKETPLACE: custom repo fetch skipped: {exc}")
+            return []
 
 plugin_service = PluginService()

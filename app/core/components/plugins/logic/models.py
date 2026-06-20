@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 
 # --- NEW IMPORTS FOR DATABASE MODEL ---
-from sqlalchemy import Column, String, Boolean, Text, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime
 from core.components.database.logic.db_service import Base
 
 _ENDPOINT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -103,6 +103,28 @@ class PluginState(Base):
     desired_version = Column(String(50), nullable=True)
     repo_url = Column(String(500), nullable=True)
     auto_update = Column(Boolean, default=False)
+
+
+class CustomPluginRepository(Base):
+    """A user-added plugin repository (one Git repo == one plugin).
+
+    These rows extend the curated ``lyndrix-plugin-collection`` marketplace with
+    repositories the operator adds manually. They are merged into the same
+    marketplace list and installed through the same code path as collection
+    plugins. The optional per-repository API token is **never** stored here — it
+    lives in Vault (path ``core/plugin_repos``, key ``repo_{id}_token``); this
+    row only records whether one exists via ``has_token``.
+    """
+    __tablename__ = "custom_plugin_repositories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    repo_url = Column(String(500), unique=True, nullable=False)
+    provider = Column(String(20), default="github")  # "github" | "gitlab"
+    description = Column(String(500), nullable=True)
+    enabled = Column(Boolean, default=True)
+    has_token = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class PluginNotificationEndpoint(Base):
