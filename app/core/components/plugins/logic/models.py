@@ -105,6 +105,26 @@ class PluginState(Base):
     auto_update = Column(Boolean, default=False)
 
 
+class PluginVersionHistory(Base):
+    """Audit trail of plugin install / upgrade / rollback attempts and outcomes.
+
+    One row per lifecycle event so operators can see what version was applied
+    when, and whether a health-gated upgrade was auto-reverted. Pure audit — the
+    authoritative current state stays in ``PluginState``.
+    """
+    __tablename__ = "plugin_version_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    module_id = Column(String(100), index=True, nullable=True)
+    repo_name = Column(String(150), nullable=True)
+    version = Column(String(50), nullable=True)
+    previous_version = Column(String(50), nullable=True)
+    action = Column(String(20), nullable=False)    # install | upgrade | rollback
+    outcome = Column(String(20), nullable=False)   # ok | failed | reverted
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CustomPluginRepository(Base):
     """A user-added plugin repository (one Git repo == one plugin).
 

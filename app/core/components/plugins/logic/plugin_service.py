@@ -84,19 +84,16 @@ class PluginService:
         raise ValueError("Invalid GitHub URL format")
 
     @staticmethod
-    def _extract_manifest_id(entrypoint_path: str) -> str | None:
-        """Statically extract ``manifest.id`` from an entrypoint.py by parsing
-        the source — never executing it.
+    def _extract_manifest_field(entrypoint_path: str, field: str) -> str | None:
+        """Statically extract a string field of the ``ModuleManifest(...)`` call
+        in an entrypoint.py by parsing the source — never executing it.
 
         Plugin entrypoints declare their manifest via a top-level
-        ``manifest = ModuleManifest(id="...", ...)`` call and routinely use
-        relative imports (``from .app... import ...``). Executing such a module
-        standalone raises "attempted relative import with no known parent
-        package", so the previous exec-based probe rejected every well-formed
-        plugin. AST parsing avoids that and is also safer: we read the identity
-        of untrusted code without running it.
-
-        Returns the id when it is declared as a string literal, else ``None``.
+        ``manifest = ModuleManifest(id="...", version="...", ...)`` call and
+        routinely use relative imports, so executing the module standalone fails.
+        AST parsing avoids that and is also safer: we read the identity/version of
+        untrusted code without running it. Returns the value when it is declared
+        as a string literal, else ``None``.
         """
         try:
             source = Path(entrypoint_path).read_text(encoding="utf-8")
@@ -117,10 +114,15 @@ class PluginService:
             if func_name != "ModuleManifest":
                 continue
             for kw in node.keywords:
-                if kw.arg == "id" and isinstance(kw.value, ast.Constant) \
+                if kw.arg == field and isinstance(kw.value, ast.Constant) \
                         and isinstance(kw.value.value, str):
                     return kw.value.value
         return None
+
+    @staticmethod
+    def _extract_manifest_id(entrypoint_path: str) -> str | None:
+        """Statically extract ``manifest.id`` (see ``_extract_manifest_field``)."""
+        return PluginService._extract_manifest_field(entrypoint_path, "id")
 
     def _read_manifest_id(self, plugin_path: Path) -> str | None:
         """Best-effort read of manifest.id from an entrypoint.py without
@@ -129,6 +131,88 @@ class PluginService:
         if not entrypoint_path.exists():
             return None
         return self._extract_manifest_id(str(entrypoint_path))
+
+    def _read_manifest_version(self, plugin_path: Path) -> str | None:
+        """Best-effort read of manifest.version from a plugin dir (no import)."""
+        entrypoint_path = plugin_path / "entrypoint.py"
+        if not entrypoint_path.exists():
+            return None
+        return self._extract_manifest_field(str(entrypoint_path), "version")
+
+    # ------------------------------------------------------------------
+    # Rollback / restore-point helpers
+    # ------------------------------------------------------------------
+    def _previous_path(self, safe_repo_name: str) -> Path:
+        return self.plugin_dir / f".previous_{safe_repo_name}"
+
+    def has_previous(self, safe_repo_name: str) -> bool:
+        """True when a retained previous version exists to revert to."""
+        return self._previous_path(safe_repo_name).exists()
+
+    def previous_version(self, safe_repo_name: str) -> str | None:
+        """Version label of the retained previous version, if any."""
+        prev = self._previous_path(safe_repo_name)
+        return self._read_manifest_version(prev) if prev.exists() else None
+
+    def restore_previous(self, safe_repo_name: str) -> bool:
+        """Swap the retained ``.previous_<repo>`` back into place, discarding the
+        current (failed/unwanted) version. Used by auto-revert and manual
+        rollback. Returns True on success."""
+        plugin_path = self.plugin_dir / safe_repo_name
+        previous_path = self._previous_path(safe_repo_name)
+        if not previous_path.exists():
+            log.warning(f"ROLLBACK: No previous version retained for '{safe_repo_name}'.")
+            return False
+        failed_path = self.plugin_dir / f".failed_{safe_repo_name}"
+        try:
+            if failed_path.exists():
+                shutil.rmtree(failed_path, ignore_errors=True)
+            if plugin_path.exists():
+                plugin_path.rename(failed_path)
+            previous_path.rename(plugin_path)
+            shutil.rmtree(failed_path, ignore_errors=True)
+            log.info(f"ROLLBACK: Restored previous version of '{safe_repo_name}'.")
+            return True
+        except Exception as exc:
+            log.error(f"ROLLBACK: Failed to restore previous '{safe_repo_name}': {exc}", exc_info=True)
+            # Best effort: if current was moved out but restore failed, put it back.
+            if not plugin_path.exists() and failed_path.exists():
+                failed_path.rename(plugin_path)
+            return False
+
+    async def rollback_plugin(self, module_id: str, repo_name: str) -> bool:
+        """Operator-triggered one-click revert to the retained previous version.
+        Restores files, asks the ModuleManager to reload, and records history."""
+        safe_repo_name = repo_name.replace("-", "_")
+        prev_version = self.previous_version(safe_repo_name)
+        if not self.restore_previous(safe_repo_name):
+            bus.emit("plugin:install_failed", {"repo": repo_name, "error": "no_previous_version"})
+            return False
+        self._record_history(module_id, repo_name, prev_version, action="rollback", outcome="ok")
+        # Reload the restored version and announce the revert.
+        bus.emit("plugin:files_changed", {"action": "install", "name": safe_repo_name})
+        bus.emit("plugin:rolled_back", {"repo": repo_name, "module_id": module_id, "version": prev_version})
+        log.info(f"ROLLBACK: '{repo_name}' reverted to previous version {prev_version}.")
+        return True
+
+    def _record_history(self, module_id, repo_name, version, *, action, outcome,
+                        previous_version=None, error=None):
+        """Append one audit row to plugin_version_history (best-effort)."""
+        try:
+            from core.components.database.logic.db_service import db_instance
+            from .models import PluginVersionHistory
+            if not db_instance.engine:
+                return
+            PluginVersionHistory.__table__.create(bind=db_instance.engine, checkfirst=True)
+            with db_instance.SessionLocal() as session:
+                session.add(PluginVersionHistory(
+                    module_id=module_id, repo_name=repo_name, version=version,
+                    previous_version=previous_version, action=action, outcome=outcome,
+                    error=(error[:1000] if isinstance(error, str) else error),
+                ))
+                session.commit()
+        except Exception as exc:
+            log.debug(f"HISTORY: could not record {action}/{outcome} for {repo_name}: {exc}")
 
     def _verify_plugin_identity(self, staging_path: str, expected_id: str) -> bool:
         """Verify the extracted plugin's manifest.id matches the expected
@@ -556,16 +640,31 @@ class PluginService:
 
             # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes)
             backup_path = self.plugin_dir / f".backup_{safe_repo_name}"
+            previous_path = self._previous_path(safe_repo_name)
+            prior_version = self._read_manifest_version(plugin_path) if plugin_path.exists() else None
             if plugin_path.exists():
                 log.info(f"UPGRADE: Swapping old directory {plugin_path} for new version...")
                 if backup_path.exists():
                     shutil.rmtree(backup_path, ignore_errors=True)
                 plugin_path.rename(backup_path)
-            
+
             shutil.move(str(extracted_dir), str(plugin_path))
-            
+
+            # Retain the prior version as a rollback restore point (replacing any
+            # older one). On a fresh install there is no backup, so no restore
+            # point is created. The ModuleManager health-gates the new version and
+            # auto-reverts to this directory if verification fails.
             if backup_path.exists():
-                shutil.rmtree(backup_path, ignore_errors=True)
+                if previous_path.exists():
+                    shutil.rmtree(previous_path, ignore_errors=True)
+                backup_path.rename(previous_path)
+
+            new_version = self._read_manifest_version(plugin_path)
+            self._record_history(
+                None, repo, new_version,
+                action="upgrade" if upgrade else "install",
+                outcome="ok", previous_version=prior_version,
+            )
 
             # 6. INTEGRATION: Announce the change via the event bus.
             # The ModuleManager will be listening for this.
@@ -643,6 +742,15 @@ class PluginService:
         
         try:
             shutil.rmtree(plugin_path)
+            # Also drop any retained restore points / stale backups for this plugin.
+            safe_repo_name = repo_name.replace("-", "_")
+            for stale in (
+                self._previous_path(safe_repo_name),
+                self.plugin_dir / f".backup_{safe_repo_name}",
+                self.plugin_dir / f".failed_{safe_repo_name}",
+            ):
+                if stale.exists():
+                    shutil.rmtree(stale, ignore_errors=True)
             # Announce the successful deletion so the ModuleManager can unload it from memory.
             bus.emit("plugin:files_changed", {"action": "uninstall", "id": module_id})
             log.info(f"SUCCESS: Plugin files for '{repo_name}' removed.")
