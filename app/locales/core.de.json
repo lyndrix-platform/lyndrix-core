@@ -70,7 +70,8 @@
       "error": "Fehler: %{error}",
       "yes": "Ja",
       "no": "Nein",
-      "none_configured": "(keine konfiguriert)"
+      "none_configured": "(keine konfiguriert)",
+      "gitlab_api_token": "GitLab API Token"
     },
     "info": {
       "released": "Veröffentlicht %{date}",
