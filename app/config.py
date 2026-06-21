@@ -248,6 +248,8 @@ class Settings(BaseSettings):
                 _config_log.warning("SECURITY: DB_PASSWORD is using development default! Set a secure value for production.")
             if self.LYNDRIX_ADMIN_PASSWORD == "lyndrix":
                 _config_log.warning("SECURITY: LYNDRIX_ADMIN_PASSWORD is using default. Set a secure value for production.")
+            if self.VAULT_SKIP_VERIFY:
+                _config_log.warning("SECURITY: VAULT_SKIP_VERIFY is enabled (Vault TLS verification disabled) in a non-dev environment! Set VAULT_SKIP_VERIFY=false once your Vault presents a valid certificate.")
 
     # ------------------------------------------------------------------
     # Auth provider helpers
