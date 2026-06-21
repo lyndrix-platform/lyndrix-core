@@ -11,7 +11,7 @@ from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from core.logger import get_logger
 from core.bus import bus
 from core.components.database.logic.db_service import db_instance
-from .models import ModuleManifest, PluginState
+from .models import ModuleManifest, PluginState, PluginVersionHistory
 from .context import ModuleContext
 from config import settings
 from core.i18n import register_plugin_locales
@@ -42,6 +42,22 @@ class ModuleManager:
 
             if folder_name == module_name:
                 return module_id
+        return None
+
+    def _read_plugin_manifest_id(self, module_name: str):
+        """Statically read manifest.id from a plugin folder on disk (no import).
+
+        Used to resolve an already-loaded plugin during an in-place upgrade when
+        folder-name resolution fails — e.g. the on-disk folder was atomically
+        swapped or the folder name changed between versions. Reuses the AST-based
+        extractor on PluginService (imported lazily to avoid an import cycle)."""
+        try:
+            from core.components.plugins.logic.plugin_service import PluginService
+            entrypoint = Path(self.base_path) / "plugins" / module_name / "entrypoint.py"
+            if entrypoint.exists():
+                return PluginService._extract_manifest_id(str(entrypoint))
+        except Exception as exc:
+            log.debug(f"MANAGER: manifest-id probe failed for '{module_name}': {exc}")
         return None
 
 
@@ -158,6 +174,14 @@ class ModuleManager:
                     )
 
             if manifest.id in self.registry:
+                # An already-registered id reached the fresh-load path. Upgrades
+                # should route through reload_module (see _handle_plugin_change);
+                # log distinctly so this never resurfaces as a generic
+                # "could not be loaded" failure.
+                log.warning(
+                    f"ALREADY_REGISTERED: '{manifest.id}' is already loaded; skipping "
+                    f"duplicate load of folder '{module_name}'."
+                )
                 return False
 
             # Eagerly register declared notification endpoints so plugins can
@@ -183,10 +207,13 @@ class ModuleManager:
                 plugin_dir_path = Path(self.base_path) / "plugins" / module_name
                 register_plugin_locales(plugin_dir_path)
 
-            # Determine initial status. Any validation issues mark the plugin
-            # as 'degraded'; critical issues additionally block setup.
+            # Determine initial status. Only CRITICAL issues (incompatible core
+            # version, missing/incompatible dependencies) mark a plugin 'degraded'
+            # and block setup. Non-critical issues (missing description/icon, or a
+            # missing optional health() function) are warn-only and must NOT
+            # prevent activation — they are already logged above.
             initial_status = "initializing"
-            if is_plugin and validation_issues:
+            if is_plugin and critical_issues:
                 initial_status = "degraded"
 
             # Register as initializing/parked/degraded
@@ -228,25 +255,120 @@ class ModuleManager:
             module_name = payload.get("name")
             log.info(f"MANAGER: Received install event for '{module_name}'. Loading module...")
             existing_module_id = self._find_plugin_id_by_folder(module_name)
+            if not existing_module_id:
+                # Folder-name resolution can miss when an upgrade atomically swapped
+                # the on-disk folder or the folder name changed between versions.
+                # Fall back to resolving by the manifest id declared in the freshly
+                # installed files so we reload in place (which purges sys.modules and
+                # re-imports the NEW code) instead of hitting the already-registered
+                # guard in load_module and failing with a misleading error.
+                probed_id = self._read_plugin_manifest_id(module_name)
+                if probed_id and probed_id in self.registry:
+                    existing_module_id = probed_id
+                    log.info(
+                        f"MANAGER: Resolved already-loaded plugin '{module_name}' by manifest id "
+                        f"'{probed_id}' (folder lookup missed)."
+                    )
             if existing_module_id:
                 log.info(
                     f"MANAGER: Plugin folder '{module_name}' is already loaded as '{existing_module_id}'. Reloading in-place."
                 )
-                await self.reload_module(existing_module_id)
+                load_ok = await self.reload_module(existing_module_id, module_folder=module_name)
             else:
-                if not self.load_module(module_name, is_plugin=True):
+                load_ok = self.load_module(module_name, is_plugin=True)
+                if not load_ok:
                     log.warning(
                         f"MANAGER: Plugin '{module_name}' could not be loaded after install event."
                     )
-                    return
 
-            resolved_module_id = self._find_plugin_id_by_folder(module_name)
-            if resolved_module_id:
+            resolved_module_id = (
+                self._find_plugin_id_by_folder(module_name)
+                or self._read_plugin_manifest_id(module_name)
+            )
+
+            # Persist + activate (runs setup) before the health gate.
+            if load_ok and resolved_module_id:
                 self._persist_plugin_state(resolved_module_id, True)
                 await self._activate_saved_plugins()
+
+            # Verification transaction: load + setup + health() must all pass; on
+            # failure auto-revert to the retained previous version (upgrades only).
+            verified = bool(
+                load_ok
+                and resolved_module_id
+                and await self._verify_after_install(resolved_module_id)
+            )
+            if not verified:
+                await self._auto_revert(module_name, resolved_module_id)
         elif action == "uninstall":
             module_id = payload.get("id")
             self.unload_module(module_id)
+
+    async def _verify_after_install(self, module_id: str) -> bool:
+        """Post-install/upgrade health gate. The plugin must be loaded, not in a
+        failed/degraded state, and — if it implements one — its ``health(ctx)``
+        must not report ``error``. A plugin with no health() passes on a clean
+        load+setup."""
+        entry = self.registry.get(module_id)
+        if not entry:
+            log.warning(f"VERIFY: '{module_id}' is not loaded after install.")
+            return False
+        status = entry.get("status")
+        if status in ("failed", "degraded"):
+            log.warning(f"VERIFY: '{module_id}' is '{status}' after install.")
+            return False
+        health_fn = getattr(entry.get("module"), "health", None)
+        if not callable(health_fn):
+            return True
+        try:
+            result = health_fn(entry.get("context"))
+            if inspect.isawaitable(result):
+                result = await result
+            if getattr(result, "status", "ok") == "error":
+                log.warning(
+                    f"VERIFY: health() reported 'error' for '{module_id}': "
+                    f"{getattr(result, 'details', {})}"
+                )
+                return False
+            return True
+        except Exception as exc:
+            log.error(f"VERIFY: health() raised for '{module_id}': {exc}", exc_info=True)
+            return False
+
+    async def _auto_revert(self, module_name: str, module_id):
+        """Restore the retained previous version after a failed upgrade
+        verification. No-op for fresh installs (nothing to revert to)."""
+        from core.components.plugins.logic.plugin_service import plugin_service
+        if not plugin_service.has_previous(module_name):
+            log.error(
+                f"AUTO-REVERT: verification failed for '{module_name}' and no previous version "
+                f"is retained; leaving it in place for manual intervention."
+            )
+            return
+        log.warning(
+            f"AUTO-REVERT: verification failed for '{module_name}'; restoring previous version."
+        )
+        prev_version = plugin_service.previous_version(module_name)
+        # Drop the broken version from memory before swapping files back.
+        if module_id and module_id in self.registry:
+            self.unload_module(module_id)
+        if not plugin_service.restore_previous(module_name):
+            log.error(f"AUTO-REVERT: restore failed for '{module_name}'.")
+            return
+        importlib.invalidate_caches()
+        self.load_module(module_name, is_plugin=True)
+        restored_id = self._find_plugin_id_by_folder(module_name) or module_id
+        if restored_id and db_instance.is_connected:
+            await self._activate_saved_plugins()
+        plugin_service._record_history(
+            restored_id, module_name, prev_version, action="upgrade", outcome="reverted",
+        )
+        bus.emit("plugin:rolled_back",
+                 {"repo": module_name, "module_id": restored_id, "version": prev_version})
+        bus.emit("plugin:install_failed",
+                 {"repo": module_name, "error": "verification_failed_auto_reverted"})
+        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_name} auto-reverted."})
+        log.info(f"AUTO-REVERT: '{module_name}' restored to previous version {prev_version}.")
 
     def _execute_setup(self, module_id):
         """Helper to safely execute the module's setup function."""
@@ -536,13 +658,18 @@ class ModuleManager:
         log.info(f"UNLOAD: Module '{module_id}' unloaded from memory.")
         return True
 
-    async def reload_module(self, module_id: str):
+    async def reload_module(self, module_id: str, module_folder: str | None = None):
         if module_id not in self.registry:
             return False
-            
+
         entry = self.registry[module_id]
         is_plugin = entry["manifest"].type == "PLUGIN"
-        module_folder = entry["module"].__name__.split('.')[-2]
+        # Default to the currently-loaded folder, but callers may override when an
+        # upgrade changed the on-disk folder name: the stale module object still
+        # points at the OLD folder, so deriving it here would reload the wrong
+        # (now-removed) path. unload still purges by the old package name first.
+        if not module_folder:
+            module_folder = entry["module"].__name__.split('.')[-2]
 
         self.unload_module(module_id)
         importlib.invalidate_caches()
@@ -713,6 +840,7 @@ class ModuleManager:
 
         with db_instance.engine.begin() as connection:
             PluginState.__table__.create(bind=connection, checkfirst=True)
+            PluginVersionHistory.__table__.create(bind=connection, checkfirst=True)
             inspector = sqlalchemy_inspect(connection)
             existing_columns = {
                 column["name"] for column in inspector.get_columns(PluginState.__tablename__)

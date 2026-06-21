@@ -348,6 +348,24 @@ def render_plugins_page():
                                         with ui.row().classes('items-center gap-1 ml-auto'):
                                             ui.button(icon='article', on_click=lambda manifest=manifest: open_logs(manifest)).props('flat round size=sm color=slate').tooltip(t('plugins.installed.logs'))
                                             ui.button(icon='settings', on_click=lambda record=record: open_settings(record)).props('flat round size=sm color=slate').tooltip(t('plugins.installed.settings'))
+                                            if manifest.type == 'PLUGIN' and record['folder_name'] and plugin_service.has_previous(record['folder_name']):
+                                                _prev_v = plugin_service.previous_version(record['folder_name'])
+
+                                                async def run_revert(mid=manifest.id, folder=record['folder_name'], name=manifest.name, pv=_prev_v):
+                                                    _safe_notify(t('plugins.notify.reverting', name=name, version=pv or ''), 'ongoing')
+                                                    if await plugin_service.rollback_plugin(mid, folder):
+                                                        try:
+                                                            await load_installed()
+                                                            await load_shop()
+                                                        except RuntimeError as exc:
+                                                            if not _is_deleted_slot_error(exc):
+                                                                raise
+                                                            log.info(f"Plugins UI: skipped revert refresh for {name} after client teardown")
+                                                        _safe_notify(t('plugins.notify.reverted', name=name), 'positive')
+                                                    else:
+                                                        _safe_notify(t('plugins.notify.revert_failed', name=name), 'negative')
+
+                                                ui.button(icon='undo', on_click=run_revert).props('flat round size=sm color=amber').tooltip(t('plugins.installed.revert', version=_prev_v or '—'))
                                             if manifest.type == 'PLUGIN':
                                                 ui.button(icon='delete', on_click=lambda record=record: uninstall_record(record)).props('flat round size=sm color=red').tooltip(t('plugins.installed.uninstall'))
 
