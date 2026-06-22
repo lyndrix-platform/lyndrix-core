@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Custom plugin providers must also be listed here to be registered at startup.
     LYNDRIX_AUTH_PROVIDERS: str = "local"
 
+    # --- CORS ---
+    # Origins allowed for cross-origin requests (lyndrix-ui dev server and custom frontends).
+    CORS_ALLOWED_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:4321"]
+
     # --- SYSTEM API KEY ---
     # Master API key for machine-to-machine access to protected HTTP endpoints.
     # Unset by default: when neither this env var nor the Vault-stored

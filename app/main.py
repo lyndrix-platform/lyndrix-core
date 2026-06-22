@@ -2,6 +2,7 @@ import asyncio
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -27,6 +28,12 @@ from core.api import (
     system_api_key_configured,
 )
 from core.api.permissions_api import permissions_router
+from core.api.auth_api import auth_router
+from core.api.events_api import events_router
+from core.components.auth.api.users_api import users_router
+from core.components.plugins.api.plugins_api import plugins_router
+from core.components.settings.api.themes_api import themes_router
+from core.components.vault.api.vault_api import vault_api_router
 from core.components.sockets.api.socket_api import socket_router
 from core.components.notification_router.api import notification_router_api
 
@@ -54,6 +61,15 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 log = get_logger("Core:Main")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
@@ -183,6 +199,7 @@ async def boot_interceptor(request: Request, call_next):
         "/site.webmanifest",
         "/setup",
         "/unseal",
+        "/api",
     ]
 
     # Utilizing boot_service from the new path
@@ -285,6 +302,24 @@ app.include_router(socket_router)
 
 # Notification routing API (endpoint discovery, bindings, env-lock surface).
 app.include_router(notification_router_api)
+
+# Auth REST API — login / logout / me (used by lyndrix-ui).
+app.include_router(auth_router)
+
+# Server-Sent Events stream for real-time updates.
+app.include_router(events_router)
+
+# User and API key management.
+app.include_router(users_router)
+
+# Plugin lifecycle and marketplace management.
+app.include_router(plugins_router)
+
+# Theme management.
+app.include_router(themes_router)
+
+# Vault setup endpoints (unauthenticated — needed before Vault is ready).
+app.include_router(vault_api_router)
 
 
 # ==========================================
