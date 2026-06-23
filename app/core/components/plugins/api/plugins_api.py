@@ -1,7 +1,7 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from core.api.security import ApiIdentity, require_permission
 from core.bus import bus
@@ -21,7 +21,17 @@ class PluginOut(BaseModel):
     is_active: bool
     repo_url: Optional[str] = None
     ui_route: Optional[str] = None
+    icon: Optional[str] = None
     status: str
+    error_message: Optional[str] = None
+    react_ui: bool = False
+    react_routes: List[dict] = []
+    settings_schema: List[dict] = []
+    settings_ui_route: Optional[str] = None
+
+
+class PluginSettingsUpdate(BaseModel):
+    values: Dict[str, Any]
 
 
 class InstallRequest(BaseModel):
@@ -66,7 +76,13 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         is_active=entry.get("status") == "active",
         repo_url=getattr(manifest, "repo_url", None),
         ui_route=getattr(manifest, "ui_route", None),
+        icon=getattr(manifest, "icon", None),
         status=entry.get("status", "unknown"),
+        error_message=entry.get("error_message"),
+        react_ui=getattr(manifest, "react_ui", False),
+        react_routes=getattr(manifest, "react_routes", []),
+        settings_schema=[f.model_dump() for f in getattr(manifest, "settings_schema", [])],
+        settings_ui_route=getattr(manifest, "settings_ui_route", None),
     )
 
 
@@ -270,3 +286,92 @@ async def delete_custom_repo(
         raise HTTPException(status_code=404, detail=f"Custom repo {repo_id} not found")
     log.info(f"API: Custom repo {repo_id} removed by '{identity.username}'.")
     return {"status": "ok", "deleted": repo_id}
+
+
+@plugins_router.get("/{plugin_id}/settings", summary="Get plugin settings schema and current values")
+async def get_plugin_settings(
+    plugin_id: str,
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    from core.components.vault.logic.kv_helper import read_secret_dict
+
+    mgr = _manager()
+    entry = mgr.registry.get(plugin_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    manifest = entry["manifest"]
+    schema_fields = getattr(manifest, "settings_schema", [])
+    schema = [f.model_dump() for f in schema_fields]
+
+    # read_secret_dict returns {} for "no settings yet" and logs real Vault errors.
+    values: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
+
+    for field in schema_fields:
+        if field.key not in values and field.default is not None:
+            values[field.key] = field.default
+
+    return {"status": "ok", "plugin_id": plugin_id, "schema": schema, "values": values}
+
+
+@plugins_router.put("/{plugin_id}/settings", summary="Update plugin settings")
+async def update_plugin_settings(
+    plugin_id: str,
+    payload: PluginSettingsUpdate,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    from core.components.vault.logic.kv_helper import write_secret_dict
+
+    mgr = _manager()
+    entry = mgr.registry.get(plugin_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    manifest = entry["manifest"]
+    schema_fields = getattr(manifest, "settings_schema", [])
+    schema_by_key = {f.key: f for f in schema_fields}
+
+    coerced: Dict[str, Any] = {}
+    for key, raw in payload.values.items():
+        if key not in schema_by_key:
+            raise HTTPException(status_code=400, detail=f"Unknown setting key: '{key}'")
+        field = schema_by_key[key]
+        # Reject structured values for every scalar field kind — a dict/list would
+        # otherwise be stringified to a Python repr and silently corrupt the value.
+        if isinstance(raw, (dict, list)):
+            raise HTTPException(status_code=400, detail=f"'{key}' must be a scalar value, not an object/array")
+        if field.kind == "bool":
+            coerced[key] = bool(raw) if isinstance(raw, bool) else str(raw).lower() in ("1", "true", "yes", "on")
+        elif field.kind == "int":
+            try:
+                coerced[key] = int(raw)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail=f"'{key}' must be an integer")
+        elif field.kind == "select":
+            if field.options and str(raw) not in field.options:
+                raise HTTPException(status_code=400, detail=f"'{key}' must be one of {field.options}")
+            coerced[key] = str(raw)
+        else:
+            coerced[key] = "" if raw is None else str(raw)
+
+    if not write_secret_dict(f"plugins/{plugin_id}/settings", coerced):
+        raise HTTPException(status_code=503, detail="Vault unavailable — settings were not persisted")
+
+    log.info(f"API: Settings updated for '{plugin_id}' by '{identity.username}'.")
+    return {"status": "ok", "plugin_id": plugin_id, "saved": list(coerced.keys())}
+
+
+# NOTE: This route must be declared AFTER all specific sub-paths (marketplace, versions,
+# custom-repos, settings) so FastAPI matches those literals before falling through to {plugin_id}.
+@plugins_router.get("/{plugin_id}", summary="Get plugin details")
+async def get_plugin(
+    plugin_id: str,
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    mgr = _manager()
+    entry = mgr.registry.get(plugin_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+    out = _to_plugin_out(plugin_id, entry).model_dump()
+    out["manifest"] = entry["manifest"].model_dump()
+    return {"status": "ok", "plugin": out}

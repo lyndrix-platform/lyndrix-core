@@ -1,4 +1,8 @@
 import asyncio
+import os
+import platform as _platform
+import sys
+import time as _time
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -10,7 +14,7 @@ from fastapi.openapi.utils import get_openapi
 from nicegui import ui
 from pydantic import BaseModel, ValidationError
 
-from config import Settings, settings
+from config import Settings, settings, EDITABLE_SETTINGS
 from core.bus import bus
 from core.logger import setup_logging, get_logger
 from core.session import is_authenticated
@@ -53,6 +57,8 @@ from ui.maintenance import attach_maintenance_overlay
 from version import __version__
 
 setup_logging()
+
+_startup_time = _time.monotonic()
 
 app = FastAPI(
     title="Lyndrix Core API",
@@ -176,6 +182,19 @@ def _public_config_snapshot() -> dict:
     sanitized["desired_plugin_specs"] = settings.desired_plugin_specs
     sanitized["ldap_default_roles"] = settings.ldap_default_roles
     sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
+    sanitized["env_locked"] = [
+        s.field for s in EDITABLE_SETTINGS if os.getenv(s.field) is not None
+    ]
+    sanitized["editable_settings"] = [
+        {
+            "field": s.field,
+            "label": s.label,
+            "kind": s.kind,
+            "options": s.options,
+            "category": s.category,
+        }
+        for s in EDITABLE_SETTINGS
+    ]
     return sanitized
 
 
@@ -382,6 +401,23 @@ async def global_health():
         "core_version": __core_version__,
         "api_version": __api_version__,
         "plugins": plugin_results,
+    }
+
+
+@app.get("/api/system/info", tags=["System"], summary="Runtime platform info")
+async def system_info(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    """Read-only snapshot of runtime platform facts (versions, uptime, connectivity)."""
+    from core.services import db_instance as _db
+    db_ok = getattr(_db, "is_connected", None)
+    return {
+        "app_version": __version__,
+        "core_version": __core_version__,
+        "api_version": __api_version__,
+        "python_version": sys.version.split()[0],
+        "platform": _platform.system(),
+        "uptime_s": round(_time.monotonic() - _startup_time),
+        "vault_connected": vault_instance.is_connected,
+        "db_connected": bool(db_ok) if db_ok is not None else None,
     }
 
 

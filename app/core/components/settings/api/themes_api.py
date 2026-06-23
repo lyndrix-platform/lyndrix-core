@@ -1,9 +1,11 @@
 import io
+import json
 import shutil
 import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from core.api.security import ApiIdentity, require_permission
 from core.logger import get_logger
@@ -15,11 +17,74 @@ themes_router = APIRouter(prefix="/api/themes", tags=["Themes"])
 _THEMES_BASE_DIR = Path(__file__).resolve().parents[4] / "assets" / "themes"
 
 
+class ActiveThemeRequest(BaseModel):
+    theme_id: str
+
+
 @themes_router.get("", summary="List available themes")
 async def list_themes(identity: ApiIdentity = Depends(require_permission("api:read"))):
     from core.theming import get_theme_engine
     themes = get_theme_engine().list_available_themes()
     return {"status": "ok", "themes": themes}
+
+
+# NOTE: /active must be declared before /{theme_id} so it is matched first.
+@themes_router.get("/active", summary="Get the active theme ID")
+async def get_active_theme(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    from config import settings
+    return {"status": "ok", "theme_id": settings.DEFAULT_THEME_ID or "default"}
+
+
+@themes_router.put("/active", summary="Set the active theme")
+async def set_active_theme(
+    payload: ActiveThemeRequest,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    theme_dir = _THEMES_BASE_DIR / payload.theme_id
+    if not theme_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Theme '{payload.theme_id}' not found")
+
+    from config import settings
+    settings.DEFAULT_THEME_ID = payload.theme_id
+
+    try:
+        from core.services import vault_instance
+        if vault_instance.is_connected:
+            existing: dict = {}
+            try:
+                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
+                    path="core/settings", mount_point="lyndrix"
+                )
+                existing = resp["data"]["data"] or {}
+            except Exception:
+                pass
+            existing["DEFAULT_THEME_ID"] = payload.theme_id
+            vault_instance.client.secrets.kv.v2.create_or_update_secret(
+                path="core/settings", mount_point="lyndrix", secret=existing
+            )
+    except Exception as exc:
+        log.warning(f"API: Could not persist active theme to Vault: {exc}")
+
+    from core.bus import bus
+    bus.emit("ui:needs_refresh", {"reason": "theme_changed"})
+    log.info(f"API: Active theme set to '{payload.theme_id}' by '{identity.username}'.")
+    return {"status": "ok", "theme_id": payload.theme_id}
+
+
+@themes_router.get("/{theme_id}", summary="Get theme tokens and components")
+async def get_theme_detail(
+    theme_id: str,
+    identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    theme_dir = _THEMES_BASE_DIR / theme_id
+    if not theme_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Theme '{theme_id}' not found")
+    try:
+        tokens = json.loads((theme_dir / "tokens.json").read_text())
+        components = json.loads((theme_dir / "components.json").read_text())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read theme files: {exc}")
+    return {"status": "ok", "theme_id": theme_id, "tokens": tokens, "components": components}
 
 
 @themes_router.post("", summary="Upload a theme ZIP", status_code=201)

@@ -72,18 +72,19 @@ def setup(ctx):
         except Exception as exc:
             ctx.log.error("Messaging Gateway: outbound dispatch error: %s", exc)
 
-    from nicegui import ui
+    import asyncio
 
-    # Periodic cleanup of expired pending actions (every 5 minutes)
-    ui.timer(300, lambda: ctx.create_task(
-        messaging_gateway.expire_stale_actions(),
-        name="messaging:expire_stale",
-    ))
+    async def _expire_loop():
+        while True:
+            await asyncio.sleep(300)
+            await messaging_gateway.expire_stale_actions()
 
-    # Periodic cleanup of orphaned StreamBridge streams (every 10 minutes)
-    ui.timer(600, lambda: ctx.create_task(
-        messaging_gateway.stream_bridge.cleanup_stale(),
-        name="messaging:stream_cleanup",
-    ))
+    async def _stream_cleanup_loop():
+        while True:
+            await asyncio.sleep(600)
+            await messaging_gateway.stream_bridge.cleanup_stale()
+
+    ctx.create_task(_expire_loop(), name="messaging:expire_stale")
+    ctx.create_task(_stream_cleanup_loop(), name="messaging:stream_cleanup")
 
     ctx.log.info("Messaging Gateway: setup complete.")

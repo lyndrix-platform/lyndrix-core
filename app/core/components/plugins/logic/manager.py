@@ -22,6 +22,7 @@ class ModuleManager:
     def __init__(self):
         self.registry = {}
         self._plugin_state_schema_ready = False
+        self._mounted_static_paths: set = set()
         current_file_path = os.path.abspath(__file__)
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
         # Subscribe to filesystem change events from the PluginService
@@ -213,15 +214,18 @@ class ModuleManager:
             # missing optional health() function) are warn-only and must NOT
             # prevent activation — they are already logged above.
             initial_status = "initializing"
+            error_message = None
             if is_plugin and critical_issues:
                 initial_status = "degraded"
+                error_message = "; ".join(critical_issues)
 
             # Register as initializing/parked/degraded
             self.registry[manifest.id] = {
                 "manifest": manifest,
                 "module": module,
                 "context": ctx,
-                "status": initial_status
+                "status": initial_status,
+                "error_message": error_message,
             }
 
             if not is_plugin:
@@ -370,6 +374,43 @@ class ModuleManager:
         bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_name} auto-reverted."})
         log.info(f"AUTO-REVERT: '{module_name}' restored to previous version {prev_version}.")
 
+    def _mount_plugin_statics(self, module_id: str):
+        """Mount a plugin's ui_static/ directory for React UI bundle serving.
+
+        Called after a plugin activates. Skipped silently if the directory
+        does not exist or the mount was already registered.
+        """
+        if module_id in self._mounted_static_paths:
+            return
+        entry = self.registry.get(module_id)
+        if not entry or entry["manifest"].type != "PLUGIN":
+            return
+        module = entry.get("module")
+        if not module or not getattr(module, "__file__", None):
+            return
+        static_dir = Path(module.__file__).parent / "ui_static"
+        if not static_dir.exists():
+            return
+        try:
+            from main import app as fastapi_app
+            from fastapi.staticfiles import StaticFiles
+            mount_path = f"/api/plugins/{module_id}/static"
+            safe_name = f"plugin_static_{module_id.replace('.', '_')}"
+            fastapi_app.mount(
+                mount_path,
+                StaticFiles(directory=str(static_dir)),
+                name=safe_name,
+            )
+            # app.mount() appends to routes, landing after NiceGUI's root catch-all
+            # (path ""). Move the new mount before that catch-all so it matches first.
+            from core.api.route_order import move_routes_before_catchall
+
+            move_routes_before_catchall(fastapi_app, mount_path)
+            self._mounted_static_paths.add(module_id)
+            log.info(f"STATIC: React UI bundle mounted for '{module_id}'")
+        except Exception as exc:
+            log.debug(f"STATIC: Could not mount static files for '{module_id}': {exc}")
+
     def _execute_setup(self, module_id):
         """Helper to safely execute the module's setup function."""
         entry = self.registry.get(module_id)
@@ -399,9 +440,11 @@ class ModuleManager:
                 try:
                     module.setup(ctx)
                     entry["status"] = "active"
+                    self._mount_plugin_statics(module_id)
                 except Exception as e:
                     log.error(f"RUNTIME_ERROR: Sync setup failed for '{module_id}': {e}")
                     entry["status"] = "failed"
+                    entry["error_message"] = str(e)
                     try:
                         bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
                     except Exception as emit_err:
@@ -442,10 +485,12 @@ class ModuleManager:
             await module.setup(ctx)
             if module_id in self.registry:
                 self.registry[module_id]["status"] = "active"
+                self._mount_plugin_statics(module_id)
         except Exception as e:
             log.error(f"RUNTIME_ERROR: Async setup failed for '{module_id}': {e}")
             if module_id in self.registry:
                 self.registry[module_id]["status"] = "failed"
+                self.registry[module_id]["error_message"] = str(e)
             # Emit on the global bus directly (bypass plugin permissions in ctx).
             try:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
