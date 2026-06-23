@@ -40,33 +40,15 @@ async def set_active_theme(
     payload: ActiveThemeRequest,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
-    theme_dir = _THEMES_BASE_DIR / payload.theme_id
-    if not theme_dir.exists():
-        raise HTTPException(status_code=404, detail=f"Theme '{payload.theme_id}' not found")
-
-    from config import settings
-    settings.DEFAULT_THEME_ID = payload.theme_id
+    from core.components.settings.logic import themes_service
 
     try:
-        from core.services import vault_instance
-        if vault_instance.is_connected:
-            existing: dict = {}
-            try:
-                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                    path="core/settings", mount_point="lyndrix"
-                )
-                existing = resp["data"]["data"] or {}
-            except Exception:
-                pass
-            existing["DEFAULT_THEME_ID"] = payload.theme_id
-            vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                path="core/settings", mount_point="lyndrix", secret=existing
-            )
-    except Exception as exc:
-        log.warning(f"API: Could not persist active theme to Vault: {exc}")
+        themes_service.set_active(payload.theme_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    from core.bus import bus
-    bus.emit("ui:needs_refresh", {"reason": "theme_changed"})
     log.info(f"API: Active theme set to '{payload.theme_id}' by '{identity.username}'.")
     return {"status": "ok", "theme_id": payload.theme_id}
 

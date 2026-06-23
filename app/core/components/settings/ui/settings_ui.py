@@ -103,18 +103,10 @@ def _render_editable_settings_card() -> None:
                                 ui.label('Locked by environment variable').classes('text-[11px]')
 
             def _save():
-                if not vault_instance.is_connected:
-                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
-                    return
-                data = {}
-                try:
-                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                        path='core/settings', mount_point='lyndrix')
-                    data = resp['data']['data'] or {}
-                except Exception:
-                    data = {}
-
-                applied = []
+                # Build the update set from the editable widgets; persistence,
+                # validation and runtime-apply all happen in system_config_service
+                # (the same path POST /api/system/config uses).
+                updates = {}
                 for spec in EDITABLE_SETTINGS:
                     if locked.get(spec.field):
                         continue  # env-locked — never persist/override
@@ -122,25 +114,25 @@ def _render_editable_settings_card() -> None:
                     if widget is None:
                         continue
                     try:
-                        value = spec.coerce(widget.value)
+                        updates[spec.field] = spec.coerce(widget.value)
                     except Exception:
                         ui.notify(f'Invalid value for {spec.label}.', type='negative')
                         return
-                    data[spec.field] = value
-                    setattr(settings, spec.field, value)
-                    applied.append(spec.field)
-                    if spec.field == 'LOG_LEVEL':
-                        import logging
-                        logging.getLogger().setLevel(getattr(logging, str(value), logging.INFO))
+                if not updates:
+                    ui.notify('No settings to save.', type='info')
+                    return
 
+                from core.components.settings.logic.system_config_service import system_config_service
                 try:
-                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                        path='core/settings', mount_point='lyndrix', secret=data)
-                except Exception as e:
+                    result = system_config_service.apply(updates, persist=True, apply_runtime=True)
+                except ValueError as e:
                     ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
                     return
+                except RuntimeError:
+                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+                    return
                 ui.notify(
-                    f'Saved {len(applied)} setting(s) — applied now and persisted for next boot.',
+                    f"Saved {len(result['updated_keys'])} setting(s) — applied now and persisted for next boot.",
                     type='positive',
                 )
 
@@ -193,21 +185,15 @@ def _render_theme_management_card() -> None:
                     new_id = theme_select.value
                     if not new_id or new_id == settings.DEFAULT_THEME_ID:
                         return
-                    settings.DEFAULT_THEME_ID = new_id
-                    if vault_instance.is_connected:
-                        try:
-                            data: dict = {}
-                            try:
-                                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                    path='core/settings', mount_point='lyndrix')
-                                data = resp['data']['data'] or {}
-                            except Exception:
-                                pass
-                            data['DEFAULT_THEME_ID'] = new_id
-                            vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                                path='core/settings', mount_point='lyndrix', secret=data)
-                        except Exception as e:
-                            ui.notify(f'Could not persist to Vault: {e}', type='warning')
+                    from core.components.settings.logic import themes_service
+                    try:
+                        themes_service.set_active(new_id)
+                    except ValueError:
+                        ui.notify(f'Theme "{new_id}" not found.', type='negative')
+                        return
+                    except RuntimeError:
+                        ui.notify('Could not persist theme to Vault.', type='warning')
+                        return
                     ui.notify(
                         f'Theme switched to "{new_id}". Reload the page to apply.',
                         type='positive',
@@ -414,35 +400,23 @@ async def render_settings_page():
                             ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_HINT)
                             ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            current_token = ''
-                            if vault_instance.is_connected:
-                                try:
-                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                        path='core/settings', mount_point='lyndrix')
-                                    current_token = resp['data']['data'].get('github_token', '')
-                                except Exception:
-                                    pass
+                            from core.components.settings.logic.system_config_service import system_config_service
+                            current_token = system_config_service.get_value('github_token', '')
 
                             gh_input = ui.input(t('core.settings.system.github_api_token'), value=current_token, password=True).classes('w-full max-w-md').props('outlined dark')
 
                             def save_github_token():
-                                if not vault_instance.is_connected:
+                                from core.components.settings.logic.system_config_service import system_config_service
+                                try:
+                                    system_config_service.apply(
+                                        {'github_token': gh_input.value}, persist=True, apply_runtime=False)
+                                except RuntimeError:
                                     ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
                                     return
-                                try:
-                                    data = {}
-                                    try:
-                                        resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                            path='core/settings', mount_point='lyndrix')
-                                        data = resp['data']['data']
-                                    except Exception:
-                                        pass
-                                    data['github_token'] = gh_input.value
-                                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                                        path='core/settings', mount_point='lyndrix', secret=data)
-                                    ui.notify(t('core.settings.system.token_saved'), type='positive')
-                                except Exception as e:
+                                except ValueError as e:
                                     ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+                                    return
+                                ui.notify(t('core.settings.system.token_saved'), type='positive')
 
                             vault_ok = vault_instance.is_connected
                             vault_cls = 'text-emerald-400' if vault_ok else 'text-red-400'
@@ -456,35 +430,22 @@ async def render_settings_page():
                             ui.separator().classes('my-3 bg-slate-200 dark:bg-white/10')
                             ui.label('GitLab Personal Access Token, stored in Vault.  ·  Env: GITLAB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            current_gl_token = ''
-                            if vault_instance.is_connected:
-                                try:
-                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                        path='core/settings', mount_point='lyndrix')
-                                    current_gl_token = resp['data']['data'].get('gitlab_token', '')
-                                except Exception:
-                                    pass
+                            current_gl_token = system_config_service.get_value('gitlab_token', '')
 
                             gl_input = ui.input(t('core.settings.system.gitlab_api_token'), value=current_gl_token, password=True).classes('w-full max-w-md').props('outlined dark')
 
                             def save_gitlab_token():
-                                if not vault_instance.is_connected:
+                                from core.components.settings.logic.system_config_service import system_config_service
+                                try:
+                                    system_config_service.apply(
+                                        {'gitlab_token': gl_input.value}, persist=True, apply_runtime=False)
+                                except RuntimeError:
                                     ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
                                     return
-                                try:
-                                    data = {}
-                                    try:
-                                        resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                            path='core/settings', mount_point='lyndrix')
-                                        data = resp['data']['data']
-                                    except Exception:
-                                        pass
-                                    data['gitlab_token'] = gl_input.value
-                                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                                        path='core/settings', mount_point='lyndrix', secret=data)
-                                    ui.notify(t('core.settings.system.token_saved'), type='positive')
-                                except Exception as e:
+                                except ValueError as e:
                                     ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+                                    return
+                                ui.notify(t('core.settings.system.token_saved'), type='positive')
 
                             with ui.row().classes('items-center gap-3 mt-1'):
                                 ui.button(t('core.settings.system.save_token'), icon='save', on_click=save_gitlab_token).props('outline size=sm color=primary')
@@ -511,14 +472,7 @@ async def render_settings_page():
                                     'API-key method disabled.'
                                 ).classes(UIStyles.TEXT_HINT)
 
-                            current_api_key = ''
-                            if vault_instance.is_connected:
-                                try:
-                                    resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                        path='core/settings', mount_point='lyndrix')
-                                    current_api_key = resp['data']['data'].get('system_api_key', '')
-                                except Exception:
-                                    pass
+                            current_api_key = system_config_service.get_value('system_api_key', '')
 
                             api_key_input = ui.input(
                                 'System API Key',
@@ -535,30 +489,25 @@ async def render_settings_page():
                                         type='warning',
                                     )
                                     return
-                                if not vault_instance.is_connected:
+                                from core.components.settings.logic.system_config_service import system_config_service
+                                new_value = (api_key_input.value or '').strip()
+                                try:
+                                    if new_value:
+                                        system_config_service.apply(
+                                            {'system_api_key': new_value}, persist=True, apply_runtime=False)
+                                    else:
+                                        system_config_service.apply(
+                                            {}, persist=True, apply_runtime=False, remove_keys=['system_api_key'])
+                                except RuntimeError:
                                     ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
                                     return
-                                try:
-                                    data = {}
-                                    try:
-                                        resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                                            path='core/settings', mount_point='lyndrix')
-                                        data = resp['data']['data']
-                                    except Exception:
-                                        pass
-                                    new_value = (api_key_input.value or '').strip()
-                                    if new_value:
-                                        data['system_api_key'] = new_value
-                                    else:
-                                        data.pop('system_api_key', None)
-                                    vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                                        path='core/settings', mount_point='lyndrix', secret=data)
-                                    ui.notify(
-                                        'System API key saved.' if new_value else 'System API key cleared (API-key method disabled).',
-                                        type='positive',
-                                    )
-                                except Exception as e:
+                                except ValueError as e:
                                     ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+                                    return
+                                ui.notify(
+                                    'System API key saved.' if new_value else 'System API key cleared (API-key method disabled).',
+                                    type='positive',
+                                )
 
                             with ui.row().classes('items-center gap-3 mt-1'):
                                 save_btn = ui.button('Save API Key', icon='save', on_click=save_api_key).props('outline size=sm color=primary')

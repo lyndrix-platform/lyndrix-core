@@ -454,61 +454,25 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
-    settings_fields = set(settings.model_fields.keys())
-    allowed_extra_keys = {"github_token", "system_api_key"}
-    unknown_keys = sorted(set(updates.keys()) - settings_fields - allowed_extra_keys)
-    if unknown_keys:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported config keys: {', '.join(unknown_keys)}",
+    from core.components.settings.logic.system_config_service import system_config_service
+
+    try:
+        result = system_config_service.apply(
+            updates,
+            persist=payload.persist_in_vault,
+            apply_runtime=payload.apply_runtime,
         )
-
-    settings_updates = {k: v for k, v in updates.items() if k in settings_fields}
-
-    validated_settings = None
-    if settings_updates:
-        try:
-            merged = settings.model_dump()
-            merged.update(settings_updates)
-            validated_settings = Settings.model_validate(merged)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
-
-    if payload.persist_in_vault:
-        if not vault_instance.is_connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Vault is not connected; cannot persist config updates",
-            )
-        try:
-            existing = {}
-            try:
-                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                    path="core/settings",
-                    mount_point="lyndrix",
-                )
-                existing = resp["data"]["data"] or {}
-            except Exception:
-                existing = {}
-
-            existing.update(updates)
-            vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                path="core/settings",
-                mount_point="lyndrix",
-                secret=existing,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to persist settings: {exc}") from exc
-
-    if payload.apply_runtime and validated_settings is not None:
-        for key in settings_updates.keys():
-            setattr(settings, key, getattr(validated_settings, key))
+    except ValueError as exc:
+        # Structured pydantic errors or an unsupported-keys message.
+        raise HTTPException(status_code=422, detail=exc.args[0]) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return {
         "status": "ok",
-        "updated_keys": sorted(updates.keys()),
-        "persisted_in_vault": payload.persist_in_vault,
-        "applied_runtime": payload.apply_runtime and bool(settings_updates),
+        "updated_keys": result["updated_keys"],
+        "persisted_in_vault": result["persisted"],
+        "applied_runtime": bool(result["applied_runtime"]),
         "config": _public_config_snapshot(),
     }
 
