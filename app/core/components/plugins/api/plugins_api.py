@@ -361,8 +361,40 @@ async def update_plugin_settings(
     return {"status": "ok", "plugin_id": plugin_id, "saved": list(coerced.keys())}
 
 
+@plugins_router.post("/{plugin_id}/rollback", summary="Roll a plugin back to its previous version")
+async def rollback_plugin(
+    plugin_id: str,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    import pathlib
+
+    mgr = _manager()
+    entry = mgr.registry.get(plugin_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+    if entry["manifest"].type != "PLUGIN":
+        raise HTTPException(status_code=400, detail="Cannot roll back core modules")
+
+    module = entry.get("module")
+    if module and getattr(module, "__file__", None):
+        repo_name = pathlib.Path(module.__file__).parent.name
+    else:
+        repo_name = plugin_id.split(".")[-1]
+
+    svc = _plugin_service()
+    if not svc.has_previous(repo_name):
+        raise HTTPException(status_code=409, detail="No previous version to roll back to")
+
+    ok = await svc.rollback_plugin(plugin_id, repo_name)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Rollback failed for '{plugin_id}'")
+
+    log.info(f"API: Plugin '{plugin_id}' rolled back by '{identity.username}'.")
+    return {"status": "ok", "plugin_id": plugin_id, "action": "rolled_back"}
+
+
 # NOTE: This route must be declared AFTER all specific sub-paths (marketplace, versions,
-# custom-repos, settings) so FastAPI matches those literals before falling through to {plugin_id}.
+# custom-repos, settings, rollback) so FastAPI matches those literals before falling through to {plugin_id}.
 @plugins_router.get("/{plugin_id}", summary="Get plugin details")
 async def get_plugin(
     plugin_id: str,

@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.api.security import ApiIdentity, require_permission
+from core.api.security import ApiIdentity, require_api_auth, require_permission
 from core.logger import get_logger
 
 log = get_logger("Core:UsersAPI")
@@ -43,6 +43,11 @@ class ApiKeyCreateRequest(BaseModel):
     scopes: List[str] = Field(default_factory=list)
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class ApiKeyOut(BaseModel):
     id: int
     label: str
@@ -56,6 +61,30 @@ class ApiKeyOut(BaseModel):
 def _user_service():
     from core.components.auth.logic.user_service import user_service
     return user_service
+
+
+# Sync def on purpose: change_password runs Argon2, which is CPU-bound. A sync
+# endpoint is executed in FastAPI's threadpool, keeping the hash off the event loop.
+@users_router.post("/{username}/password", summary="Change a user's password")
+def change_password(
+    username: str,
+    payload: PasswordChangeRequest,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """Self-service for your own account; changing another user's password
+    requires the ``api:write`` permission. The current password is always
+    verified by the service before the change is applied."""
+    if username != identity.username and not identity.allows("api:write"):
+        raise HTTPException(status_code=403, detail="Cannot change another user's password")
+
+    ok, msg = _user_service().change_password(
+        username, payload.current_password, payload.new_password
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    log.info(f"API: Password changed for '{username}' by '{identity.username}'.")
+    return {"status": "ok", "message": msg}
 
 
 def _api_key_service():

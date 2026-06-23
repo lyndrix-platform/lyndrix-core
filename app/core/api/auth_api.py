@@ -1,10 +1,10 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from core.api.security import ApiIdentity, optional_api_auth, require_api_auth
+from core.api.security import ApiIdentity, optional_api_auth, require_api_auth, require_permission
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
@@ -15,6 +15,14 @@ auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class AuthConfigUpdate(BaseModel):
+    updates: Dict[str, str]
+
+
+# Vault keys whose values must never be returned in plaintext over the API.
+_SECRET_CONFIG_KEYS = {"ldap_bind_password", "oidc_client_secret"}
 
 
 class LoginResponse(BaseModel):
@@ -73,6 +81,52 @@ async def logout(request: Request, identity: ApiIdentity = Depends(require_api_a
             log.info(f"AUTH API: Session key revoked for '{identity.username}'.")
 
     return {"status": "ok", "message": "Logged out"}
+
+
+@auth_router.get("/config", summary="Get auth provider configuration (secrets masked)")
+async def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    """Return the Vault-stored auth provider configuration. Secret values are
+    masked — the React UI shows a placeholder and only sends a new value when
+    the operator actually changes it."""
+    from core.components.auth.logic.auth_config import auth_config_service
+
+    data = auth_config_service.load_vault_data()
+    config = {
+        k: ("********" if (k in _SECRET_CONFIG_KEYS and v) else v)
+        for k, v in data.items()
+    }
+    return {"status": "ok", "config": config}
+
+
+@auth_router.patch("/config", summary="Update auth provider configuration")
+async def update_auth_config(
+    payload: AuthConfigUpdate,
+    identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    """Persist auth provider config to Vault (core/auth) and reinitialize the
+    provider chain so changes take effect immediately. Empty-string values clear
+    the stored key (same semantics as the NiceGUI page)."""
+    from core.components.auth.logic.auth_config import auth_config_service
+    from core.components.auth.logic.auth_service import auth_service
+
+    try:
+        auth_config_service.save_vault_data(payload.updates)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    auth_service.reinitialize_providers()
+    log.info(f"AUTH API: provider config updated by '{identity.username}'.")
+    return {"status": "ok", "updated_keys": sorted(payload.updates.keys())}
+
+
+@auth_router.post("/reload", summary="Reinitialize the auth provider chain")
+async def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("api:write"))):
+    """Re-read provider configuration and rebuild the auth chain (local/LDAP/OIDC)."""
+    from core.components.auth.logic.auth_service import auth_service
+
+    auth_service.reinitialize_providers()
+    log.info(f"AUTH API: providers reloaded by '{identity.username}'.")
+    return {"status": "ok", "reloaded": True}
 
 
 @auth_router.get("/me", summary="Current user profile")
