@@ -53,6 +53,8 @@ db_data/
 vault_data/
 app/plugins/*
 app/plugins
+# Built React SPA (lyndrix-ui dist) baked in for LYNDRIX_UI_ENGINE=react|both — build artifact
+app/ui_dist/
 .cache
 lyndrix-core.code-workspace
 lyndrix-core.code-workspace

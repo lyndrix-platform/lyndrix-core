@@ -213,6 +213,7 @@ async def boot_interceptor(request: Request, call_next):
         "/_nicegui",
         "/static",
         "/assets",
+        "/app",  # React SPA (served from core) loads + shows its own boot/loading state
         "/_pywebview",
         "/favicon.ico",
         "/site.webmanifest",
@@ -253,6 +254,12 @@ async def manifest_redirect():
 
 @ui.page("/")
 def entry_point():
+    # In 'react' mode the React SPA is the front door — send / to it. NiceGUI pages
+    # (and this one in 'nicegui'/'both' mode) keep working underneath.
+    if settings.LYNDRIX_UI_ENGINE == "react":
+        ui.navigate.to("/app/")
+        return
+
     apply_theme(page_title="Home")
 
     if getattr(app.state, "maintenance", {}).get("active", False):
@@ -517,3 +524,39 @@ bus.subscribe("vault:opened")(_hydrate_settings_from_vault)
 
 
 ui.run_with(app, storage_secret=settings.STORAGE_SECRET)
+
+
+# --- React SPA serving (selectable UI engine) ---
+# Must run AFTER ui.run_with(): that call installs NiceGUI's root catch-all (path ""),
+# and move_routes_before_catchall() splices the /app mount in front of it so the SPA is
+# reachable. Served only when a built bundle exists at app/ui_dist (see the multi-stage
+# Dockerfile / the dev build step). NiceGUI keeps owning / unless engine == "react".
+if settings.LYNDRIX_UI_ENGINE in ("react", "both"):
+    from pathlib import Path as _Path
+
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    from core.api.route_order import move_routes_before_catchall
+
+    class _SPAStaticFiles(StaticFiles):
+        """StaticFiles that falls back to index.html on 404 so client-side routes
+        (e.g. /app/dashboard, /app/apps/...) resolve on hard-load / refresh."""
+
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except _StarletteHTTPException as exc:
+                if exc.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
+
+    _ui_dist = _Path(__file__).parent / "ui_dist"
+    if _ui_dist.is_dir() and (_ui_dist / "index.html").exists():
+        app.mount("/app", _SPAStaticFiles(directory=str(_ui_dist), html=True), name="react_ui")
+        move_routes_before_catchall(app, "/app")
+        log.info("UI: React SPA served at /app (engine=%s)", settings.LYNDRIX_UI_ENGINE)
+    else:
+        log.warning(
+            "UI: LYNDRIX_UI_ENGINE=%s but app/ui_dist is missing/empty — serving NiceGUI only.",
+            settings.LYNDRIX_UI_ENGINE,
+        )

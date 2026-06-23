@@ -29,6 +29,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # 3. App Source Code
+# NB: if app/ui_dist/ exists (the built lyndrix-ui SPA) it is baked in here and served at
+# /app when LYNDRIX_UI_ENGINE=react|both. Production build sequence (run before docker build,
+# since lyndrix-ui is a sibling repo outside this build context):
+#   (cd ../lyndrix-ui && npm ci && npx vite build) && rm -rf app/ui_dist && cp -r ../lyndrix-ui/dist app/ui_dist
+# Use `npx vite build` (not `npm run build`): the project's build script gates on `tsc -b`
+# which currently fails on pre-existing UI type errors (lucide icon typing, vite node types) —
+# unrelated to serving, and tracked separately. app/ui_dist is gitignored; absent → core logs a
+# warning and serves NiceGUI only.
 COPY app/ .
 
 # 4. Directory Prep
