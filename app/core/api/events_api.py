@@ -79,6 +79,7 @@ async def sse_stream(
     Each event payload is a JSON object: ``{"topic": "...", "payload": {...}}``.
     """
     allowed = _AUTH_TOPICS if identity else _PUBLIC_TOPICS
+    username = identity.username if identity else None
     q: asyncio.Queue = asyncio.Queue(maxsize=128)
     _SSE_QUEUES.add(q)
 
@@ -95,10 +96,29 @@ async def sse_stream(
 
                 try:
                     data = json.loads(msg)
-                    if data.get("topic") not in allowed:
-                        continue
                 except Exception:
-                    pass
+                    # Unparseable message — forward best-effort and move on.
+                    yield f"data: {msg}\n\n"
+                    continue
+
+                topic = data.get("topic")
+                if topic not in allowed:
+                    continue
+
+                # Per-connection user scoping for user-targeted topics: a notification
+                # is delivered only to its owner (payload.user_id == this connection's
+                # username) or to everyone when it is a broadcast (user_id is None).
+                # Without this, the shared broadcast queue would stream user A's
+                # notification body to user B. Also strip the internal user_id so it is
+                # never exposed to clients (mirrors the REST _public_view contract).
+                if topic == "notification:new":
+                    payload = data.get("payload") or {}
+                    target = payload.get("user_id")
+                    if target is not None and target != username:
+                        continue
+                    if "user_id" in payload:
+                        sanitized = {k: v for k, v in payload.items() if k != "user_id"}
+                        msg = json.dumps({"topic": topic, "payload": sanitized})
 
                 yield f"data: {msg}\n\n"
         except (asyncio.CancelledError, GeneratorExit):

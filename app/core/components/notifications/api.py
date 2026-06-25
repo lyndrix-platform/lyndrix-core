@@ -151,6 +151,22 @@ def _visible_for(username: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _require_visible(notif_id: str, username: str) -> Dict[str, Any]:
+    """Resolve a notification by id and assert the caller may act on it.
+
+    A user may only mutate their own targeted notifications (``user_id == username``)
+    or broadcasts (``user_id is None``). Anything else 404s — never reveal that an
+    id belonging to another user exists. Prevents write-side IDOR on read/dismiss.
+    """
+    match = next(
+        (n for n in list(notification_service.history) if n.get("id") == notif_id),
+        None,
+    )
+    if match is None or match.get("user_id") not in (username, None):
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return match
+
+
 def _public_view(n: Dict[str, Any]) -> Dict[str, Any]:
     """Strip the internal ``user_id`` from a notification for the API response."""
     return {
@@ -177,6 +193,7 @@ async def read_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
+    _require_visible(notif_id, identity.username)
     notification_service.mark_as_read(notif_id)
     return {"status": "ok"}
 
@@ -193,6 +210,7 @@ async def dismiss_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
+    _require_visible(notif_id, identity.username)
     notification_service.remove_notification(notif_id)
     return {"status": "ok"}
 

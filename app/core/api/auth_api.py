@@ -1,10 +1,11 @@
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from core.api.security import ApiIdentity, optional_api_auth, require_api_auth, require_permission
+from core.api.security import ApiIdentity, require_api_auth, require_permission
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
@@ -35,14 +36,18 @@ class LoginResponse(BaseModel):
 @auth_router.post("/login", response_model=LoginResponse, summary="Obtain a session token")
 async def login(payload: LoginRequest):
     """
-    Authenticates via the configured provider chain (local / LDAP / OIDC).
-    On success creates a named UserApiKey row and returns the raw key once.
-    The React frontend stores it as a bearer token.
+    Authenticates against the local user database (Argon2). On success creates a
+    named UserApiKey row and returns the raw key once; the React frontend stores it
+    as a bearer token. Credential verification runs off the event loop (Argon2 is
+    CPU-bound) so concurrent requests are not stalled.
     """
     from core.components.auth.logic.auth_service import auth_service
     from core.components.auth.logic.api_key_service import api_key_service
 
-    user = auth_service.authenticate_user(payload.username, payload.password)
+    # Argon2 verify + the sync DB session are blocking; keep them off the event loop.
+    user = await asyncio.to_thread(
+        auth_service.authenticate_user, payload.username, payload.password
+    )
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
