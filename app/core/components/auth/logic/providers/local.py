@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 
 from core.logger import get_logger
@@ -37,15 +38,23 @@ class LocalProvider(AuthProvider):
             if not user:
                 return None
 
-            if verify_password(str(user.hashed_password), password):
-                log.info(f"AUTH:Local: Login successful for '{username}'.")
-                return AuthResult(
-                    username=user.username,
-                    full_name=user.full_name or username,
-                    email=user.email or "",
-                    roles=list(user.roles or []),
-                    provider=self.provider_id,
-                )
+            # Snapshot the fields we need before leaving the session scope so the
+            # (slow) hash verification can run without holding the DB session.
+            hashed_password = str(user.hashed_password)
+            result = AuthResult(
+                username=user.username,
+                full_name=user.full_name or username,
+                email=user.email or "",
+                roles=list(user.roles or []),
+                provider=self.provider_id,
+            )
+
+        # Argon2 verification is deliberately CPU/memory-heavy; run it off the
+        # event loop so a login (or API basic-auth) never blocks the loop and
+        # stalls every other connected client (NiceGUI "connection lost").
+        if await asyncio.to_thread(verify_password, hashed_password, password):
+            log.info(f"AUTH:Local: Login successful for '{username}'.")
+            return result
 
         log.warning(f"AUTH:Local: Incorrect password for '{username}'.")
         return None

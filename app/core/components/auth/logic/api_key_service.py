@@ -139,8 +139,15 @@ class ApiKeyService:
                 label=str(rec.label),
                 scopes=list(rec.scopes or []),
             )
-            rec.last_used_at = datetime.utcnow()
-            s.commit()
+            try:
+                rec.last_used_at = datetime.utcnow()
+                s.commit()
+            except Exception:
+                # last_used_at is an audit convenience field — concurrent requests
+                # for the same key can produce ER_CHECKREAD (MariaDB 1020) when
+                # multiple sessions race to update the same row.  Authentication
+                # succeeds regardless.
+                s.rollback()
             return resolved
 
     # ------------------------------------------------------------------

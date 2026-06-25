@@ -7,6 +7,12 @@ Plugins register an ``APIRouter`` via ``ModuleContext.register_routes()``.
 The registry mounts each router under ``/api/plugins/<plugin-id>/`` and
 tears it down cleanly when a plugin is deactivated.
 
+Authentication is enforced **at the registry level**: every mounted plugin route
+carries ``require_api_auth``, so a plugin route can never be served anonymously —
+even if the plugin author forgets a guard. Plugins still add
+``Depends(require_permission("api:write"))`` on individual routes when they need
+finer authorization than "any authenticated caller".
+
 Usage (from a plugin entrypoint)::
 
     from fastapi import APIRouter
@@ -15,7 +21,7 @@ Usage (from a plugin entrypoint)::
     router = APIRouter()
 
     @router.get("/status")
-    def status():
+    def status():               # already requires authentication (registry-level)
         return {"ok": True}
 
     def setup(ctx):
@@ -27,7 +33,7 @@ from __future__ import annotations
 import threading
 from typing import Dict, Optional
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 
 from core.logger import get_logger
 
@@ -127,9 +133,25 @@ class PluginRouterRegistry:
 
     def _mount_router(self, app: FastAPI, module_id: str, router: APIRouter) -> None:
         prefix = self._prefix_for(module_id)
+        # Lazy import keeps the registry free of import-order coupling at boot.
+        from core.api.security import require_api_auth
+
         try:
-            app.include_router(router, prefix=prefix, tags=[module_id])
-            app.openapi_schema = None
+            # Authentication is enforced at the registry level: every plugin route
+            # gets require_api_auth, so a route can never be anonymous even if the
+            # plugin author forgets. Plugins add Depends(require_permission(...)) on
+            # their own routes for finer authorization (e.g. api:write on mutations).
+            app.include_router(
+                router,
+                prefix=prefix,
+                tags=[module_id],
+                dependencies=[Depends(require_api_auth)],
+            )
+            # include_router() appends routes after NiceGUI's root catch-all (path "").
+            # Move the newly added routes to before that catch-all so they match first.
+            from core.api.route_order import move_routes_before_catchall
+
+            move_routes_before_catchall(app, prefix)
             log.info("RouterRegistry: mounted router for '%s' at '%s'", module_id, prefix)
         except Exception as exc:
             log.error("RouterRegistry: failed to mount router for '%s': %s", module_id, exc)

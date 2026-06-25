@@ -61,6 +61,22 @@ class NotificationEndpoint(BaseModel):
         return value
 
 
+class PluginSettingField(BaseModel):
+    """Declares one user-configurable setting for a plugin.
+
+    Mirrors the shape of EditableSettingMeta from core config so the React UI
+    can render plugin settings using the same form-generation logic as system
+    settings.
+    """
+    key: str = Field(..., description="Vault key — also used as the form field identifier")
+    label: str = Field(..., description="Human-readable label shown in the UI")
+    kind: str = Field(default="str", description="'str' | 'bool' | 'int' | 'select'")
+    options: List[str] = Field(default_factory=list, description="Allowed values for kind='select'")
+    description: str = Field(default="", description="Help text shown below the field")
+    category: str = Field(default="General", description="Groups fields into sections in the UI")
+    default: Optional[str] = Field(default=None, description="Default value serialised as string")
+
+
 class ModuleManifest(BaseModel):
     id: str = Field(..., description="Unique ID, e.g., 'lyndrix.core.iam' or 'lyndrix.plugin.discord'")
     name: str = Field(..., description="Display name in the UI")
@@ -75,7 +91,7 @@ class ModuleManifest(BaseModel):
     ui_route: Optional[str] = Field(default=None, description="URL path for the sidebar")
 
     permissions: ModulePermissions = Field(default_factory=ModulePermissions)
-    settings_schema: Dict[str, Any] = Field(default_factory=dict)
+    settings_schema: List[PluginSettingField] = Field(default_factory=list)
 
     # --- NEW: Dependency & lifecycle declarations ---
     dependencies: List[ModuleDependency] = Field(default_factory=list)
@@ -85,6 +101,17 @@ class ModuleManifest(BaseModel):
 
     # --- Notification routing endpoints (declared, persisted, routed by core) ---
     notification_endpoints: List[NotificationEndpoint] = Field(default_factory=list)
+
+    # --- React UI federation ---
+    react_ui: bool = Field(default=False, description="Whether this plugin ships a React UI bundle")
+    react_routes: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Routes exposed by the React UI bundle [{path, label, icon, sidebar_visible}]",
+    )
+    settings_ui_route: Optional[str] = Field(
+        default=None,
+        description="React route for a plugin-owned settings page; gear button navigates here instead of opening the schema modal",
+    )
 
 
 # ==========================================

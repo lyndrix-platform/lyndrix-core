@@ -5,6 +5,7 @@ from collections import deque
 from nicegui import ui
 from nicegui.client import Client
 from config import settings
+from core.bus import bus
 
 class NotificationService:
     def __init__(self):
@@ -90,6 +91,16 @@ class NotificationService:
 
         if persist:
             self._save()
+            # Notify connected React frontends (notification bell) over SSE.
+            # Additive — does not affect the existing outbound/toast behaviour.
+            bus.emit("notification:new", {
+                "id": notif["id"],
+                "title": notif["title"],
+                "message": notif["message"],
+                "type": notif["type"],
+                "timestamp": notif["timestamp"],
+                "user_id": notif["user_id"],
+            })
 
     def broadcast_toast(self, message: str, type_: str):
         toast_type = type_ if type_ in ['positive', 'negative', 'warning', 'info'] else 'info'

@@ -53,6 +53,7 @@ from core.components.plugins.logic.models import (
     ModuleManifest,
     ModulePermissions,
     NotificationEndpoint,
+    PluginSettingField,
 )
 from core.components.plugins.logic.context import ModuleContext
 from core.components.database.logic.db_service import db_instance, Base
@@ -146,6 +147,7 @@ __all__ = [
     "ModulePermissions",
     "ModuleContext",
     "NotificationEndpoint",
+    "PluginSettingField",
     # Database
     "db_instance",
     "Base",

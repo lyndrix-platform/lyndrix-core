@@ -175,6 +175,11 @@ class ModuleContext:
         folder = "core" if self.manifest.type == "CORE" else "plugins"
         return f"{folder}/{self.manifest.id}"
 
+    def _get_settings_vault_path(self) -> str:
+        """Pfad für schema-driven settings (getrennt von rohen Secrets)."""
+        folder = "core" if self.manifest.type == "CORE" else "plugins"
+        return f"{folder}/{self.manifest.id}/settings"
+
     def get_secret(self, key: str) -> str:
         """Lädt einen einzelnen Wert aus dem KV-V2 Store."""
         if not vault_instance.is_connected:
@@ -193,6 +198,43 @@ class ModuleContext:
         except Exception:
             return None
         return None
+
+    def get_setting(self, key: str, default=None):
+        """Read one value from this plugin's schema-driven settings in Vault.
+
+        Settings are written by the React UI via PUT /api/plugins/{id}/settings
+        and stored at a separate Vault path from raw secrets (set_secret).
+        Returns *default* when Vault is unreachable or the key has no value.
+
+        Example::
+
+            def setup(ctx):
+                @ctx.subscribe("vault:ready_for_data")
+                async def _load(_payload=None):
+                    ctx.state["timeout"] = ctx.get_setting("timeout_s", default=30)
+        """
+        from core.components.vault.logic.kv_helper import read_secret_dict
+
+        data = read_secret_dict(self._get_settings_vault_path())
+        return data.get(key, default)
+
+    def get_all_settings(self) -> dict:
+        """Read all schema-driven settings for this plugin from Vault.
+
+        Returns an empty dict when Vault is unreachable or no settings have
+        been saved yet.  Useful for bulk-loading on ``vault:ready_for_data``.
+
+        Example::
+
+            def setup(ctx):
+                @ctx.subscribe("vault:ready_for_data")
+                async def _load(_payload=None):
+                    cfg = ctx.get_all_settings()
+                    ctx.state["api_url"] = cfg.get("api_url", "http://localhost")
+        """
+        from core.components.vault.logic.kv_helper import read_secret_dict
+
+        return read_secret_dict(self._get_settings_vault_path())
 
     def set_secret(self, key: str, value: str):
         """Speichert einen Wert im KV-V2 Store, ohne andere Keys zu löschen."""

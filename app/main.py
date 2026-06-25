@@ -1,7 +1,12 @@
 import asyncio
+import os
+import platform as _platform
+import sys
+import time as _time
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -9,7 +14,7 @@ from fastapi.openapi.utils import get_openapi
 from nicegui import ui
 from pydantic import BaseModel, ValidationError
 
-from config import Settings, settings
+from config import Settings, settings, EDITABLE_SETTINGS
 from core.bus import bus
 from core.logger import setup_logging, get_logger
 from core.session import is_authenticated
@@ -27,6 +32,12 @@ from core.api import (
     system_api_key_configured,
 )
 from core.api.permissions_api import permissions_router
+from core.api.auth_api import auth_router
+from core.api.events_api import events_router
+from core.components.auth.api.users_api import users_router
+from core.components.plugins.api.plugins_api import plugins_router
+from core.components.settings.api.themes_api import themes_router
+from core.components.vault.api.vault_api import vault_api_router
 from core.components.sockets.api.socket_api import socket_router
 from core.components.notification_router.api import notification_router_api
 
@@ -38,7 +49,7 @@ from core.components.auth.ui.routes import (
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
-from core.components.notifications.api import register_notification_fastapi_routes
+from core.components.notifications.api import register_notification_fastapi_routes, notifications_router
 
 # --- Global UI ---
 from ui.theme import apply_theme
@@ -47,6 +58,8 @@ from version import __version__
 
 setup_logging()
 
+_startup_time = _time.monotonic()
+
 app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",
@@ -54,6 +67,15 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 log = get_logger("Core:Main")
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
@@ -160,6 +182,19 @@ def _public_config_snapshot() -> dict:
     sanitized["desired_plugin_specs"] = settings.desired_plugin_specs
     sanitized["ldap_default_roles"] = settings.ldap_default_roles
     sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
+    sanitized["env_locked"] = [
+        s.field for s in EDITABLE_SETTINGS if os.getenv(s.field) is not None
+    ]
+    sanitized["editable_settings"] = [
+        {
+            "field": s.field,
+            "label": s.label,
+            "kind": s.kind,
+            "options": s.options,
+            "category": s.category,
+        }
+        for s in EDITABLE_SETTINGS
+    ]
     return sanitized
 
 
@@ -178,11 +213,13 @@ async def boot_interceptor(request: Request, call_next):
         "/_nicegui",
         "/static",
         "/assets",
+        "/app",  # React SPA (served from core) loads + shows its own boot/loading state
         "/_pywebview",
         "/favicon.ico",
         "/site.webmanifest",
         "/setup",
         "/unseal",
+        "/api",
     ]
 
     # Utilizing boot_service from the new path
@@ -217,6 +254,12 @@ async def manifest_redirect():
 
 @ui.page("/")
 def entry_point():
+    # In 'react' mode the React SPA is the front door — send / to it. NiceGUI pages
+    # (and this one in 'nicegui'/'both' mode) keep working underneath.
+    if settings.LYNDRIX_UI_ENGINE == "react":
+        ui.navigate.to("/app/")
+        return
+
     apply_theme(page_title="Home")
 
     if getattr(app.state, "maintenance", {}).get("active", False):
@@ -286,6 +329,27 @@ app.include_router(socket_router)
 # Notification routing API (endpoint discovery, bindings, env-lock surface).
 app.include_router(notification_router_api)
 
+# Authenticated notification feed for the React frontend (notification bell).
+app.include_router(notifications_router)
+
+# Auth REST API — login / logout / me (used by lyndrix-ui).
+app.include_router(auth_router)
+
+# Server-Sent Events stream for real-time updates.
+app.include_router(events_router)
+
+# User and API key management.
+app.include_router(users_router)
+
+# Plugin lifecycle and marketplace management.
+app.include_router(plugins_router)
+
+# Theme management.
+app.include_router(themes_router)
+
+# Vault setup endpoints (unauthenticated — needed before Vault is ready).
+app.include_router(vault_api_router)
+
 
 # ==========================================
 # GLOBAL HEALTH CHECK
@@ -350,6 +414,23 @@ async def global_health():
     }
 
 
+@app.get("/api/system/info", tags=["System"], summary="Runtime platform info")
+async def system_info(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    """Read-only snapshot of runtime platform facts (versions, uptime, connectivity)."""
+    from core.services import db_instance as _db
+    db_ok = getattr(_db, "is_connected", None)
+    return {
+        "app_version": __version__,
+        "core_version": __core_version__,
+        "api_version": __api_version__,
+        "python_version": sys.version.split()[0],
+        "platform": _platform.system(),
+        "uptime_s": round(_time.monotonic() - _startup_time),
+        "vault_connected": vault_instance.is_connected,
+        "db_connected": bool(db_ok) if db_ok is not None else None,
+    }
+
+
 @app.get("/api/system/config", tags=["System"], summary="Get runtime config (sanitized)")
 async def get_runtime_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
     """Expose runtime settings from config.py with secrets redacted.
@@ -383,61 +464,25 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
-    settings_fields = set(settings.model_fields.keys())
-    allowed_extra_keys = {"github_token", "system_api_key"}
-    unknown_keys = sorted(set(updates.keys()) - settings_fields - allowed_extra_keys)
-    if unknown_keys:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported config keys: {', '.join(unknown_keys)}",
+    from core.components.settings.logic.system_config_service import system_config_service
+
+    try:
+        result = system_config_service.apply(
+            updates,
+            persist=payload.persist_in_vault,
+            apply_runtime=payload.apply_runtime,
         )
-
-    settings_updates = {k: v for k, v in updates.items() if k in settings_fields}
-
-    validated_settings = None
-    if settings_updates:
-        try:
-            merged = settings.model_dump()
-            merged.update(settings_updates)
-            validated_settings = Settings.model_validate(merged)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
-
-    if payload.persist_in_vault:
-        if not vault_instance.is_connected:
-            raise HTTPException(
-                status_code=503,
-                detail="Vault is not connected; cannot persist config updates",
-            )
-        try:
-            existing = {}
-            try:
-                resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                    path="core/settings",
-                    mount_point="lyndrix",
-                )
-                existing = resp["data"]["data"] or {}
-            except Exception:
-                existing = {}
-
-            existing.update(updates)
-            vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                path="core/settings",
-                mount_point="lyndrix",
-                secret=existing,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to persist settings: {exc}") from exc
-
-    if payload.apply_runtime and validated_settings is not None:
-        for key in settings_updates.keys():
-            setattr(settings, key, getattr(validated_settings, key))
+    except ValueError as exc:
+        # Structured pydantic errors or an unsupported-keys message.
+        raise HTTPException(status_code=422, detail=exc.args[0]) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return {
         "status": "ok",
-        "updated_keys": sorted(updates.keys()),
-        "persisted_in_vault": payload.persist_in_vault,
-        "applied_runtime": payload.apply_runtime and bool(settings_updates),
+        "updated_keys": result["updated_keys"],
+        "persisted_in_vault": result["persisted"],
+        "applied_runtime": bool(result["applied_runtime"]),
         "config": _public_config_snapshot(),
     }
 
@@ -482,3 +527,39 @@ bus.subscribe("vault:opened")(_hydrate_settings_from_vault)
 
 
 ui.run_with(app, storage_secret=settings.STORAGE_SECRET)
+
+
+# --- React SPA serving (selectable UI engine) ---
+# Must run AFTER ui.run_with(): that call installs NiceGUI's root catch-all (path ""),
+# and move_routes_before_catchall() splices the /app mount in front of it so the SPA is
+# reachable. Served only when a built bundle exists at app/ui_dist (see the multi-stage
+# Dockerfile / the dev build step). NiceGUI keeps owning / unless engine == "react".
+if settings.LYNDRIX_UI_ENGINE in ("react", "both"):
+    from pathlib import Path as _Path
+
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    from core.api.route_order import move_routes_before_catchall
+
+    class _SPAStaticFiles(StaticFiles):
+        """StaticFiles that falls back to index.html on 404 so client-side routes
+        (e.g. /app/dashboard, /app/apps/...) resolve on hard-load / refresh."""
+
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except _StarletteHTTPException as exc:
+                if exc.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
+
+    _ui_dist = _Path(__file__).parent / "ui_dist"
+    if _ui_dist.is_dir() and (_ui_dist / "index.html").exists():
+        app.mount("/app", _SPAStaticFiles(directory=str(_ui_dist), html=True), name="react_ui")
+        move_routes_before_catchall(app, "/app")
+        log.info("UI: React SPA served at /app (engine=%s)", settings.LYNDRIX_UI_ENGINE)
+    else:
+        log.warning(
+            "UI: LYNDRIX_UI_ENGINE=%s but app/ui_dist is missing/empty — serving NiceGUI only.",
+            settings.LYNDRIX_UI_ENGINE,
+        )

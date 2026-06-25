@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Custom plugin providers must also be listed here to be registered at startup.
     LYNDRIX_AUTH_PROVIDERS: str = "local"
 
+    # --- CORS ---
+    # Origins allowed for cross-origin requests (lyndrix-ui dev server and custom frontends).
+    CORS_ALLOWED_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:4321"]
+
     # --- SYSTEM API KEY ---
     # Master API key for machine-to-machine access to protected HTTP endpoints.
     # Unset by default: when neither this env var nor the Vault-stored
@@ -138,6 +142,15 @@ class Settings(BaseSettings):
     LYNDRIX_GATEWAY_MAX_RETRY_ATTEMPTS: int = 3
     # TTL in seconds for pending correlation actions (interactive button responses).
     LYNDRIX_GATEWAY_CORRELATION_TTL_SECONDS: int = 3600
+
+    # --- UI ENGINE ---
+    # Which UI engine(s) core serves:
+    #   "nicegui" — NiceGUI at / only (default; current behaviour)
+    #   "react"   — React SPA at /app, and / redirects to /app (React is the front door)
+    #   "both"    — NiceGUI at / and the React SPA at /app, both selectable
+    # The React SPA is only served when app/ui_dist exists (built bundle). NiceGUI keeps
+    # running in every mode so not-yet-migrated plugin NiceGUI UIs stay available.
+    LYNDRIX_UI_ENGINE: str = "nicegui"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -413,6 +426,12 @@ EDITABLE_SETTINGS: List[EditableSetting] = [
                     "Root logging verbosity. Applied immediately on save.",
                     kind="select",
                     options=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                    category="Application"),
+    EditableSetting("LYNDRIX_UI_ENGINE", "UI Engine",
+                    "Which UI engine core serves. 'react'/'both' require the built "
+                    "React bundle (app/ui_dist). Takes effect on restart.",
+                    kind="select",
+                    options=["nicegui", "react", "both"],
                     category="Application"),
     # ── Localization ─────────────────────────────────────────────────────────
     EditableSetting("DEFAULT_LOCALE", "Default Locale",
