@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 
+from core.api.security import ApiIdentity, require_api_auth
 from core.logger import get_logger
 from .notification_service import notification_service
 
@@ -126,3 +127,81 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
             "notification_id": notif["id"],
             "type": notif["type"],
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Authenticated notification feed for the React frontend (notification bell).
+#
+# Scoped to the current identity's username: a user sees their own targeted
+# notifications (user_id == username) plus broadcasts (user_id is None).
+# ──────────────────────────────────────────────────────────────────────────────
+
+notifications_router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
+
+
+def _visible_for(username: str) -> List[Dict[str, Any]]:
+    """Notifications visible to ``username``: own + broadcast (user_id is None).
+
+    ``history`` is appendleft-ordered (newest first), so iteration order already
+    yields newest-first.
+    """
+    return [
+        n for n in list(notification_service.history)
+        if n.get("user_id") in (username, None)
+    ]
+
+
+def _public_view(n: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip the internal ``user_id`` from a notification for the API response."""
+    return {
+        "id": n["id"],
+        "title": n.get("title", ""),
+        "message": n.get("message", ""),
+        "type": n.get("type", "info"),
+        "timestamp": n.get("timestamp"),
+        "read": bool(n.get("read", False)),
+    }
+
+
+@notifications_router.get("", summary="List the current user's notifications")
+async def list_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+    visible = _visible_for(identity.username)
+    return {
+        "notifications": [_public_view(n) for n in visible],
+        "unread": sum(1 for n in visible if not n.get("read", False)),
+    }
+
+
+@notifications_router.post("/{notif_id}/read", summary="Mark a notification as read")
+async def read_notification(
+    notif_id: str,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    notification_service.mark_as_read(notif_id)
+    return {"status": "ok"}
+
+
+@notifications_router.post("/read-all", summary="Mark all visible notifications as read")
+async def read_all_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+    for n in _visible_for(identity.username):
+        notification_service.mark_as_read(n["id"])
+    return {"status": "ok"}
+
+
+@notifications_router.delete("/{notif_id}", summary="Dismiss a notification")
+async def dismiss_notification(
+    notif_id: str,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    notification_service.remove_notification(notif_id)
+    return {"status": "ok"}
+
+
+@notifications_router.delete("", summary="Clear all visible notifications")
+async def clear_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+    # NOTE: "visible" includes broadcasts (user_id is None), so clearing all also
+    # removes shared broadcast notifications from the store — this matches the
+    # user-facing "Alle löschen" expectation but is a documented side effect.
+    for nid in [n["id"] for n in _visible_for(identity.username)]:
+        notification_service.remove_notification(nid)
+    return {"status": "ok"}

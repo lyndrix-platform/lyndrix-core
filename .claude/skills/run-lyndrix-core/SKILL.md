@@ -46,7 +46,8 @@ app is healthy (also prints the running version):
 
 ```bash
 curl -s http://localhost:8081/api/health
-# {"status":"ok","core_version":"0.1.3","api_version":"1.2.0","plugins":{}}
+# {"status":"ok","core_version":"0.2.0","api_version":"1.2.0","plugins":{…}}
+curl -s http://localhost:8081/api/vault/status   # unauthenticated; returns sealed/connected/ui_state
 ```
 
 > `plugins: {}` means no *external* plugins are active — core modules (Dashboard,
@@ -62,7 +63,7 @@ hardcoded) — source it from the dev env file:
 ```bash
 cd .claude/skills/run-lyndrix-core
 . ../../../.dev/run-venv/bin/activate
-export LYNDRIX_ADMIN_PASSWORD="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' ../../../docker/.env.dev | cut -d= -f2-)"
+export LYNDRIX_ADMIN_PASSWORD="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' ../../../docker/.env.dev | cut -d= -f2- | tr -d '\r')"
 python driver.py
 ```
 
@@ -131,6 +132,11 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
   the password field by `input[type=password]` and the username by the first
   `input:not([type=password])`, then submits with Enter (falling back to a
   Sign In/Anmelden button). Works against the current "Lyndrix Login" card.
+- **`docker/.env.dev` has Windows-style CRLF line endings** (`\r\n`). A plain
+  `cut -d= -f2-` leaves a trailing `\r` which makes the JSON body invalid
+  (`Invalid control character`). Always pipe through `| tr -d '\r'` when
+  extracting the password from `.env.dev` (the driver command above already
+  does this).
 - **Secrets stay out of the repo.** The driver refuses to run without
   `LYNDRIX_ADMIN_PASSWORD` in the env rather than carrying a default.
 - **Sibling plugin repos are volume-mounted** by `docker-compose.dev.yml`
@@ -144,7 +150,7 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 | Symptom | Fix |
 |---|---|
 | `libnspr4.so: cannot open shared object file` / `TargetClosedError: BrowserType.launch` | Run `sudo $(which python) -m playwright install-deps chromium`. |
-| `error: set LYNDRIX_ADMIN_PASSWORD ...` | `export LYNDRIX_ADMIN_PASSWORD="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' docker/.env.dev \| cut -d= -f2-)"`. |
+| `error: set LYNDRIX_ADMIN_PASSWORD ...` | `export LYNDRIX_ADMIN_PASSWORD="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' docker/.env.dev \| cut -d= -f2- \| tr -d '\r')"`. |
 | Driver hangs on `/login` / shots show the login card | Wrong password — re-check the value in `docker/.env.dev`. |
 | `/plugins` or `/settings` shot shows login page | NiceGUI session race — the driver already retries. If it persists, the stack may not have finished booting (`docker logs lyndrix-core-dev`). |
 | `curl: connection refused` on :8081 | Stack not up — `docker compose -f docker/docker-compose.dev.yml up -d`. |

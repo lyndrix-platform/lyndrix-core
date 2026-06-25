@@ -49,7 +49,7 @@ from core.components.auth.ui.routes import (
 from core.components.settings.ui.routes import register_settings_routes
 from core.components.vault.ui.routes import register_vault_routes
 from core.components.dashboard.ui.routes import register_dashboard_routes
-from core.components.notifications.api import register_notification_fastapi_routes
+from core.components.notifications.api import register_notification_fastapi_routes, notifications_router
 
 # --- Global UI ---
 from ui.theme import apply_theme
@@ -328,6 +328,9 @@ app.include_router(socket_router)
 
 # Notification routing API (endpoint discovery, bindings, env-lock surface).
 app.include_router(notification_router_api)
+
+# Authenticated notification feed for the React frontend (notification bell).
+app.include_router(notifications_router)
 
 # Auth REST API — login / logout / me (used by lyndrix-ui).
 app.include_router(auth_router)

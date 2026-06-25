@@ -29,6 +29,7 @@ _AUTH_TOPICS = frozenset({
     "ui:needs_refresh",
     "system:metrics_update",
     "vault:status_changed",
+    "notification:new",
 })
 
 # Subset sent to unauthenticated clients.
