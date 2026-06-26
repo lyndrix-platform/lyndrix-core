@@ -13,8 +13,7 @@ services:
       - ./entrypoint.sh:/app/entrypoint.sh
       - ../../lyndrix-plugin-iac-orchestrator:/app/plugins/iac_orchestrator
       - ../../lyndrix-plugin-discord-notifier:/app/plugins/discord_notifier
-#      - ../../lyndrix-plugin-git-manager:/app/plugins/git_manager
-#      - ../../lyndrix-plugin-meeting-bingo:/app/plugins/meeting_bingo
+      - ../../lyndrix-plugin-meeting-bingo:/app/plugins/meeting_bingo
       - ../../lyndrix-plugin-monitoring:/app/plugins/state_monitoring
       - ../../lyndrix-plugin-external-services:/app/plugins/external_services
       - ../../lyndrix-plugin-server-manager:/app/plugins/server_manager

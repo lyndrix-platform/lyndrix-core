@@ -46,13 +46,16 @@ app is healthy (also prints the running version):
 
 ```bash
 curl -s http://localhost:8081/api/health
-# {"status":"ok","core_version":"0.2.0","api_version":"1.2.0","plugins":{…}}
+# {"status":"unknown","core_version":"0.2.2","api_version":"1.2.0","plugins":{… 6 active …}}
 curl -s http://localhost:8081/api/vault/status   # unauthenticated; returns sealed/connected/ui_state
 ```
 
-> `plugins: {}` means no *external* plugins are active — core modules (Dashboard,
-> Messaging Gateway, Plugin Manager, etc.) are always loaded and visible in the
-> Plugin Manager UI regardless. `core_version` + `api_version` are the useful signal.
+> `plugins` lists active *external* plugins by id (this stack currently has 6:
+> state_monitoring, docker, bingo, iac_orchestrator, discord, server_manager). An
+> empty `{}` just means none are enabled — core modules (Dashboard, Messaging
+> Gateway, Plugin Manager, etc.) are always loaded regardless. `core_version` +
+> `api_version` are the useful signal; top-level `status` stays `"unknown"` unless a
+> plugin implements `health()`.
 
 ## Run (agent path) — driver.py
 
