@@ -487,6 +487,37 @@ async def set_runtime_config(
     }
 
 
+@app.post("/api/system/restart", tags=["System"], summary="Restart the core container")
+async def system_restart(identity: ApiIdentity = Depends(require_permission("api:write"))):
+    """Restart THIS core's own Docker container — e.g. to make a plugin upgrade take
+    effect without an external ``docker restart`` (a recurring gotcha).
+
+    Issues ``docker restart <self>`` over the mounted Docker socket. The 200 response is
+    flushed first, then the restart fires ~1s later, so the client's connection drops as
+    the container goes down and comes back — the UI should show "restarting" and poll for
+    the core to return. Requires the ``api:write`` permission.
+    """
+    import asyncio
+    from core.components.sockets.providers.docker_provider import DockerProvider, own_container_id
+
+    provider = DockerProvider()
+    if not provider.is_available:
+        raise HTTPException(status_code=503, detail="Docker socket/CLI unavailable — cannot self-restart.")
+    cid = own_container_id()
+    if not cid:
+        raise HTTPException(status_code=503, detail="Could not determine own container id.")
+
+    async def _do_restart():
+        await asyncio.sleep(1)  # let the 200 flush before the container goes down
+        ok, err = await provider.restart_container(cid)
+        if not ok:
+            log.error(f"SYSTEM: self-restart failed: {err}")
+
+    asyncio.create_task(_do_restart())
+    log.warning(f"SYSTEM: container self-restart requested by '{identity.username}' (container {cid[:12]}).")
+    return {"status": "restarting", "container": cid[:12]}
+
+
 @app.get("/api/auth/whoami", tags=["Authentication"], summary="Inspect API auth status")
 async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
     """
