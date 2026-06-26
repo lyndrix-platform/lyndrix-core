@@ -104,6 +104,101 @@ async def provider_health(
     return {"provider_id": provider_id, "healthy": status}
 
 
+def _serialize_config_field(cf) -> dict[str, Any]:
+    """Serialize a ProviderConfigField for the API.
+
+    Unlike the NiceGUI (which pre-fills the editable input with the secret), the
+    API never returns sensitive values — it reports a ``configured`` flag instead,
+    and PATCH treats a blank sensitive value as "keep the stored one".
+    """
+    sensitive = bool(getattr(cf, "sensitive", False))
+    return {
+        "key": cf.key,
+        "label": cf.label,
+        "env_var": cf.env_var,
+        "sensitive": sensitive,
+        "placeholder": cf.placeholder,
+        "is_env_locked": bool(cf.is_env_locked),
+        "current_value": "" if sensitive else (cf.current_value or ""),
+        "configured": bool(cf.current_value),
+    }
+
+
+@notification_router_api.get(
+    "/providers/{provider_id}/config",
+    summary="List a provider's configurable fields (secrets masked)",
+)
+async def get_provider_config(
+    provider_id: str,
+    _identity: ApiIdentity = Depends(require_permission("api:read")),
+):
+    adapter = messaging_gateway.get_adapter(provider_id)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' is not registered")
+    return {
+        "provider_id": provider_id,
+        "display_name": adapter.display_name,
+        "fields": [_serialize_config_field(cf) for cf in adapter.get_config_fields()],
+    }
+
+
+class _ProviderConfigBody(BaseModel):
+    values: dict[str, str] = {}
+
+
+@notification_router_api.patch(
+    "/providers/{provider_id}/config",
+    summary="Update a provider's config values (env-locked rejected, blank secret keeps existing)",
+)
+async def patch_provider_config(
+    provider_id: str,
+    body: _ProviderConfigBody,
+    _identity: ApiIdentity = Depends(require_permission("api:write")),
+):
+    adapter = messaging_gateway.get_adapter(provider_id)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' is not registered")
+
+    fields = {cf.key: cf for cf in adapter.get_config_fields()}
+
+    # Reject up-front if any requested field is env-locked (don't half-apply).
+    locked = [k for k, v in (body.values or {}).items()
+              if k in fields and fields[k].is_env_locked]
+    if locked:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "env_locked", "locked_fields": locked},
+        )
+
+    saved: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    for key, value in (body.values or {}).items():
+        cf = fields.get(key)
+        if cf is None:
+            skipped.append(key)
+            continue
+        sval = "" if value is None else str(value)
+        if getattr(cf, "sensitive", False) and not sval.strip():
+            skipped.append(key)  # blank secret -> keep existing
+            continue
+        if adapter.save_config(key, sval):
+            saved.append(key)
+        else:
+            failed.append(key)
+    if failed:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "save_failed", "fields": failed},
+        )
+    return {
+        "status": "ok",
+        "saved": saved,
+        "skipped": skipped,
+        "fields": [_serialize_config_field(cf) for cf in adapter.get_config_fields()],
+    }
+
+
 class _PatchBody(BaseModel):
     active: bool | None = None
     provider: str | None | Literal["__unset__"] = "__unset__"
