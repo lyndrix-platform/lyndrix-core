@@ -88,19 +88,51 @@ async def logout(request: Request, identity: ApiIdentity = Depends(require_api_a
     return {"status": "ok", "message": "Logged out"}
 
 
+def _serialize_auth_field(spec, value: str, source: str) -> Dict[str, object]:
+    """Serialize an auth FieldSpec + its resolved (value, source) for the API.
+
+    Mirrors the notification provider-config shape: per-field metadata plus the
+    effective ``source`` (env / vault / default). Sensitive values are never
+    returned — a ``configured`` flag tells the UI a secret is set, and a blank
+    sensitive value on PATCH means "keep the stored one".
+    """
+    is_env_locked = source == "env"
+    return {
+        "vault_key": spec.vault_key,
+        "label": spec.label,
+        "hint": spec.hint,
+        "env_var": spec.env_var,
+        "sensitive": spec.sensitive,
+        "is_bool": spec.is_bool,
+        "source": source,
+        "is_env_locked": is_env_locked,
+        "configured": bool(value),
+        "current_value": "" if spec.sensitive else value,
+    }
+
+
 @auth_router.get("/config", summary="Get auth provider configuration (secrets masked)")
 async def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
-    """Return the Vault-stored auth provider configuration. Secret values are
-    masked — the React UI shows a placeholder and only sends a new value when
-    the operator actually changes it."""
-    from core.components.auth.logic.auth_config import auth_config_service
+    """Return the auth provider configuration as a metadata-rich ``fields`` array.
 
+    Each field reports its label/hint/env-var, the effective value + its source
+    (env → vault → default), and whether it is env-locked (cannot be edited in the
+    UI). Secret values are masked (``current_value=""`` + ``configured=true``).
+    The legacy ``config`` map (masked) is kept for backwards compatibility."""
+    from core.components.auth.logic.auth_config import auth_config_service, ALL_SPECS
+
+    effective = auth_config_service.get_all_effective()
+    fields = [
+        _serialize_auth_field(spec, *effective[spec.vault_key])
+        for spec in ALL_SPECS
+    ]
+    # Legacy masked map (raw Vault values) for any older consumer.
     data = auth_config_service.load_vault_data()
     config = {
         k: ("********" if (k in _SECRET_CONFIG_KEYS and v) else v)
         for k, v in data.items()
     }
-    return {"status": "ok", "config": config}
+    return {"status": "ok", "fields": fields, "config": config}
 
 
 @auth_router.patch("/config", summary="Update auth provider configuration")
@@ -109,19 +141,46 @@ async def update_auth_config(
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
     """Persist auth provider config to Vault (core/auth) and reinitialize the
-    provider chain so changes take effect immediately. Empty-string values clear
-    the stored key (same semantics as the NiceGUI page)."""
-    from core.components.auth.logic.auth_config import auth_config_service
-    from core.components.auth.logic.auth_service import auth_service
+    provider chain so changes take effect immediately.
 
+    Fields whose value comes from an OS environment variable are env-locked and
+    rejected up-front with HTTP 409 (don't half-apply). Blank values for sensitive
+    fields are skipped (keep the stored secret); blank non-sensitive values clear
+    the stored key (same semantics as the NiceGUI page)."""
+    from core.components.auth.logic.auth_config import auth_config_service, _SPEC_MAP
+
+    effective = auth_config_service.get_all_effective()
+
+    # Reject up-front if any requested field is env-locked.
+    locked = [
+        k for k in payload.updates
+        if k in effective and effective[k][1] == "env"
+    ]
+    if locked:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "env_locked", "locked_fields": sorted(locked)},
+        )
+
+    # Skip blank sensitive values so a masked secret is kept, not deleted.
+    updates = {}
+    skipped: List[str] = []
+    for key, value in payload.updates.items():
+        spec = _SPEC_MAP.get(key)
+        if spec and spec.sensitive and not str(value).strip():
+            skipped.append(key)
+            continue
+        updates[key] = value
+
+    from core.components.auth.logic.auth_service import auth_service
     try:
-        auth_config_service.save_vault_data(payload.updates)
+        auth_config_service.save_vault_data(updates)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     auth_service.reinitialize_providers()
     log.info(f"AUTH API: provider config updated by '{identity.username}'.")
-    return {"status": "ok", "updated_keys": sorted(payload.updates.keys())}
+    return {"status": "ok", "updated_keys": sorted(updates.keys()), "skipped": sorted(skipped)}
 
 
 @auth_router.post("/reload", summary="Reinitialize the auth provider chain")

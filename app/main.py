@@ -464,6 +464,15 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
+    # Reject env-locked keys up-front: an OS env var always wins on the next boot,
+    # so persisting it to Vault would silently no-op and confuse the operator.
+    locked = [key for key in updates if os.getenv(key) is not None]
+    if locked:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "env_locked", "locked_fields": sorted(locked)},
+        )
+
     from core.components.settings.logic.system_config_service import system_config_service
 
     try:

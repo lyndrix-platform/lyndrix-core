@@ -40,7 +40,7 @@ Plugins can expose HTTP endpoints without touching main.py::
         # Routes are mounted under /api/plugins/<plugin-id>/
 """
 
-__api_version__ = "1.2.0"
+__api_version__ = "1.3.0"
 
 from typing import Any, Dict, Literal, Optional
 
