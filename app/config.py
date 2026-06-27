@@ -1,9 +1,10 @@
 import os
+import sys
 import logging
 import re
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, List, Dict, Optional
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -287,10 +288,10 @@ class Settings(BaseSettings):
             return self
         violations = self._insecure_default_violations()
         if violations:
+            bullet_list = "".join(f"\n    {v}" for v in violations)
             raise ValueError(
-                "Refusing to start with insecure development defaults in a non-dev "
-                f"environment (ENV_TYPE={self.ENV_TYPE!r}): {', '.join(violations)}. "
-                "Set secure values via environment variables before deploying."
+                f"Insecure development defaults detected (ENV_TYPE={self.ENV_TYPE!r}).\n"
+                f"Set these environment variables to secure values before deploying:{bullet_list}"
             )
         return self
 
@@ -415,7 +416,17 @@ class Settings(BaseSettings):
 
 
 # Singleton for the entire application
-settings = Settings()
+try:
+    settings = Settings()
+except ValidationError as _exc:
+    _lines = ["", "=" * 68, "FATAL: Lyndrix refused to start — configuration error", "=" * 68]
+    for _err in _exc.errors():
+        _msg = _err.get("msg", "")
+        _msg = _msg.removeprefix("Value error, ")
+        _lines.append(_msg)
+    _lines.append("=" * 68)
+    print("\n".join(_lines), file=sys.stderr)
+    sys.exit(1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
