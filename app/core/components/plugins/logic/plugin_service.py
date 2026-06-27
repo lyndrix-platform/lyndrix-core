@@ -386,6 +386,7 @@ class PluginService:
             "description": entry.get("description") or "",
             "stars": entry.get("stargazers_count", 0),
             "url": html_url,
+            "repo_url": html_url,  # mirrors installed PluginOut.repo_url — used by the React UI to detect installed state
             "clone_url": entry.get("clone_url", html_url),
             "author": author,
             "repo_safe": repo_safe,
@@ -419,6 +420,7 @@ class PluginService:
             "description": row.description or "Custom repository.",
             "stars": 0,
             "url": row.repo_url,
+            "repo_url": row.repo_url,  # mirrors installed PluginOut.repo_url — used by the React UI to detect installed state
             "clone_url": row.repo_url,
             "author": author,
             "repo_safe": repo_safe,
