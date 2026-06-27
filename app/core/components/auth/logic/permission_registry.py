@@ -50,6 +50,7 @@ _BUILTIN: List[PermissionDef] = [
     PermissionDef("feature:plugins.manage",   "Plugins verwalten",             "feature", icon="extension"),
     PermissionDef("api:read",                 "API lesen",                     "api",     icon="api"),
     PermissionDef("api:write",                "API schreiben",                 "api",     icon="api"),
+    PermissionDef("iac:infra_apply",          "IaC Infrastruktur anwenden",    "api",     icon="bolt", description="Trigger IaC infrastructure apply (terraform/ansible apply)"),
 ]
 
 _CATEGORY_ORDER = ["route", "plugin", "feature", "api"]
