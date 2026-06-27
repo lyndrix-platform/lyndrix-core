@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -146,10 +147,14 @@ async def create_user(
     if len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
+    # Argon2 is CPU/memory-heavy; run it off the event loop so a user create
+    # never blocks every other client (same rule as change_password).
+    hashed = await asyncio.to_thread(hash_password, payload.password)
+
     with _db().SessionLocal() as s:
         user = User(
             username=uname,
-            hashed_password=hash_password(payload.password),
+            hashed_password=hashed,
             full_name=(payload.full_name or "").strip() or None,
             email=(payload.email or "").strip() or None,
             roles=sorted(set(payload.roles)),
@@ -190,14 +195,21 @@ async def update_user(
     if payload.password is not None and len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
+    # Hash off the event loop before opening the DB session (Argon2 is heavy).
+    hashed = (
+        await asyncio.to_thread(hash_password, payload.password)
+        if payload.password is not None
+        else None
+    )
+
     with _db().SessionLocal() as s:
         user = s.query(User).filter(User.username == username).first()
         if payload.full_name is not None:
             user.full_name = payload.full_name.strip() or None
         if payload.email is not None:
             user.email = payload.email.strip() or None
-        if payload.password is not None:
-            user.hashed_password = hash_password(payload.password)
+        if hashed is not None:
+            user.hashed_password = hashed
         if payload.roles is not None:
             user.roles = sorted(set(payload.roles))
         if payload.groups is not None:

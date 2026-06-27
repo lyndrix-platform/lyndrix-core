@@ -1,5 +1,5 @@
 from core.components.plugins.logic.models import ModuleManifest
-from .notification_service import notification_service
+from .logic.notification_service import notification_service
 
 manifest = ModuleManifest(
     id="lyndrix.core.notifications",

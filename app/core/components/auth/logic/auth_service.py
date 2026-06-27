@@ -1,5 +1,7 @@
+import asyncio
 import os
 import logging
+from sqlalchemy import text
 from core.bus import bus
 from core.logger import get_logger
 from core.components.database.logic.db_service import Base, db_instance
@@ -29,15 +31,23 @@ class AuthService:
     async def initialize_iam(self, payload):
         log.info("IAM: Starting initialization...")
         try:
-            Base.metadata.create_all(bind=db_instance.engine)
-            log.debug("DB: IAM tables checked/created.")
-            self._migrate_schema()
-            self._seed_users()
-            self._initialize_providers()
+            # create_all, schema ALTERs, Argon2 seeding and the provider init all
+            # do blocking (DB/Vault/CPU) work. This runs as an async bus handler
+            # during boot, so offload the whole synchronous block to a worker
+            # thread to keep the event loop responsive while the platform comes up.
+            await asyncio.to_thread(self._bootstrap_iam)
             log.info("SUCCESS: IAM Service ready.")
             bus.emit("iam:ready")
         except Exception as e:
             log.error(f"ERROR: IAM Service initialization failed: {e}", exc_info=True)
+
+    def _bootstrap_iam(self) -> None:
+        """Synchronous IAM bootstrap, executed off the event loop."""
+        Base.metadata.create_all(bind=db_instance.engine)
+        log.debug("DB: IAM tables checked/created.")
+        self._migrate_schema()
+        self._seed_users()
+        self._initialize_providers()
 
     def _migrate_schema(self):
         """
@@ -55,7 +65,7 @@ class AuthService:
             for table, column, col_def in migrations:
                 try:
                     conn.execute(
-                        __import__("sqlalchemy").text(
+                        text(
                             f"ALTER TABLE `{table}` ADD COLUMN `{column}` {col_def}"
                         )
                     )
@@ -113,25 +123,15 @@ class AuthService:
         self._initialize_providers()
         log.info("AUTH: Providers reinitialized successfully.")
 
-    @staticmethod
-    def _vault_override(vault_key: str, env_value: str, vault_instance) -> str:
-        """Return the Vault-stored value if available, otherwise fall back to the env value."""
-        if not vault_instance.is_connected:
-            return env_value
-        try:
-            resp = vault_instance.client.secrets.kv.v2.read_secret_version(
-                path="core/auth", mount_point="lyndrix"
-            )
-            vault_val = resp["data"]["data"].get(vault_key)
-            if vault_val:
-                return str(vault_val)
-        except Exception:
-            pass
-        return env_value
-
     def _seed_users(self):
-        """Seeds admin and bot accounts from environment or defaults."""
-        # TODO: fail startup outside dev when default bootstrap credentials are still active.
+        """Seeds admin and bot accounts from environment or defaults.
+
+        Default bootstrap credentials are hard-rejected outside dev mode by
+        ``Settings._enforce_secure_defaults`` (config.py), which refuses to start
+        the app when LYNDRIX_ADMIN_PASSWORD / LYNDRIX_BOT_PASSWORD still equal
+        their shipped defaults. Reaching this seeder with defaults active therefore
+        only happens in dev, where the warnings below are sufficient.
+        """
         if not db_instance.SessionLocal:
             log.warning("SEED: Aborted, SessionLocal not ready.")
             return

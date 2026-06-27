@@ -1,20 +1,24 @@
-import time
 import asyncio
 
-from nicegui import ui
+from nicegui import ui, context
 
 from core.bus import bus
 from core.i18n import t
 from ui.theme import UIStyles, apply_theme
 
-# Rate limiting state
-_unseal_attempts = []
-_MAX_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 60
+from ..logic.rate_limit import unseal_limiter
+
+
+def _rate_limit_key() -> str:
+    """Per-client key so one operator's failed attempts cannot lock out others."""
+    try:
+        return f"ui:{context.client.id}"
+    except Exception:
+        return "ui:unknown"
 
 
 def render_unseal_page():
-    """Renders a minimal, isolated unseal mask with rate limiting."""
+    """Renders a minimal, isolated unseal mask with per-client rate limiting."""
 
     apply_theme(page_title="Unseal")
     ui.query("body").classes(add=UIStyles.AUTH_PAGE_BG)
@@ -34,26 +38,20 @@ def render_unseal_page():
             status_label = ui.label("").classes(UIStyles.AUTH_STATUS_PENDING)
 
             async def attempt_unseal():
-                global _unseal_attempts
-                now = time.time()
+                if not master_key.value:
+                    ui.notify(t("auth.unseal.empty_key"), type="warning")
+                    return
 
-                # Purge old attempts outside the lockout window
-                _unseal_attempts = [ts for ts in _unseal_attempts if now - ts < _LOCKOUT_SECONDS]
-
-                if len(_unseal_attempts) >= _MAX_ATTEMPTS:
-                    remaining = int(_LOCKOUT_SECONDS - (now - _unseal_attempts[0]))
-                    status_label.set_text(t("auth.unseal.locked_for", seconds=remaining))
+                # Per-client throttle (the authoritative API path is throttled per IP).
+                retry = unseal_limiter.hit(_rate_limit_key())
+                if retry > 0:
+                    status_label.set_text(t("auth.unseal.locked_for", seconds=retry))
                     status_label.classes(
                         add=UIStyles.AUTH_STATUS_ERROR,
                         remove=UIStyles.AUTH_STATUS_PENDING,
                     )
                     return
 
-                if not master_key.value:
-                    ui.notify(t("auth.unseal.empty_key"), type="warning")
-                    return
-
-                _unseal_attempts.append(now)
                 status_label.set_text(t("auth.unseal.decrypting"))
                 status_label.classes(
                     add=UIStyles.AUTH_STATUS_PENDING,

@@ -21,6 +21,7 @@ Usage by an originating plugin::
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -111,9 +112,12 @@ class CorrelationStore:
         )
         # Write to in-memory cache
         self._cache[str(correlation_id)] = pa
-        # Write-through to DB
-        session = self._session()
-        if session:
+
+        # Write-through to DB off the event loop (sync SQLAlchemy).
+        def _write() -> None:
+            session = self._session()
+            if not session:
+                return
             try:
                 record = PendingActionRecord(
                     correlation_id=str(correlation_id),
@@ -130,6 +134,8 @@ class CorrelationStore:
                 session.rollback()
             finally:
                 session.close()
+
+        await asyncio.to_thread(_write)
         return pa
 
     async def resolve(
@@ -142,10 +148,13 @@ class CorrelationStore:
             log.warning("CorrelationStore.resolve: unknown correlation_id %s", key)
             return None
 
-        session = self._session()
-        if session:
+        # Update the DB row off the event loop (sync SQLAlchemy).
+        def _update() -> None:
+            session = self._session()
+            if not session:
+                return
             try:
-                record = session.query(PendingActionRecord).get(key)
+                record = session.get(PendingActionRecord, key)
                 if record:
                     record.resolved_at = datetime.now(timezone.utc)
                     session.commit()
@@ -154,6 +163,8 @@ class CorrelationStore:
                 session.rollback()
             finally:
                 session.close()
+
+        await asyncio.to_thread(_update)
         return pa
 
     async def get(self, correlation_id: UUID) -> PendingAction | None:
@@ -167,11 +178,13 @@ class CorrelationStore:
         for k in stale:
             self._cache.pop(k, None)
 
-        session = self._session()
-        db_count = 0
-        if session:
+        # Delete expired rows off the event loop (sync SQLAlchemy).
+        def _delete() -> int:
+            session = self._session()
+            if not session:
+                return 0
             try:
-                db_count = (
+                count = (
                     session.query(PendingActionRecord)
                     .filter(
                         PendingActionRecord.resolved_at.is_(None),
@@ -180,12 +193,15 @@ class CorrelationStore:
                     .delete(synchronize_session=False)
                 )
                 session.commit()
+                return count
             except Exception as exc:
                 log.warning("CorrelationStore.expire_stale: %s", exc)
                 session.rollback()
+                return 0
             finally:
                 session.close()
 
+        db_count = await asyncio.to_thread(_delete)
         total = len(stale) + db_count
         if total:
             log.info("CorrelationStore: expired %d stale pending action(s).", total)

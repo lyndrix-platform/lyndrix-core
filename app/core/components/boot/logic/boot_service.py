@@ -1,4 +1,3 @@
-import asyncio
 from enum import StrEnum
 
 from core.bus import bus
@@ -42,19 +41,20 @@ class BootService:
         log.info("LOAD: Loading system modules and plugins...")
         self._set_state(BootPhase.LOADING_MODULES, is_booting=True)
         try:
-            # ---------------------------------------------------------
-            # LOKALER IMPORT: Löst den Zirkelbezug auf!
-            # Wird erst ausgeführt, wenn die Funktion wirklich läuft.
-            # ---------------------------------------------------------
+            # Local import breaks the circular dependency; it only runs when this
+            # coroutine actually executes.
             from core.components.plugins.logic.manager import module_manager
 
+            # TODO(agent): load_all() performs blocking filesystem scans/imports on
+            # the event loop. It cannot be moved to asyncio.to_thread as-is because
+            # it schedules loop tasks (bus.create_tracked_task) internally; make it
+            # natively async (offload only the blocking scan) in a follow-up.
             module_manager.load_all()
 
-            await asyncio.sleep(0.5)
             self._set_state(BootPhase.READY, is_booting=False)
             log.info("SUCCESS: Boot sequence completed. System released.")
 
-            # NEU: Das Signal an alle interessierten Plugins senden
+            # Signal all interested plugins that boot has finished.
             bus.emit("system:boot_complete", {"status": "success"})
         except Exception as e:
             self._set_state(BootPhase.FAILED, is_booting=False, error=str(e))

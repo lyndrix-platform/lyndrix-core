@@ -22,11 +22,13 @@ with exponential backoff (max 3 attempts by default, configurable via
 ``dispatch()`` returns ``dict[str, DeliveryResult]`` so callers can log or
 react to per-adapter outcomes.
 
-Backward compatibility
-----------------------
-The gateway also bridges ``notification:outbound`` events (emitted by the
-existing Notification Engine and any plugin that has not yet migrated) into
-``OutboundMessage`` objects and routes them through all registered adapters.
+Note on ``notification:outbound``
+---------------------------------
+The gateway does NOT subscribe to or bridge ``notification:outbound``. Internal
+notifications reach the bell via the ``InternalNotificationAdapter`` (provider
+``"system"``) over ``messaging:outbound``; external delivery is driven by the
+notification router. Any adapter that still listens to the legacy
+``notification:outbound`` topic does so on its own for backward compatibility.
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ from uuid import uuid4
 from core.bus import bus
 from .adapter import GatewayAdapter, GatewayCapability
 from .correlation import CorrelationStore
-from .models import DeliveryResult, InboundMessage, MessageSeverity, OutboundMessage
+from .models import DeliveryResult, InboundMessage, OutboundMessage
 
 log = logging.getLogger("Core:MessagingGateway")
 
@@ -217,7 +219,19 @@ class MessagingGateway:
         self._retry_workers: dict[str, _AdapterRetryWorker] = {}
         self._correlation    = CorrelationStore()
         self.stream_bridge   = StreamBridge()
-        self._max_retries: int = 3   # updated from settings in entrypoint
+        self._max_retries: int = 3   # default; override via configure()
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def configure(self, *, max_retries: int) -> None:
+        """Apply runtime configuration before adapters are registered.
+
+        Must be called before ``register()`` so newly created retry workers pick
+        up the configured ``max_retries`` value.
+        """
+        self._max_retries = int(max_retries)
 
     # ------------------------------------------------------------------
     # Adapter registry
@@ -431,28 +445,6 @@ class MessagingGateway:
             return await asyncio.wait_for(adapter.health(), timeout=5.0)
         except Exception:
             return False
-
-    # ------------------------------------------------------------------
-    # Backward-compat bridge: notification:outbound → OutboundMessage
-    # ------------------------------------------------------------------
-
-    async def bridge_notification(self, payload: dict) -> None:
-        """Convert a legacy ``notification:outbound`` payload and dispatch it."""
-        severity_map = {
-            "positive": MessageSeverity.SUCCESS,
-            "negative": MessageSeverity.ERROR,
-            "warning":  MessageSeverity.WARNING,
-            "ongoing":  MessageSeverity.INFO,
-            "info":     MessageSeverity.INFO,
-        }
-        msg = OutboundMessage(
-            title=payload.get("title") or "Lyndrix Notification",
-            body=payload.get("message") or "",
-            severity=severity_map.get(payload.get("type", "info"), MessageSeverity.INFO),
-            source_plugin_id="lyndrix.core.notifications",
-            metadata={"legacy_notification": True},
-        )
-        await self.dispatch(msg)
 
     # ------------------------------------------------------------------
     # Periodic maintenance

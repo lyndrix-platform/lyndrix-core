@@ -24,7 +24,8 @@
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "by": "by"
+    "by": "by",
+    "permission_denied": "You do not have permission to access this page."
   },
   "nav_sections": {
     "services": "Services",

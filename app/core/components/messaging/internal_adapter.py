@@ -20,16 +20,9 @@ from __future__ import annotations
 import logging
 
 from .adapter import GatewayAdapter, GatewayCapability
-from .models import InboundMessage, MessageSeverity, OutboundMessage
+from .models import OutboundMessage
 
 log = logging.getLogger("Core:InternalAdapter")
-
-_SEVERITY_TO_TYPE: dict[MessageSeverity, str] = {
-    MessageSeverity.SUCCESS: "positive",
-    MessageSeverity.ERROR:   "negative",
-    MessageSeverity.WARNING: "warning",
-    MessageSeverity.INFO:    "info",
-}
 
 
 class InternalNotificationAdapter(GatewayAdapter):
@@ -41,7 +34,7 @@ class InternalNotificationAdapter(GatewayAdapter):
 
     async def send(self, message: OutboundMessage) -> str | None:
         # Lazy import to avoid circular-import at module load time
-        from core.components.notifications.notification_service import notification_service
+        from core.components.notifications.logic.notification_service import notification_service
 
         meta = message.metadata or {}
 
@@ -56,7 +49,7 @@ class InternalNotificationAdapter(GatewayAdapter):
         payload: dict = {
             "title":          message.title,
             "message":        message.body,
-            "type":           _SEVERITY_TO_TYPE.get(message.severity, "info"),
+            "type":           message.severity.to_legacy(),
             "toast":          bool(meta.get("toast", True)),
             "persist":        bool(meta.get("persist", True)),
             # Never re-emit outbound from the internal adapter — would create a loop

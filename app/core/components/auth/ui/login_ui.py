@@ -1,4 +1,5 @@
 from nicegui import ui
+from config import settings
 from core.logger import get_logger
 from core.i18n import t
 from core.components.auth.logic.providers.registry import provider_registry
@@ -97,5 +98,9 @@ def render_login_page():
                         on_click=sso_login,
                     ).props("outline").classes(UIStyles.AUTH_BUTTON_SSO)
 
-            with ui.row().classes("items-center gap-2 opacity-50 mt-2"):
-                ui.label(t("auth.login.default_creds_hint")).classes(UIStyles.AUTH_HINT_TEXT)
+            # Only ever surface the default-credentials hint in dev mode. Showing
+            # real working credentials on a production login page hands them to
+            # any unauthenticated visitor.
+            if settings.ENV_TYPE == "dev":
+                with ui.row().classes("items-center gap-2 opacity-50 mt-2"):
+                    ui.label(t("auth.login.default_creds_hint")).classes(UIStyles.AUTH_HINT_TEXT)

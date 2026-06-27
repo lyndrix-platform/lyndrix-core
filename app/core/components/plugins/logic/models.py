@@ -70,7 +70,12 @@ class PluginSettingField(BaseModel):
     """
     key: str = Field(..., description="Vault key — also used as the form field identifier")
     label: str = Field(..., description="Human-readable label shown in the UI")
-    kind: str = Field(default="str", description="'str' | 'bool' | 'int' | 'select'")
+    kind: str = Field(
+        default="str",
+        description="'str' | 'bool' | 'int' | 'select' | 'secret' "
+        "('secret' values are masked in GET responses and preserved when "
+        "submitted blank)",
+    )
     options: List[str] = Field(default_factory=list, description="Allowed values for kind='select'")
     description: str = Field(default="", description="Help text shown below the field")
     category: str = Field(default="General", description="Groups fields into sections in the UI")

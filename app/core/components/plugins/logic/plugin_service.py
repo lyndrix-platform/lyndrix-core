@@ -607,12 +607,19 @@ class PluginService:
             # 3. Safe Extraction into Staging (ZIP Slip protected)
             log.info("FILESYSTEM: Extracting archive into hidden staging area...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                # TODO: require signed/allowlisted plugin sources before extraction and install.
+                # TODO(agent): require signed/allowlisted plugin sources before
+                # extraction and install (supply-chain hardening — CORE-AUTH-PLUGINS-008).
+                # This is a larger architectural change (signing keys + source
+                # allowlist + dependency sandboxing) deferred out of this pass;
+                # the ZIP-slip and requirements checks below are the interim guards.
+                staging_resolved = staging_base.resolve()
                 root_folder = zip_ref.namelist()[0].split('/')[0]
-                # Validate all paths stay within staging_base
+                # Validate all paths stay within staging_base. Use is_relative_to
+                # (not a string prefix, which a sibling dir sharing the prefix could
+                # satisfy) so the ZIP-slip guard is correct.
                 for member in zip_ref.namelist():
                     member_path = (staging_base / member).resolve()
-                    if not str(member_path).startswith(str(staging_base.resolve())):
+                    if member_path != staging_resolved and not member_path.is_relative_to(staging_resolved):
                         raise ValueError(f"SECURITY: ZIP contains path traversal entry: {member}")
                 zip_ref.extractall(staging_base)
                 extracted_dir = staging_base / root_folder
@@ -695,17 +702,32 @@ class PluginService:
         if not req_file.exists():
             return
 
-        # Validate requirements file doesn't contain suspicious entries
+        # Validate requirements file doesn't contain suspicious entries. This is a
+        # best-effort guard; full supply-chain safety (hash-pinning + sandboxing)
+        # is tracked below.
         req_content = req_file.read_text()
         for line in req_content.splitlines():
             stripped = line.strip()
-            if stripped and not stripped.startswith('#'):
-                # Block entries that look like local paths or URLs (potential injection)
-                if stripped.startswith('/') or stripped.startswith('..'):
-                    log.error(f"SECURITY: Blocked suspicious requirement entry: {stripped}")
-                    return
+            if not stripped or stripped.startswith('#'):
+                continue
+            lowered = stripped.lower()
+            # Block local paths, parent-dir refs, direct VCS/URL installs and
+            # PEP 508 "pkg @ <url>" specs, plus pip option lines (-e/--*) — all of
+            # which can pull code from outside trusted package indexes.
+            if (
+                stripped.startswith('/')
+                or stripped.startswith('..')
+                or stripped.startswith('-')
+                or '@' in stripped
+                or '://' in lowered
+                or lowered.startswith(('git+', 'http:', 'https:', 'file:'))
+            ):
+                log.error(f"SECURITY: Blocked suspicious requirement entry: {stripped}")
+                return
 
-        # TODO: require hash-pinned requirements and isolate dependency installs in a sandboxed runtime.
+        # TODO(agent): require hash-pinned requirements and isolate dependency
+        # installs in a sandboxed runtime (CORE-AUTH-PLUGINS-008). Deferred —
+        # needs a sandbox/runtime design beyond this pass.
 
         log.info(f"DEPENDENCIES: Installing requirements for {plugin_path.name} into private vendor directory...")
         vendor_dir = plugin_path / "vendor"

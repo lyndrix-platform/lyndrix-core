@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import hmac
 from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 
 from core.api.security import ApiIdentity, require_api_auth
 from core.logger import get_logger
-from .notification_service import notification_service
+from .logic.notification_service import notification_service
 
 log = get_logger("Core:NotificationAPI")
+
+
+def _require_webhook_token(presented: str) -> None:
+    """Validate the GitLab webhook token, failing closed when unset.
+
+    Returns nothing on success; raises 503 when no token is provisioned (so the
+    endpoint is never silently open) and 401 on mismatch. Compared in
+    constant time to avoid leaking the secret via timing.
+    """
+    ctx = notification_service.ctx
+    configured = ctx.get_secret("gitlab_webhook_token") if ctx else None
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Webhook token not configured; ingress disabled",
+        )
+    if not hmac.compare_digest((presented or "").strip(), str(configured)):
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
 
 
 def _severity_for_pipeline(status: str) -> Tuple[str, bool]:
@@ -46,13 +65,13 @@ def _build_pipeline_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
     if url:
         message = f"{message} | {url}"
 
-        return {
+    return {
         "id": f"gitlab:pipeline:{project_name}:{pipeline_id}",
         "title": title,
         "message": message,
         "type": notif_type,
         "toast": toast,
-            "emit_outbound": notif_type in {"positive", "negative", "warning"},
+        "emit_outbound": notif_type in {"positive", "negative", "warning"},
     }
 
 
@@ -68,21 +87,22 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
             "status": "ok",
             "service": "gitlab_notification_ingress",
             "token_configured": token_configured,
-            "security_mode": "disabled_temporarily",
+            "security_mode": "token_required",
             "webhook_endpoint": "/api/notifications/webhook/gitlab",
-            "test_base_url": "http://10.1.10.31:8081",
-            "test_webhook_url": "http://10.1.10.31:8081/api/notifications/webhook/gitlab",
         }
 
     @fastapi_app.post("/api/notifications/webhook/gitlab")
     async def receive_gitlab_notification(
         request: Request,
         x_gitlab_event: str = Header(default="", alias="X-Gitlab-Event"),
+        x_gitlab_token: str = Header(default="", alias="X-Gitlab-Token"),
     ):
-        # TODO(security): protect this generic compatibility endpoint with auth/token validation.
         ctx = notification_service.ctx
         if not ctx:
             raise HTTPException(status_code=503, detail="Notification service not initialized")
+
+        # Authenticate before doing any work (constant-time, fail-closed).
+        _require_webhook_token(x_gitlab_token)
 
         try:
             payload = await request.json()
@@ -140,15 +160,11 @@ notifications_router = APIRouter(prefix="/api/notifications", tags=["Notificatio
 
 
 def _visible_for(username: str) -> List[Dict[str, Any]]:
-    """Notifications visible to ``username``: own + broadcast (user_id is None).
+    """Notifications visible to ``username``: own + broadcast, minus dismissed.
 
-    ``history`` is appendleft-ordered (newest first), so iteration order already
-    yields newest-first.
+    Each entry carries a per-user ``read`` flag; newest-first ordering preserved.
     """
-    return [
-        n for n in list(notification_service.history)
-        if n.get("user_id") in (username, None)
-    ]
+    return notification_service.visible_for(username)
 
 
 def _require_visible(notif_id: str, username: str) -> Dict[str, Any]:
@@ -194,14 +210,14 @@ async def read_notification(
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     _require_visible(notif_id, identity.username)
-    notification_service.mark_as_read(notif_id)
+    notification_service.mark_read(identity.username, notif_id)
     return {"status": "ok"}
 
 
 @notifications_router.post("/read-all", summary="Mark all visible notifications as read")
 async def read_all_notifications(identity: ApiIdentity = Depends(require_api_auth)):
     for n in _visible_for(identity.username):
-        notification_service.mark_as_read(n["id"])
+        notification_service.mark_read(identity.username, n["id"])
     return {"status": "ok"}
 
 
@@ -211,15 +227,14 @@ async def dismiss_notification(
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     _require_visible(notif_id, identity.username)
-    notification_service.remove_notification(notif_id)
+    # Per-user dismiss: broadcasts stay visible for other users.
+    notification_service.dismiss(identity.username, notif_id)
     return {"status": "ok"}
 
 
 @notifications_router.delete("", summary="Clear all visible notifications")
 async def clear_notifications(identity: ApiIdentity = Depends(require_api_auth)):
-    # NOTE: "visible" includes broadcasts (user_id is None), so clearing all also
-    # removes shared broadcast notifications from the store — this matches the
-    # user-facing "Alle löschen" expectation but is a documented side effect.
-    for nid in [n["id"] for n in _visible_for(identity.username)]:
-        notification_service.remove_notification(nid)
+    # Per-user clear: only hides notifications for this user; shared broadcasts
+    # remain in the store for everyone else.
+    notification_service.clear_for_user(identity.username)
     return {"status": "ok"}

@@ -1,7 +1,7 @@
 import asyncio
 import inspect
 from typing import Dict, List, Callable, Set
-from core.logger import get_logger
+from core.logger import get_logger, mask_secrets
 
 
 class GlobalEventBus:
@@ -79,8 +79,9 @@ class GlobalEventBus:
                 f"EVENT: {topic} | Data: {self._summarize_payload(topic, payload)}"
             )
         else:
-            # TODO: redact sensitive keys by default for all event payloads before logging.
-            self.log.info(f"EVENT: {topic} | Data: {payload}")
+            # Redact sensitive keys by name before stringifying the payload so
+            # secrets/PII in arbitrary topics never reach the logs verbatim.
+            self.log.info(f"EVENT: {topic} | Data: {mask_secrets(payload)}")
 
         if topic in self.subscribers:
             for callback in self.subscribers[topic]:

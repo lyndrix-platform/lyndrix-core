@@ -17,6 +17,12 @@ for backward compatibility with code that has not yet been migrated to
 ``messaging:outbound``.  The InternalNotificationAdapter is reached via
 ``messaging:outbound`` with ``target_provider="system"``.
 """
+# TODO(agent): reshape this flat component to the canonical anatomy
+# (model/: models.py + pending_action.py; logic/: gateway.py, correlation.py,
+# adapter.py, internal_adapter.py). Deferred: the move ripples into the stable
+# core.api re-export surface (core/api/__init__.py imports the adapter ABC,
+# models, CorrelationStore and gateway by path) and dependencies are not
+# installed here, so the import rewrite cannot be runtime-verified in this pass.
 from core.api import ModuleManifest
 from .gateway import messaging_gateway
 from .internal_adapter import InternalNotificationAdapter
@@ -49,9 +55,11 @@ def setup(ctx):
     # Pull configurable limits from settings before any adapter is registered.
     try:
         from config import settings
-        messaging_gateway._max_retries = settings.LYNDRIX_GATEWAY_MAX_RETRY_ATTEMPTS
-    except Exception:
-        pass
+        messaging_gateway.configure(
+            max_retries=settings.LYNDRIX_GATEWAY_MAX_RETRY_ATTEMPTS
+        )
+    except Exception as exc:
+        ctx.log.warning("Messaging Gateway: failed to apply retry config: %s", exc)
 
     # Always-present system provider — must be registered before plugins boot.
     messaging_gateway.register(InternalNotificationAdapter())

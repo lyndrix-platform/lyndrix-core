@@ -3,11 +3,20 @@ import logging
 import re
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, List, Dict, Optional
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _config_log = logging.getLogger("Core:Config")
+
+# Fields whose shipped default is a development-only placeholder. Using any of
+# these in a non-dev deployment is rejected at startup (see _enforce_secure_defaults).
+_INSECURE_DEFAULTS: Dict[str, str] = {
+    "STORAGE_SECRET": "dev_secret_only",
+    "DB_PASSWORD": "secret",
+    "LYNDRIX_ADMIN_PASSWORD": "lyndrix",
+    "LYNDRIX_BOT_PASSWORD": "lyndrix-bot",
+}
 
 
 class Settings(BaseSettings):
@@ -45,11 +54,13 @@ class Settings(BaseSettings):
     LYNDRIX_ADMIN_EMAIL: str = "admin@lyndrix.local"
     LYNDRIX_BOT_USER: str = "bot"
     LYNDRIX_BOT_PASSWORD: str = "lyndrix-bot"
-    # TODO: reject these bootstrap defaults outside dev instead of only warning at runtime.
+    # Insecure defaults above are hard-rejected outside dev — see _enforce_secure_defaults().
 
     # --- VAULT ---
     VAULT_URL: str = "http://vault:8200"
-    VAULT_SKIP_VERIFY: bool = True
+    # Secure by default: Vault TLS verification is enabled. Only disable in dev
+    # against a self-signed Vault (non-dev + skip-verify is rejected at startup).
+    VAULT_SKIP_VERIFY: bool = False
     LYNDRIX_MASTER_KEY: Optional[str] = None
 
     # --- CRYPTO & SECURITY ---
@@ -252,17 +263,45 @@ class Settings(BaseSettings):
         full_key = f"{env_prefix}_{key.upper().replace('-', '_')}"
         return os.getenv(full_key)
 
-    def warn_insecure_defaults(self):
-        """Emits log warnings when production-unsafe defaults are active."""
-        if self.ENV_TYPE != "dev":
-            if self.STORAGE_SECRET == "dev_secret_only":
-                _config_log.warning("SECURITY: STORAGE_SECRET is using development default! Set a secure value for production.")
-            if self.DB_PASSWORD == "secret":
-                _config_log.warning("SECURITY: DB_PASSWORD is using development default! Set a secure value for production.")
-            if self.LYNDRIX_ADMIN_PASSWORD == "lyndrix":
-                _config_log.warning("SECURITY: LYNDRIX_ADMIN_PASSWORD is using default. Set a secure value for production.")
-            if self.VAULT_SKIP_VERIFY:
-                _config_log.warning("SECURITY: VAULT_SKIP_VERIFY is enabled (Vault TLS verification disabled) in a non-dev environment! Set VAULT_SKIP_VERIFY=false once your Vault presents a valid certificate.")
+    def _insecure_default_violations(self) -> List[str]:
+        """List the production-unsafe defaults that are currently active."""
+        violations = [
+            name
+            for name, dev_default in _INSECURE_DEFAULTS.items()
+            if getattr(self, name) == dev_default
+        ]
+        if self.VAULT_SKIP_VERIFY:
+            violations.append("VAULT_SKIP_VERIFY (Vault TLS verification disabled)")
+        return violations
+
+    @model_validator(mode="after")
+    def _enforce_secure_defaults(self) -> "Settings":
+        """Fail fast in non-dev when production-unsafe defaults are still active.
+
+        In dev these are only logged as warnings; in any other environment the
+        application refuses to start so a misconfigured prod instance never boots
+        with default credentials, a guessable session secret, or Vault TLS off.
+        """
+        if self.ENV_TYPE == "dev":
+            self.warn_insecure_defaults()
+            return self
+        violations = self._insecure_default_violations()
+        if violations:
+            raise ValueError(
+                "Refusing to start with insecure development defaults in a non-dev "
+                f"environment (ENV_TYPE={self.ENV_TYPE!r}): {', '.join(violations)}. "
+                "Set secure values via environment variables before deploying."
+            )
+        return self
+
+    def warn_insecure_defaults(self) -> None:
+        """Emit a log warning for every production-unsafe default in use."""
+        for violation in self._insecure_default_violations():
+            _config_log.warning(
+                "SECURITY: insecure development default active — %s. "
+                "Set a secure value for production.",
+                violation,
+            )
 
     # ------------------------------------------------------------------
     # Auth provider helpers
@@ -281,7 +320,7 @@ class Settings(BaseSettings):
         try:
             import json
             return json.loads(self.LYNDRIX_LDAP_ROLE_MAPPING)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             _config_log.warning("CONFIG: LYNDRIX_LDAP_ROLE_MAPPING is not valid JSON — ignored.")
             return {}
 
@@ -307,7 +346,7 @@ class Settings(BaseSettings):
         """
         try:
             from core.services import vault_instance
-        except Exception:
+        except ImportError:
             return 0
         if not getattr(vault_instance, "is_connected", False):
             return 0
@@ -316,7 +355,8 @@ class Settings(BaseSettings):
                 path="core/settings", mount_point="lyndrix"
             )
             data = resp["data"]["data"] or {}
-        except Exception:
+        except Exception as exc:
+            _config_log.warning("CONFIG: Could not read settings from Vault — skipped: %s", exc)
             return 0
 
         applied = 0
@@ -336,7 +376,7 @@ class Settings(BaseSettings):
             _config_log.info(f"CONFIG: Hydrated {applied} setting(s) from Vault.")
         return applied
 
-    def get(self, env_var: str, vault_key: str = None, default: str = None) -> str:
+    def get(self, env_var: str, vault_key: Optional[str] = None, default: Optional[str] = None) -> Optional[str]:
         """
         Cloud-Native Configuration Hierarchy (ENV First):
         1. OS Environment Variable
@@ -365,8 +405,8 @@ class Settings(BaseSettings):
                         v_val = secret['data']['data'].get(vault_key)
                         if v_val is not None:
                             return v_val
-            except Exception:
-                pass
+            except Exception as exc:
+                _config_log.warning("CONFIG: Vault lookup for '%s' failed: %s", vault_key, exc)
 
         # 4. Fallback
         if default is None:

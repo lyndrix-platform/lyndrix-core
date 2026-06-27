@@ -15,7 +15,7 @@ from core.session import (
     set_user_value,
 )
 from core.components.plugins.logic.manager import module_manager
-from core.components.notifications.notification_widget import render_notification_bell
+from core.components.notifications.ui.nicegui.notification_widget import render_notification_bell
 
 log = get_logger("UI:Layout")
 
@@ -25,6 +25,26 @@ _ui_refresh_subscription_registered = False
 
 def _safe_user_value(key: str, default=None):
     return get_user_value(key, default)
+
+
+def _session_has_permission(permission: str) -> bool:
+    """Check whether the current NiceGUI session may use ``permission``.
+
+    Mirrors the API authz convention: the ``superadmin`` role bypasses checks;
+    otherwise the permission is resolved through the group/permission system
+    (including the user's directly-granted extra_permissions).
+    """
+    roles = list(_safe_user_value("roles", []) or [])
+    if "superadmin" in roles:
+        return True
+    extra = list(_safe_user_value("extra_permissions", []) or [])
+    try:
+        from core.components.auth.logic.group_service import group_service
+
+        return group_service.user_has_permission(roles, permission, extra)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"Permission check failed for '{permission}': {exc}")
+        return False
 
 
 # ==========================================
@@ -153,13 +173,18 @@ def open_plugin_settings_modal(manifest_id: str):
     settings_dialog.open()
 
 
-def main_layout(page_title: str, *, wide: bool = False):
+def main_layout(page_title: str, *, wide: bool = False, permission: str | None = None):
     """Wrap a page in the standard Lyndrix chrome.
 
     ``wide=True`` lets the content area span the entire viewport width
     (with mild padding) instead of being constrained to a centered
     ``max-w-7xl`` column. Use it for data-dense pages like monitoring
     dashboards where the centered column wastes screen real estate.
+
+    ``permission`` gates the page on a specific permission (e.g.
+    ``"feature:settings.edit"``). Authenticated users who lack it are bounced to
+    the dashboard instead of reaching a privileged page — authentication alone is
+    not sufficient for privileged routes.
     """
     def decorator(fn):
         @wraps(fn)
@@ -167,6 +192,15 @@ def main_layout(page_title: str, *, wide: bool = False):
             _register_ui_refresh_subscription()
             if not is_authenticated():
                 ui.navigate.to("/login")
+                return
+
+            if permission and not _session_has_permission(permission):
+                log.warning(
+                    f"ACCESS_DENIED: user '{_safe_user_value('username', '?')}' "
+                    f"lacks '{permission}' for page '{page_title}'."
+                )
+                ui.notify(t("core.common.permission_denied"), type="negative")
+                ui.navigate.to("/dashboard")
                 return
 
             theme_pref = _safe_user_value("theme_pref", "dark")

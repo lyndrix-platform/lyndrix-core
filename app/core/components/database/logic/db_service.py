@@ -48,13 +48,12 @@ class DatabaseService:
     async def _connection_loop(self):
         """Retries DB connection, distinguishing transient from permanent failures."""
         log.info(f"CONNECT: Attempting connection to {settings.DB_HOST}...")
-        loop = asyncio.get_event_loop()
         attempt = 0
 
         while not self.is_connected:
             attempt += 1
             try:
-                await loop.run_in_executor(None, self._check_db_sync)
+                await asyncio.to_thread(self._check_db_sync)
 
                 self.is_connected = True
                 log.info("SUCCESS: Database connection established.")
@@ -91,11 +90,10 @@ class DatabaseService:
 
     async def _watchdog(self):
         """Monitors the connection in the background."""
-        loop = asyncio.get_event_loop()
         while self.is_connected:
             await asyncio.sleep(15)
             try:
-                await loop.run_in_executor(None, self._check_db_sync)
+                await asyncio.to_thread(self._check_db_sync)
             except Exception as e:
                 log.error(f"LOST: Database connection failed: {self._redact_error(str(e))}")
                 self.is_connected = False

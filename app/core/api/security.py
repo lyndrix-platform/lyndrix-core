@@ -35,6 +35,7 @@ import base64
 import binascii
 import hmac
 import os
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -48,6 +49,24 @@ _VAULT_PATH = "core/settings"
 _VAULT_MOUNT = "lyndrix"
 _VAULT_KEY = "system_api_key"
 _ENV_VAR = "LYNDRIX_SYSTEM_API_KEY"
+
+# Short-lived cache for the Vault-resolved system API key so an authenticated
+# request does not trigger a fresh hvac round-trip every time. Env-var resolution
+# is not cached (cheap + always authoritative). Bust explicitly on settings update.
+_KEY_CACHE_TTL_SECONDS = 30.0
+_key_cache: dict = {"value": None, "expires": 0.0}
+
+
+def invalidate_system_api_key_cache() -> None:
+    """Drop the cached Vault key so the next resolve re-reads from Vault.
+
+    Call after the system API key is changed via the settings UI/API.
+    TODO(agent): wire this into the settings-write path in
+    core/components/settings (out of this unit's scope) so the change is
+    instant rather than bounded by the cache TTL.
+    """
+    _key_cache["value"] = None
+    _key_cache["expires"] = 0.0
 
 
 @dataclass
@@ -110,6 +129,12 @@ def resolve_system_api_key() -> Optional[str]:
     if env_val and env_val.strip():
         return env_val.strip()
 
+    # Serve a recently resolved Vault value to avoid a round-trip per request.
+    now = time.monotonic()
+    if _key_cache["expires"] > now:
+        return _key_cache["value"]
+
+    value: Optional[str] = None
     try:
         from core.services import vault_instance
 
@@ -119,12 +144,14 @@ def resolve_system_api_key() -> Optional[str]:
             )
             vault_val = (resp.get("data", {}).get("data", {}) or {}).get(_VAULT_KEY)
             if vault_val and str(vault_val).strip():
-                return str(vault_val).strip()
+                value = str(vault_val).strip()
     except Exception:
         # Vault unavailable / key absent — fall through to "not configured".
-        pass
+        value = None
 
-    return None
+    _key_cache["value"] = value
+    _key_cache["expires"] = now + _KEY_CACHE_TTL_SECONDS
+    return value
 
 
 def system_api_key_configured() -> bool:
@@ -142,13 +169,15 @@ def _extract_bearer(request: Request) -> Optional[str]:
 
 def _try_api_key(request: Request) -> Optional[ApiIdentity]:
     """Validate the system API key from X-API-Key or a Bearer token."""
-    configured = resolve_system_api_key()
-    if not configured:
-        return None  # method disabled when no key is set
-
+    # Short-circuit before touching Vault: only resolve the key when the request
+    # actually carries a credential to compare against.
     presented = request.headers.get("X-API-Key") or _extract_bearer(request)
     if not presented:
         return None
+
+    configured = resolve_system_api_key()
+    if not configured:
+        return None  # method disabled when no key is set
 
     if hmac.compare_digest(presented.strip(), configured):
         return ApiIdentity(
@@ -321,6 +350,7 @@ def require_permission(permission: str):
 __all__ = [
     "ApiIdentity",
     "resolve_system_api_key",
+    "invalidate_system_api_key_cache",
     "system_api_key_configured",
     "authenticate_request",
     "require_api_auth",

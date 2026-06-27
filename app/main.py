@@ -3,7 +3,7 @@ import os
 import platform as _platform
 import sys
 import time as _time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,9 +12,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from nicegui import ui
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-from config import Settings, settings, EDITABLE_SETTINGS
+from config import settings, EDITABLE_SETTINGS
 from core.bus import bus
 from core.logger import setup_logging, get_logger
 from core.session import is_authenticated
@@ -294,7 +294,7 @@ def entry_point():
                 await asyncio.sleep(0.2)
             ui.navigate.to("/")
         
-        asyncio.create_task(poll_boot_complete())
+        bus.create_tracked_task(poll_boot_complete(), name="boot_poll")
         return
 
     # 3. System is ready
@@ -356,7 +356,7 @@ app.include_router(vault_api_router)
 # ==========================================
 
 @app.get("/api/health", tags=["System"])
-async def global_health():
+async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_auth)):
     """
     Aggregate health report for the Lyndrix core and all active plugins.
 
@@ -366,9 +366,11 @@ async def global_health():
 
     The top-level ``status`` field is the worst-case across all components:
     ``error`` > ``degraded`` > ``unknown`` > ``ok``.
+
+    Anonymous callers receive only the coarse top-level ``status``; the detailed
+    per-plugin breakdown, raw failure reasons and version numbers are returned
+    only to authenticated callers with the ``api:read`` permission.
     """
-    import asyncio
-    import time
     from core.components.plugins.logic.manager import module_manager
 
     plugin_results: dict = {}
@@ -381,9 +383,9 @@ async def global_health():
         if module is None or ctx is None or not hasattr(module, "health"):
             return module_id, PluginHealthStatus(status="unknown")
         try:
-            t0 = time.monotonic()
+            t0 = _time.monotonic()
             result = await asyncio.wait_for(module.health(ctx), timeout=5.0)
-            elapsed_ms = (time.monotonic() - t0) * 1000
+            elapsed_ms = (_time.monotonic() - t0) * 1000
             if not isinstance(result, PluginHealthStatus):
                 result = PluginHealthStatus(status="unknown", details={"raw": str(result)})
             result.latency_ms = round(elapsed_ms, 2)
@@ -405,6 +407,11 @@ async def global_health():
         plugin_results[module_id] = health_status.model_dump()
         if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
             worst = health_status.status
+
+    # Public callers only see the coarse status — no plugin inventory, failure
+    # reasons or version numbers (avoid information disclosure / reconnaissance).
+    if identity is None or not identity.allows("api:read"):
+        return {"status": worst}
 
     return {
         "status": worst,
@@ -506,7 +513,6 @@ async def system_restart(identity: ApiIdentity = Depends(require_permission("api
     the container goes down and comes back — the UI should show "restarting" and poll for
     the core to return. Requires the ``api:write`` permission.
     """
-    import asyncio
     from core.components.sockets.providers.docker_provider import DockerProvider, own_container_id
 
     provider = DockerProvider()
@@ -551,6 +557,9 @@ async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
 
 @app.on_event("startup")
 async def startup_event():
+    # TODO(agent): migrate to a FastAPI lifespan context manager once NiceGUI's
+    # ui.run_with() startup hooks are confirmed compatible (a custom lifespan
+    # suppresses on_event-registered handlers, which NiceGUI relies on).
     log.info("STARTUP: Lyndrix Core Engine is starting...")
     bus.emit("system:started", {})
 
@@ -558,7 +567,8 @@ async def startup_event():
 async def _hydrate_settings_from_vault(payload=None):
     """Apply UI-saved settings stored in Vault once Vault is available (env wins)."""
     try:
-        settings.hydrate_from_vault()
+        # hydrate_from_vault performs a blocking hvac round-trip — keep it off the loop.
+        await asyncio.to_thread(settings.hydrate_from_vault)
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"CONFIG: Vault settings hydration failed: {exc}")
 

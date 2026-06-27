@@ -38,10 +38,14 @@ def setup(ctx):
         provider_name = (payload.get("provider") or "docker").strip()
         args = payload.get("args") or {}
         provider = registry.get_provider(provider_name)
-        
+
+        # Guard against a missing/None request_id — slicing it raw would raise a
+        # TypeError before the error-capturing try-block below.
+        rid_short = str(request_id or "")[:8]
+
         import time
         start_time = time.monotonic()
-        ctx.log.debug(f"[socket:request] {operation} from {provider_name} (request_id={request_id[:8]}...)")
+        ctx.log.debug(f"[socket:request] {operation} from {provider_name} (request_id={rid_short}...)")
 
         response = {
             "request_id": request_id,
@@ -108,7 +112,7 @@ def setup(ctx):
             response["error"] = str(exc)
 
         elapsed = time.monotonic() - start_time
-        ctx.log.info(f"[socket:response] {operation} completed in {elapsed:.2f}s (ok={response['ok']}, request_id={request_id[:8]}...)")
+        ctx.log.info(f"[socket:response] {operation} completed in {elapsed:.2f}s (ok={response['ok']}, request_id={rid_short}...)")
         ctx.emit("socket:response", response)
 
 

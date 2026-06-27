@@ -6,15 +6,17 @@ Pipeline per envelope:
   2. Resolve active/provider via env > DB > default precedence.
   3. If inactive → silent drop.
   4. Apply internal effects through ``notification_service`` (toast/persist).
-     Note: we call ``_process_notification`` directly to avoid re-emitting
-     ``notification:outbound`` (which the messaging gateway also bridges).
+     Note: we persist via ``notification_service.persist(..., emit_outbound=False)``
+     so the internal bell entry is written without re-emitting
+     ``notification:outbound``.
   5. Dispatch externally through ``messaging_gateway`` when a valid provider
      is resolved and registered.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import inspect as sqlalchemy_inspect
@@ -26,12 +28,11 @@ from core.components.plugins.logic.models import (
     PluginNotificationEndpoint,
 )
 from core.components.messaging.gateway import messaging_gateway
-from core.components.messaging.models import MessageSeverity, OutboundMessage
+from core.components.messaging.models import OutboundMessage
 
 from ..models import NotificationEnvelope, ResolvedState
 from .endpoint_registry import endpoint_registry
 from .precedence import (
-    db_cache_get,
     remove_from_db_cache,
     remove_plugin_from_db_cache,
     resolve_endpoint_state,
@@ -60,15 +61,6 @@ def _payload_title(envelope: NotificationEnvelope) -> str:
         return envelope.title
     title = envelope.payload.get("title")
     return str(title) if title is not None else _humanize(envelope.endpoint_name)
-
-
-def _severity_to_legacy(severity: MessageSeverity) -> str:
-    return {
-        MessageSeverity.SUCCESS: "positive",
-        MessageSeverity.ERROR: "negative",
-        MessageSeverity.WARNING: "warning",
-        MessageSeverity.INFO: "info",
-    }.get(severity, "info")
 
 
 class NotificationRouterService:
@@ -101,8 +93,10 @@ class NotificationRouterService:
         """Load all stored endpoint bindings into the in-memory precedence cache."""
         if not db_instance.SessionLocal:
             return
-        self._ensure_schema()
-        try:
+
+        # Run the synchronous SQLAlchemy work off the event loop.
+        def _hydrate() -> int:
+            self._ensure_schema()
             with db_instance.SessionLocal() as session:
                 rows = session.query(PluginNotificationEndpoint).all()
                 for row in rows:
@@ -112,7 +106,11 @@ class NotificationRouterService:
                         is_active=row.is_active,
                         provider_binding=row.provider_binding,
                     )
-            log.info(f"ROUTER: Hydrated {len(rows)} endpoint binding(s) from DB.")
+                return len(rows)
+
+        try:
+            count = await asyncio.to_thread(_hydrate)
+            log.info(f"ROUTER: Hydrated {count} endpoint binding(s) from DB.")
         except Exception as exc:
             log.error(f"ROUTER: hydrate_from_db failed: {exc}")
 
@@ -124,10 +122,10 @@ class NotificationRouterService:
         """
         if not db_instance.SessionLocal:
             return
-        self._ensure_schema()
 
         # Re-collect declared endpoints from the live module registry so the
-        # registry stays in sync even if a plugin was hot-reloaded.
+        # registry stays in sync even if a plugin was hot-reloaded. This is
+        # in-memory work, so it stays on the event loop.
         try:
             from core.components.plugins.logic.manager import module_manager
         except Exception:
@@ -148,7 +146,10 @@ class NotificationRouterService:
             if (plugin_id, ep.name) not in declared:
                 endpoint_registry.remove(plugin_id, ep.name)
 
-        try:
+        # Run the synchronous SQLAlchemy transaction off the event loop.
+        def _sync() -> tuple[int, int]:
+            self._ensure_schema()
+            now = datetime.now(timezone.utc)
             with db_instance.SessionLocal() as session:
                 existing = {
                     (row.plugin_id, row.endpoint_name): row
@@ -166,13 +167,13 @@ class NotificationRouterService:
                             is_active=None,
                             provider_binding=None,
                             declared_defaults=defaults_blob,
-                            discovered_at=datetime.utcnow(),
-                            updated_at=datetime.utcnow(),
+                            discovered_at=now,
+                            updated_at=now,
                         )
                         session.add(row)
                     else:
                         row.declared_defaults = defaults_blob
-                        row.updated_at = datetime.utcnow()
+                        row.updated_at = now
                     update_db_cache(
                         plugin_id,
                         endpoint_name,
@@ -181,13 +182,18 @@ class NotificationRouterService:
                     )
 
                 # Anything left in ``existing`` is stale → delete.
+                stale_count = len(existing)
                 for (plugin_id, endpoint_name), row in existing.items():
                     session.delete(row)
                     remove_from_db_cache(plugin_id, endpoint_name)
 
                 session.commit()
+            return len(declared), stale_count
+
+        try:
+            n_declared, n_stale = await asyncio.to_thread(_sync)
             log.info(
-                f"ROUTER: Synced {len(declared)} declared endpoint(s); pruned {len(existing)} stale row(s)."
+                f"ROUTER: Synced {n_declared} declared endpoint(s); pruned {n_stale} stale row(s)."
             )
         except Exception as exc:
             log.error(f"ROUTER: sync_declared_endpoints failed: {exc}")
@@ -211,8 +217,10 @@ class NotificationRouterService:
         if not db_instance.SessionLocal:
             raise RuntimeError("Database is not available")
 
-        self._ensure_schema()
-        try:
+        # Run the synchronous SQLAlchemy write off the event loop.
+        def _update() -> None:
+            self._ensure_schema()
+            now = datetime.now(timezone.utc)
             with db_instance.SessionLocal() as session:
                 row = (
                     session.query(PluginNotificationEndpoint)
@@ -228,8 +236,8 @@ class NotificationRouterService:
                         endpoint_name=endpoint_name,
                         is_active=None,
                         provider_binding=None,
-                        discovered_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
+                        discovered_at=now,
+                        updated_at=now,
                     )
                     session.add(row)
 
@@ -237,7 +245,7 @@ class NotificationRouterService:
                     row.is_active = bool(active)
                 if provider is not _UNSET:
                     row.provider_binding = provider if provider else None
-                row.updated_at = datetime.utcnow()
+                row.updated_at = now
                 session.commit()
 
                 update_db_cache(
@@ -246,6 +254,9 @@ class NotificationRouterService:
                     is_active=row.is_active,
                     provider_binding=row.provider_binding,
                 )
+
+        try:
+            await asyncio.to_thread(_update)
         except Exception as exc:
             log.error(f"ROUTER: update_binding failed for {plugin_id}/{endpoint_name}: {exc}")
             raise
@@ -292,7 +303,7 @@ class NotificationRouterService:
         # Clear semantics: remove a sticky notification by id and skip everything else.
         if envelope.clear and envelope.notification_id:
             try:
-                from core.components.notifications.notification_service import notification_service
+                from core.components.notifications.logic.notification_service import notification_service
                 notification_service.remove_notification(envelope.notification_id)
             except Exception as exc:
                 log.error(f"ROUTER: failed to clear notification: {exc}")
@@ -302,18 +313,18 @@ class NotificationRouterService:
             return
 
         try:
-            from core.components.notifications.notification_service import notification_service
+            from core.components.notifications.logic.notification_service import notification_service
         except Exception as exc:
             log.error(f"ROUTER: notification_service unavailable: {exc}")
             return
 
         message = _payload_message(envelope)
         title = _payload_title(envelope)
-        legacy_type = _severity_to_legacy(envelope.severity)
+        legacy_type = envelope.severity.to_legacy()
 
         if decl.internal_persist:
             try:
-                notification_service._process_notification(
+                notification_service.persist(
                     {
                         "id": envelope.notification_id,
                         "title": title,
@@ -321,9 +332,9 @@ class NotificationRouterService:
                         "type": legacy_type,
                         "toast": False,
                         "persist": True,
-                        "emit_outbound": False,
                     },
                     broadcast=False,
+                    emit_outbound=False,
                 )
             except Exception as exc:
                 log.error(f"ROUTER: notification persist failed: {exc}")

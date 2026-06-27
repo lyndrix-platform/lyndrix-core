@@ -32,6 +32,15 @@
     "bus_active": "Kernel Bus Active",
     "unlocked": "Vault unlocked successfully!"
   },
+  "setup": {
+    "title": "System Initialization",
+    "subtitle": "Please define a secure master key.",
+    "new_master_key": "New Master Key",
+    "key_too_short": "The key must be at least %{length} characters long!",
+    "initializing": "⏳ Initializing Vault...",
+    "submit": "Initialize Vault",
+    "init_failed": "Initialization failed. Please try again."
+  },
   "user_card": {
     "default_user": "User",
     "password_via_provider": "Password is managed by your auth provider \"%{provider}\". Change your password there.",

@@ -20,6 +20,34 @@ class MessageSeverity(str, Enum):
     WARNING = "warning"
     ERROR   = "error"
 
+    def to_legacy(self) -> str:
+        """Map to the legacy UI notification ``type`` string (bell + toasts)."""
+        return _SEVERITY_TO_LEGACY[self]
+
+    @classmethod
+    def from_legacy(cls, legacy: str | None) -> "MessageSeverity":
+        """Map a legacy notification ``type`` string to a severity (default INFO)."""
+        return _LEGACY_TO_SEVERITY.get((legacy or "").lower(), cls.INFO)
+
+
+# Canonical, single-source-of-truth conversion between MessageSeverity and the
+# legacy notification "type" strings used by the UI notification bell and the
+# older notification:* event payloads. Keep all conversions going through these
+# maps so the two directions can never drift apart.
+_SEVERITY_TO_LEGACY: dict[MessageSeverity, str] = {
+    MessageSeverity.SUCCESS: "positive",
+    MessageSeverity.ERROR:   "negative",
+    MessageSeverity.WARNING: "warning",
+    MessageSeverity.INFO:    "info",
+}
+_LEGACY_TO_SEVERITY: dict[str, MessageSeverity] = {
+    "positive": MessageSeverity.SUCCESS,
+    "negative": MessageSeverity.ERROR,
+    "warning":  MessageSeverity.WARNING,
+    "info":     MessageSeverity.INFO,
+    "ongoing":  MessageSeverity.INFO,
+}
+
 
 class ActionButton(BaseModel):
     """An interactive button attached to an OutboundMessage.

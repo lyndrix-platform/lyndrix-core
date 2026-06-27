@@ -24,7 +24,8 @@
     "unknown": "Unbekannt",
     "active": "Aktiv",
     "disabled": "Deaktiviert",
-    "by": "von"
+    "by": "von",
+    "permission_denied": "Sie haben keine Berechtigung für diese Seite."
   },
   "nav_sections": {
     "services": "Dienste",

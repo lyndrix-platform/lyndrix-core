@@ -1,12 +1,14 @@
 """Socket management API endpoints with permission guards."""
 
+import asyncio
 from fastapi import APIRouter, Query, HTTPException, Depends
 from pydantic import BaseModel
 from functools import lru_cache
 import logging
 from typing import Optional
 
-from core.api import optional_api_auth, require_permission
+from config import settings
+from core.api import require_permission
 from ..logic.mount_guardian import MountGuardian
 from ..providers.docker_provider import DockerProvider
 from ..registry import get_registry
@@ -14,6 +16,20 @@ from ..registry import get_registry
 logger = logging.getLogger(__name__)
 
 socket_router = APIRouter(prefix="/api/socket", tags=["socket-management"])
+
+
+def _repair_allowlist() -> list[str]:
+    """Directories that may be targeted by the (privileged) repair endpoint.
+
+    Restricting repair to the platform's own managed mounts prevents an
+    authenticated caller from chown/chmod-ing arbitrary host paths.
+    """
+    return [
+        settings.STORAGE_DIR,
+        settings.SECURITY_DIR,
+        settings.LOGS_DIR,
+        settings.PLUGINS_DIR,
+    ]
 
 
 @lru_cache(maxsize=1)
@@ -35,23 +51,30 @@ class CleanupRequest(BaseModel):
 
 
 class RepairRequest(BaseModel):
-    """Request body for repair endpoint."""
+    """Request body for repair endpoint.
+
+    ``mode`` is interpreted as octal permission digits (e.g. 755 -> 0o755),
+    matching the convention operators expect from chmod.
+    """
     target_dir: str
     user: str = "root"
-    mode: int = 755
+    mode: str = "755"
 
 
 @socket_router.get("/health")
 async def socket_health(
     required_dirs: Optional[str] = Query(None),
-    auth=Depends(optional_api_auth),
+    auth=Depends(require_permission("api:read")),
 ):
     """
-    Check socket health and mount points.
-    
+    Check socket health and mount points (read-only inspection).
+
+    This endpoint never mutates the filesystem — it only reports mount/permission
+    status. Use POST /api/socket/repair (separate permission) to apply fixes.
+
     Query params:
     - required_dirs: Comma-separated list of paths to verify
-    
+
     Example: /api/socket/health?required_dirs=/data/storage/git_repos,/data/security
     """
     try:
@@ -71,7 +94,7 @@ async def socket_health(
 
 @socket_router.get("/providers")
 async def list_providers(
-    auth=Depends(optional_api_auth),
+    auth=Depends(require_permission("api:read")),
 ):
     """List all registered socket providers (available and unavailable)."""
     registry = get_registry()
@@ -86,7 +109,7 @@ async def list_providers(
 
 
 @socket_router.get("/docker/health")
-async def docker_health(auth=Depends(optional_api_auth)):
+async def docker_health(auth=Depends(require_permission("api:read"))):
     """Check Docker daemon health."""
     try:
         provider = get_docker_provider()
@@ -98,7 +121,7 @@ async def docker_health(auth=Depends(optional_api_auth)):
 
 
 @socket_router.get("/docker/mounts")
-async def docker_mounts(auth=Depends(optional_api_auth)):
+async def docker_mounts(auth=Depends(require_permission("api:read"))):
     """Get Docker container mount mappings."""
     try:
         provider = get_docker_provider()
@@ -110,7 +133,7 @@ async def docker_mounts(auth=Depends(optional_api_auth)):
 
 
 @socket_router.get("/docker/storage-root")
-async def docker_storage_root(auth=Depends(optional_api_auth)):
+async def docker_storage_root(auth=Depends(require_permission("api:read"))):
     """Detect where storage is mounted inside Docker containers."""
     try:
         provider = get_docker_provider()
@@ -152,13 +175,46 @@ async def repair_mount_permissions(
 ):
     """
     Repair permissions on a directory (admin-only).
+
+    The target is validated against an allowlist of platform-managed mounts so
+    this cannot be used to chown/chmod arbitrary host paths. The subprocess runs
+    off the event loop to avoid stalling all other clients during the repair.
     """
+    # Validate the requested mode as octal digits (e.g. "755" -> 0o755). Passing
+    # a bare decimal previously produced the wrong permissions (sticky bit etc.).
+    try:
+        mode_octal = int(str(request.mode), 8)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=422,
+            detail="mode must be octal permission digits, e.g. '755'",
+        )
+
+    # Validate the target against the managed-mount allowlist (resolve symlinks
+    # and reject path traversal outside an allowed root).
+    from pathlib import Path
+
+    try:
+        target = Path(request.target_dir).resolve()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid target_dir")
+
+    allowed_roots = [Path(p).resolve() for p in _repair_allowlist()]
+    if not any(target == root or target.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(
+            status_code=403,
+            detail="target_dir is not within an allowed managed mount",
+        )
+
     try:
         guardian = get_mount_guardian()
-        error = guardian.repair_permissions(
-            request.target_dir,
-            user=request.user,
-            mode=request.mode,
+        # repair_permissions shells out to sudo chown/chmod (blocking); run it in
+        # a worker thread so the event loop stays responsive.
+        error = await asyncio.to_thread(
+            guardian.repair_permissions,
+            str(target),
+            request.user,
+            mode_octal,
         )
         if error:
             raise HTTPException(status_code=500, detail=error)

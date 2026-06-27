@@ -1,9 +1,14 @@
+import asyncio
 from typing import Optional, List, Dict
 
 from core.logger import get_logger
 from .base import AuthProvider, AuthResult
 
 log = get_logger("Auth:LDAPProvider")
+
+# Client-side timeout (seconds) for LDAP connect/bind/search. Without this a
+# slow or unreachable directory would hang the worker thread indefinitely.
+_LDAP_TIMEOUT = 10
 
 
 class LDAPProvider(AuthProvider):
@@ -64,17 +69,15 @@ class LDAPProvider(AuthProvider):
             roles.update(mapped)
         return sorted(roles)
 
-    async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
-        try:
-            import ldap3
-            import ldap3.utils.conv
-        except ImportError:
-            log.error("AUTH:LDAP: ldap3 package not available.")
-            return None
+    def _authenticate_blocking(self, username: str, password: str) -> Optional[dict]:
+        """Run the synchronous ldap3 bind/search and return resolved attributes.
 
-        if not self.is_configured():
-            log.warning("AUTH:LDAP: Provider not fully configured.")
-            return None
+        Executed in a worker thread by ``authenticate`` so the blocking network
+        I/O never runs on the event loop. Returns a dict of directory attributes
+        on success, or ``None`` on any auth/connection failure.
+        """
+        import ldap3
+        import ldap3.utils.conv
 
         # Prevent LDAP injection in the search filter
         safe_username = ldap3.utils.conv.escape_filter_chars(username)
@@ -82,7 +85,13 @@ class LDAPProvider(AuthProvider):
 
         use_ssl = self.url.lower().startswith("ldaps://")
         tls = ldap3.Tls(validate=2 if self.tls_verify else 0)
-        server = ldap3.Server(self.url, get_info=ldap3.ALL, use_ssl=use_ssl, tls=tls)
+        server = ldap3.Server(
+            self.url,
+            get_info=ldap3.ALL,
+            use_ssl=use_ssl,
+            tls=tls,
+            connect_timeout=_LDAP_TIMEOUT,
+        )
 
         try:
             # Step 1: service-account bind to locate user DN
@@ -91,6 +100,7 @@ class LDAPProvider(AuthProvider):
                 user=self.bind_dn,
                 password=self.bind_password,
                 auto_bind=True,
+                receive_timeout=_LDAP_TIMEOUT,
             )
             svc_conn.search(
                 self.base_dn,
@@ -114,7 +124,10 @@ class LDAPProvider(AuthProvider):
             svc_conn.unbind()
 
             # Step 2: bind as the user to verify the password
-            user_conn = ldap3.Connection(server, user=user_dn, password=password)
+            user_conn = ldap3.Connection(
+                server, user=user_dn, password=password,
+                receive_timeout=_LDAP_TIMEOUT,
+            )
             if not user_conn.bind():
                 log.warning(f"AUTH:LDAP: Incorrect password for '{username}'.")
                 return None
@@ -124,7 +137,7 @@ class LDAPProvider(AuthProvider):
             log.error(f"AUTH:LDAP: Connection/search error: {e}", exc_info=True)
             return None
 
-        # Step 3: build AuthResult from directory attributes
+        # Step 3: extract directory attributes (still inside the worker thread).
         display_name_val = (
             entry["displayName"].value if "displayName" in entry.entry_attributes else None
         )
@@ -138,7 +151,36 @@ class LDAPProvider(AuthProvider):
             if self.group_attr in entry.entry_attributes
             else []
         )
-        groups = [str(g) for g in raw_groups]
+        return {
+            "user_dn": user_dn,
+            "full_name": full_name,
+            "email": email,
+            "groups": [str(g) for g in raw_groups],
+        }
+
+    async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
+        try:
+            import ldap3  # noqa: F401 — verify dependency before threading
+        except ImportError:
+            log.error("AUTH:LDAP: ldap3 package not available.")
+            return None
+
+        if not self.is_configured():
+            log.warning("AUTH:LDAP: Provider not fully configured.")
+            return None
+
+        # ldap3 is fully synchronous; offload the bind/search to a worker thread so
+        # a slow/unreachable directory cannot stall the whole event loop.
+        resolved = await asyncio.to_thread(
+            self._authenticate_blocking, username, password
+        )
+        if resolved is None:
+            return None
+
+        user_dn = resolved["user_dn"]
+        full_name = resolved["full_name"]
+        email = resolved["email"]
+        groups = resolved["groups"]
         roles = self._map_groups_to_roles(groups)
 
         # Also resolve local group names from LDAP DNs so permissions defined
@@ -164,24 +206,37 @@ class LDAPProvider(AuthProvider):
             provider_user_id=user_dn,
         )
 
+    def _test_connection_blocking(self) -> tuple[bool, str]:
+        import ldap3
+
+        try:
+            use_ssl = self.url.lower().startswith("ldaps://")
+            tls = ldap3.Tls(validate=2 if self.tls_verify else 0)
+            server = ldap3.Server(
+                self.url,
+                get_info=ldap3.ALL,
+                use_ssl=use_ssl,
+                tls=tls,
+                connect_timeout=_LDAP_TIMEOUT,
+            )
+            conn = ldap3.Connection(
+                server, user=self.bind_dn, password=self.bind_password,
+                auto_bind=True, receive_timeout=_LDAP_TIMEOUT,
+            )
+            conn.unbind()
+            return True, f"Connected to {self.url}"
+        except Exception as e:
+            return False, str(e)
+
     async def test_connection(self) -> tuple[bool, str]:
         """Verify service-account bind. Returns (ok, message) for the settings UI."""
         try:
-            import ldap3
+            import ldap3  # noqa: F401 — verify dependency before threading
         except ImportError:
             return False, "ldap3 not installed"
 
         if not self.is_configured():
             return False, "Provider not fully configured"
 
-        try:
-            use_ssl = self.url.lower().startswith("ldaps://")
-            tls = ldap3.Tls(validate=2 if self.tls_verify else 0)
-            server = ldap3.Server(self.url, get_info=ldap3.ALL, use_ssl=use_ssl, tls=tls)
-            conn = ldap3.Connection(
-                server, user=self.bind_dn, password=self.bind_password, auto_bind=True
-            )
-            conn.unbind()
-            return True, f"Connected to {self.url}"
-        except Exception as e:
-            return False, str(e)
+        # Offload the blocking ldap3 connect/bind off the event loop.
+        return await asyncio.to_thread(self._test_connection_blocking)

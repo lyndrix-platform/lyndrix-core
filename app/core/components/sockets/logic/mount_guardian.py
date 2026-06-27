@@ -83,23 +83,20 @@ class MountGuardian:
         self, required_dirs: List[str]
     ) -> HealthCheckResult:
         """
-        Get overall health status and attempt repairs.
+        Get overall mount health status (read-only inspection).
+
+        This intentionally performs no repairs: auto-repairing from an inspection
+        call previously allowed a caller-chosen path to be chown/chmod-ed as root.
+        Repairs are an explicit, separately-authorized action — call
+        ``repair_permissions`` (e.g. via POST /api/socket/repair) instead.
 
         Args:
             required_dirs: Directories to check
 
         Returns:
-            HealthCheckResult with mount statuses and repairs made
+            HealthCheckResult with mount statuses
         """
         mount_statuses = self.verify_mounts(required_dirs)
-        repairs_made = {}
-
-        for path, status in mount_statuses.items():
-            if not status.healthy and not status.error:
-                error = self.repair_permissions(path)
-                if error is None:
-                    repairs_made[path] = "permissions_repaired"
-                    status.writable = True
 
         overall_healthy = all(
             s.mounted and s.writable for s in mount_statuses.values()
@@ -108,7 +105,7 @@ class MountGuardian:
         return HealthCheckResult(
             healthy=overall_healthy,
             mounts=mount_statuses,
-            repairs_made=repairs_made,
+            repairs_made={},
         )
 
     def _check_mount(self, directory: str) -> MountStatus:

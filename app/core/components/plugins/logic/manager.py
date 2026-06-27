@@ -375,10 +375,14 @@ class ModuleManager:
         log.info(f"AUTO-REVERT: '{module_name}' restored to previous version {prev_version}.")
 
     def _mount_plugin_statics(self, module_id: str):
-        """Mount a plugin's ui_static/ directory for React UI bundle serving.
+        """Mount a plugin's built UI bundle directory for React UI serving.
 
         Called after a plugin activates. Skipped silently if the directory
         does not exist or the mount was already registered.
+
+        Prefers the canonical layout ``app/ui/static`` (Vite outDir) and falls
+        back to the legacy repo-root ``ui_static`` so already-installed plugins
+        that have not migrated keep working.
         """
         if module_id in self._mounted_static_paths:
             return
@@ -388,7 +392,10 @@ class ModuleManager:
         module = entry.get("module")
         if not module or not getattr(module, "__file__", None):
             return
-        static_dir = Path(module.__file__).parent / "ui_static"
+        plugin_root = Path(module.__file__).parent
+        static_dir = plugin_root / "app" / "ui" / "static"
+        if not static_dir.exists():
+            static_dir = plugin_root / "ui_static"  # legacy fallback
         if not static_dir.exists():
             return
         try:

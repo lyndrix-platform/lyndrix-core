@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.1
+Lyndrix Core Plugin API — Stable Surface v1.3
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -102,7 +102,7 @@ def _lazy(service_path: str):
     return _Proxy()
 
 
-notification_service = _lazy("core.components.notifications.notification_service.notification_service")
+notification_service = _lazy("core.components.notifications.logic.notification_service.notification_service")
 auth_service = _lazy("core.components.auth.logic.auth_service.auth_service")
 monitor_service = _lazy("core.components.system.logic.monitor_service.monitor_service")
 plugin_service = _lazy("core.components.plugins.logic.plugin_service.plugin_service")

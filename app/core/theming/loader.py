@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from core.theming.models import ThemeComponents, ThemePack, ThemeTokens
 
 log = logging.getLogger("Core:ThemeLoader")
 
+# Theme IDs map directly onto a directory name — restrict to a safe alphabet so
+# a crafted value (e.g. "../../etc") cannot escape the themes base directory.
+_THEME_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def load_theme_pack(base_dir: Path, theme_id: str) -> ThemePack:
+    if not _THEME_ID_RE.match(theme_id):
+        raise ValueError(f"Invalid theme_id: {theme_id!r}")
     theme_dir = base_dir / theme_id
     tokens_path = theme_dir / "tokens.json"
     components_path = theme_dir / "components.json"

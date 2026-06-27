@@ -311,7 +311,24 @@ async def get_plugin_settings(
         if field.key not in values and field.default is not None:
             values[field.key] = field.default
 
-    return {"status": "ok", "plugin_id": plugin_id, "schema": schema, "values": values}
+    # Never return stored secret values verbatim. Mask them and tell the UI which
+    # keys currently hold a value (so it can render "set/unset" without leaking it).
+    secret_keys = [f.key for f in schema_fields if f.kind == "secret"]
+    secret_values_set = {}
+    for key in secret_keys:
+        has_value = bool(str(values.get(key) or "").strip())
+        secret_values_set[key] = has_value
+        # Drop the real value from the response entirely.
+        values[key] = ""
+
+    return {
+        "status": "ok",
+        "plugin_id": plugin_id,
+        "schema": schema,
+        "values": values,
+        "secret_keys": secret_keys,
+        "secret_values_set": secret_values_set,
+    }
 
 
 @plugins_router.put("/{plugin_id}/settings", summary="Update plugin settings")
@@ -320,7 +337,7 @@ async def update_plugin_settings(
     payload: PluginSettingsUpdate,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
-    from core.components.vault.logic.kv_helper import write_secret_dict
+    from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
 
     mgr = _manager()
     entry = mgr.registry.get(plugin_id)
@@ -331,6 +348,10 @@ async def update_plugin_settings(
     schema_fields = getattr(manifest, "settings_schema", [])
     schema_by_key = {f.key: f for f in schema_fields}
 
+    # Existing stored values — used to preserve secrets that are submitted blank
+    # (the GET masks them, so a round-trip without retyping must not wipe them).
+    existing: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
+
     coerced: Dict[str, Any] = {}
     for key, raw in payload.values.items():
         if key not in schema_by_key:
@@ -340,6 +361,11 @@ async def update_plugin_settings(
         # otherwise be stringified to a Python repr and silently corrupt the value.
         if isinstance(raw, (dict, list)):
             raise HTTPException(status_code=400, detail=f"'{key}' must be a scalar value, not an object/array")
+        if field.kind == "secret":
+            new_val = "" if raw is None else str(raw)
+            # Blank submission means "unchanged" — keep the stored secret.
+            coerced[key] = new_val if new_val.strip() else existing.get(key, "")
+            continue
         if field.kind == "bool":
             coerced[key] = bool(raw) if isinstance(raw, bool) else str(raw).lower() in ("1", "true", "yes", "on")
         elif field.kind == "int":

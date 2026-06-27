@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -55,7 +55,7 @@ async def login(payload: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    label = f"web-session-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+    label = f"web-session-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     raw_token, _ = api_key_service.create(str(user.username), label=label, scopes=[])
 
     log.info(f"AUTH API: Login succeeded for '{user.username}'.")
