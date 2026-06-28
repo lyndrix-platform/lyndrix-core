@@ -28,6 +28,7 @@ class PluginOut(BaseModel):
     react_routes: List[dict] = []
     settings_schema: List[dict] = []
     settings_ui_route: Optional[str] = None
+    i18n_namespace: Optional[str] = None
 
 
 class PluginSettingsUpdate(BaseModel):
@@ -83,6 +84,7 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         react_routes=getattr(manifest, "react_routes", []),
         settings_schema=[f.model_dump() for f in getattr(manifest, "settings_schema", [])],
         settings_ui_route=getattr(manifest, "settings_ui_route", None),
+        i18n_namespace=getattr(manifest, "i18n_namespace", None),
     )
 
 

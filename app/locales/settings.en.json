@@ -1,0 +1,36 @@
+{
+  "field": {
+    "APP_NAME": "App name",
+    "APP_TITLE": "App title",
+    "LOG_LEVEL": "Log level",
+    "LYNDRIX_UI_ENGINE": "UI engine",
+    "DEFAULT_LOCALE": "Default language",
+    "SUPPORTED_LOCALES": "Supported languages",
+    "THEME_ENGINE_ENABLED": "Theme engine enabled",
+    "THEME_DB_OVERRIDES_ENABLED": "Theme DB overrides enabled",
+    "DEFAULT_THEME_ID": "Default theme",
+    "LYNDRIX_PLUGINS_DESIRED": "Desired plugins",
+    "LYNDRIX_PLUGINS_AUTO_UPDATE": "Auto-update plugins on restart",
+    "LYNDRIX_PLUGIN_COLLECTION_URL": "Plugin collection URL"
+  },
+  "field_desc": {
+    "APP_NAME": "Internal application name used across the platform.",
+    "APP_TITLE": "Title shown in the browser tab and UI header.",
+    "LOG_LEVEL": "Root logging verbosity. Applied immediately on save.",
+    "LYNDRIX_UI_ENGINE": "Which UI engine core serves. “react”/“both” require the built React bundle. Takes effect on restart.",
+    "DEFAULT_LOCALE": "BCP-47 language tag used when a user has no preference (e.g. en, de).",
+    "SUPPORTED_LOCALES": "Comma-separated list of locales offered in the language switcher.",
+    "THEME_ENGINE_ENABLED": "Enable the dynamic theme engine.",
+    "THEME_DB_OVERRIDES_ENABLED": "Allow theme overrides stored in the database to take effect.",
+    "DEFAULT_THEME_ID": "Identifier of the theme applied by default.",
+    "LYNDRIX_PLUGINS_DESIRED": "Comma-separated plugin specs reconciled on boot: https://github.com/org/repo[@version].",
+    "LYNDRIX_PLUGINS_AUTO_UPDATE": "Automatically update installed plugins to the latest version on restart.",
+    "LYNDRIX_PLUGIN_COLLECTION_URL": "Git URL of the plugin collection/registry used by the marketplace."
+  },
+  "category": {
+    "Application": "Application",
+    "Localization": "Localization",
+    "Theming": "Theming",
+    "Plugins": "Plugins"
+  }
+}

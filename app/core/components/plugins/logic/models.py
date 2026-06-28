@@ -117,6 +117,10 @@ class ModuleManifest(BaseModel):
         default=None,
         description="React route for a plugin-owned settings page; gear button navigates here instead of opening the schema modal",
     )
+    i18n_namespace: Optional[str] = Field(
+        default=None,
+        description="i18next-shaped translation namespace (locales/<ns>.<locale>.json) served to the React UI",
+    )
 
 
 # ==========================================

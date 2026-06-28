@@ -159,7 +159,37 @@ def _metadata_script(title: str) -> str:
     """
 
 
-def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
+def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_theme: str):
+    # NiceGUI is dark-first: the --lx-* vars are consumed mostly under `.dark`,
+    # and most callers use theme_pref='auto', so keep the dark palette as the
+    # base unless the user explicitly selected light. When the theme engine is
+    # enabled the values come from tokens.json (single source of truth); when
+    # disabled we fall back to the previous hardcoded literals.
+    use_dark = theme_pref != 'light'
+    if settings.THEME_ENGINE_ENABLED:
+        _lx_vars = get_theme_engine().resolve_css_variables(use_dark, active_theme)
+    else:
+        _lx_vars = {
+            '--lx-bg': '#0a0e1a',
+            '--lx-surface': '#0f1629',
+            '--lx-elevated': '#131c33',
+            '--lx-border': 'rgba(0, 212, 255, 0.15)',
+            '--lx-border-soft': 'rgba(255, 255, 255, 0.06)',
+            '--lx-text': '#f0f6ff',
+            '--lx-text-muted': '#8b95b5',
+            '--lx-accent': '#00d4ff',
+            '--lx-accent-2': '#0ea5e9',
+            '--lx-accent-3': '#8b5cf6',
+            '--lx-radius-sm': '6px',
+            '--lx-radius-md': '12px',
+            '--lx-radius-lg': '20px',
+            '--lx-glow': '0 0 24px rgba(0, 212, 255, 0.25)',
+            '--lx-state-up': '#10b981',
+            '--lx-state-down': '#f43f5e',
+            '--lx-state-paused': '#f59e0b',
+            '--lx-state-unknown': '#0ea5e9',
+        }
+    _lx_var_lines = '\n'.join(f'                {k}: {v};' for k, v in _lx_vars.items())
     ui.add_head_html(f'''
         <script>
             (function() {{
@@ -198,23 +228,10 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
             }}
 
             :root {{
-                --lx-bg: #0a0e1a;
-                --lx-surface: #0f1629;
-                --lx-elevated: #131c33;
-                --lx-border: rgba(0, 212, 255, 0.15);
-                --lx-border-soft: rgba(255, 255, 255, 0.06);
-                --lx-text: #f0f6ff;
-                --lx-text-muted: #8b95b5;
-                --lx-accent: #00d4ff;
-                --lx-accent-2: #0ea5e9;
-                --lx-accent-3: #8b5cf6;
+{_lx_var_lines}
                 --lx-font-sans: 'Lyndrix System Sans', 'JetBrainsMonoNL Nerd Font Propo', 'JetBrainsMono Nerd Font Propo', 'JetBrains Mono', 'Noto Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
                 --lx-font-mono: 'Lyndrix System Mono', 'JetBrainsMonoNL Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
                 --q-font-family: var(--lx-font-sans);
-                --lx-radius-sm: 6px;
-                --lx-radius-md: 12px;
-                --lx-radius-lg: 20px;
-                --lx-glow: 0 0 24px rgba(0, 212, 255, 0.25);
             }}
 
             html,
@@ -364,13 +381,8 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str):
                 }}
             }}
 
-            /* ── State colours (used by monitoring plugin and similar) ────── */
-            :root {{
-                --lx-state-up:      #10b981;
-                --lx-state-down:    #f43f5e;
-                --lx-state-paused:  #f59e0b;
-                --lx-state-unknown: #0ea5e9;
-            }}
+            /* State colours (--lx-state-*) are emitted in the :root block above,
+               token-driven via the theme engine. */
 
             ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
             ::-webkit-scrollbar-track {{ background: transparent; }}
@@ -438,4 +450,4 @@ def apply_theme(theme_pref: str = 'auto', page_title: str | None = None, theme_i
         <script>{_metadata_script(full_title)}</script>
     ''')
 
-    _apply_style_overrides(theme_pref, body_bg, body_fg)
+    _apply_style_overrides(theme_pref, body_bg, body_fg, active_theme)

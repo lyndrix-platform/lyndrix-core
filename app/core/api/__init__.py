@@ -116,16 +116,16 @@ from core.theming.models import ThemePack, ThemeTokens, ThemeComponents  # noqa:
 from core.theming.loader import load_theme_pack  # noqa: E402
 
 # Messaging Gateway — stable plugin surface
-from core.components.messaging.adapter import GatewayAdapter, GatewayCapability, ProviderConfigField  # noqa: E402
-from core.components.messaging.models import (  # noqa: E402
+from core.components.messaging.logic.adapter import GatewayAdapter, GatewayCapability, ProviderConfigField  # noqa: E402
+from core.components.messaging.model.schemas import (  # noqa: E402
     OutboundMessage,
     InboundMessage,
     ActionButton,
     MessageSeverity,
     DeliveryResult,
 )
-from core.components.messaging.correlation import CorrelationStore, PendingAction  # noqa: E402
-from core.components.messaging.gateway import messaging_gateway, StreamBridge  # noqa: E402
+from core.components.messaging.logic.correlation import CorrelationStore, PendingAction  # noqa: E402
+from core.components.messaging.logic.gateway import messaging_gateway, StreamBridge  # noqa: E402
 
 # Notification routing — stable plugin surface
 from core.components.notification_router.models import (  # noqa: E402

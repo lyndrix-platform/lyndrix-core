@@ -1,0 +1,36 @@
+{
+  "field": {
+    "APP_NAME": "App-Name",
+    "APP_TITLE": "App-Titel",
+    "LOG_LEVEL": "Log-Level",
+    "LYNDRIX_UI_ENGINE": "UI-Engine",
+    "DEFAULT_LOCALE": "Standard-Sprache",
+    "SUPPORTED_LOCALES": "Verfügbare Sprachen",
+    "THEME_ENGINE_ENABLED": "Theme-Engine aktiv",
+    "THEME_DB_OVERRIDES_ENABLED": "Theme-DB-Overrides aktiv",
+    "DEFAULT_THEME_ID": "Standard-Theme",
+    "LYNDRIX_PLUGINS_DESIRED": "Gewünschte Plugins",
+    "LYNDRIX_PLUGINS_AUTO_UPDATE": "Plugins beim Neustart automatisch aktualisieren",
+    "LYNDRIX_PLUGIN_COLLECTION_URL": "Plugin-Sammlung (URL)"
+  },
+  "field_desc": {
+    "APP_NAME": "Interner Anwendungsname, plattformweit verwendet.",
+    "APP_TITLE": "Titel im Browser-Tab und im UI-Header.",
+    "LOG_LEVEL": "Logging-Ausführlichkeit. Wird sofort beim Speichern angewendet.",
+    "LYNDRIX_UI_ENGINE": "Welche UI-Engine der Core ausliefert. „react“/„both“ benötigen das gebaute React-Bundle. Greift nach Neustart.",
+    "DEFAULT_LOCALE": "BCP-47-Sprachcode für Nutzer ohne eigene Einstellung (z. B. en, de).",
+    "SUPPORTED_LOCALES": "Kommagetrennte Liste der im Sprachumschalter angebotenen Sprachen.",
+    "THEME_ENGINE_ENABLED": "Aktiviert die dynamische Theme-Engine.",
+    "THEME_DB_OVERRIDES_ENABLED": "Erlaubt in der Datenbank gespeicherte Theme-Overrides.",
+    "DEFAULT_THEME_ID": "Kennung des standardmäßig angewendeten Themes.",
+    "LYNDRIX_PLUGINS_DESIRED": "Kommagetrennte Plugin-Specs, die beim Boot abgeglichen werden: https://github.com/org/repo[@version].",
+    "LYNDRIX_PLUGINS_AUTO_UPDATE": "Installierte Plugins beim Neustart automatisch auf die neueste Version aktualisieren.",
+    "LYNDRIX_PLUGIN_COLLECTION_URL": "Git-URL der Plugin-Sammlung/Registry für den Marktplatz."
+  },
+  "category": {
+    "Application": "Anwendung",
+    "Localization": "Lokalisierung",
+    "Theming": "Theming",
+    "Plugins": "Plugins"
+  }
+}

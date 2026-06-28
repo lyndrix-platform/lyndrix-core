@@ -14,7 +14,7 @@ from enum import Flag, auto
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
-    from core.components.messaging.models import InboundMessage, OutboundMessage
+    from core.components.messaging.model.schemas import InboundMessage, OutboundMessage
 
 
 @dataclass

@@ -17,16 +17,12 @@ for backward compatibility with code that has not yet been migrated to
 ``messaging:outbound``.  The InternalNotificationAdapter is reached via
 ``messaging:outbound`` with ``target_provider="system"``.
 """
-# TODO(agent): reshape this flat component to the canonical anatomy
-# (model/: models.py + pending_action.py; logic/: gateway.py, correlation.py,
-# adapter.py, internal_adapter.py). Deferred: the move ripples into the stable
-# core.api re-export surface (core/api/__init__.py imports the adapter ABC,
-# models, CorrelationStore and gateway by path) and dependencies are not
-# installed here, so the import rewrite cannot be runtime-verified in this pass.
+import asyncio
+
 from core.api import ModuleManifest
-from .gateway import messaging_gateway
-from .internal_adapter import InternalNotificationAdapter
-from .models import OutboundMessage
+from core.components.messaging.logic.gateway import messaging_gateway
+from core.components.messaging.logic.internal_adapter import InternalNotificationAdapter
+from core.components.messaging.model.schemas import OutboundMessage
 
 manifest = ModuleManifest(
     id="lyndrix.core.messaging_gateway",
@@ -79,8 +75,6 @@ def setup(ctx):
             await messaging_gateway.dispatch(msg)
         except Exception as exc:
             ctx.log.error("Messaging Gateway: outbound dispatch error: %s", exc)
-
-    import asyncio
 
     async def _expire_loop():
         while True:

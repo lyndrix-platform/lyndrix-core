@@ -27,8 +27,8 @@ from core.components.plugins.logic.models import (
     NotificationEndpoint,
     PluginNotificationEndpoint,
 )
-from core.components.messaging.gateway import messaging_gateway
-from core.components.messaging.models import OutboundMessage
+from core.components.messaging.logic.gateway import messaging_gateway
+from core.components.messaging.model.schemas import OutboundMessage
 
 from ..models import NotificationEnvelope, ResolvedState
 from .endpoint_registry import endpoint_registry

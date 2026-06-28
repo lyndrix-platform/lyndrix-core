@@ -39,9 +39,9 @@ from typing import AsyncGenerator
 from uuid import uuid4
 
 from core.bus import bus
-from .adapter import GatewayAdapter, GatewayCapability
-from .correlation import CorrelationStore
-from .models import DeliveryResult, InboundMessage, OutboundMessage
+from core.components.messaging.logic.adapter import GatewayAdapter, GatewayCapability
+from core.components.messaging.logic.correlation import CorrelationStore
+from core.components.messaging.model.schemas import DeliveryResult, InboundMessage, OutboundMessage
 
 log = logging.getLogger("Core:MessagingGateway")
 

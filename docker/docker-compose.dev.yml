@@ -1,4 +1,39 @@
 services:
+  traefik:
+    image: "traefik:v3.7"
+    container_name: "lyndrix-traefik-dev"
+    hostname: "traefik"
+    restart: "unless-stopped"
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    env_file:
+      - .env.dev
+    environment:
+      TZ: "Europe/Berlin"
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "28080:8080/tcp"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik.dev.yml:/etc/traefik/traefik.yml:ro
+      - ../.dev/traefik/letsencrypt:/letsencrypt
+      - ../.dev/traefik/log:/log
+    networks:
+      - default
+      - secured
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.traefik-dev.rule: "Host(`traefik.dev.int.fam-feser.de`)"
+      traefik.http.routers.traefik-dev.entrypoints: "websecure"
+      traefik.http.routers.traefik-dev.tls: "true"
+      traefik.http.routers.traefik-dev.tls.certresolver: "ionos"
+      traefik.http.routers.traefik-dev.service: "api@internal"
+      traefik.docker.network: "dev-secured"
+    security_opt:
+      - no-new-privileges:true
+
+  # --- Main Application Service ---
   lyndrix:
     build:
       context: ..
@@ -24,16 +59,27 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload
+    networks:
+      - default
+      - secured
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.lyndrix-dev.rule: "Host(`lyndrix.dev.int.fam-feser.de`)"
+      traefik.http.routers.lyndrix-dev.entrypoints: "websecure"
+      traefik.http.routers.lyndrix-dev.tls: "true"
+      traefik.http.routers.lyndrix-dev.tls.certresolver: "ionos"
+      traefik.docker.network: "dev-secured"
+      traefik.http.services.lyndrix-dev.loadbalancer.server.port: "8081"
+      traefik.http.services.lyndrix-dev.loadbalancer.server.scheme: "http"
     depends_on:
       db:
         condition: service_healthy
       vault:
         condition: service_started
+
   db:
     image: mariadb:12.2.2
     container_name: lyndrix-db-dev
-    # Wir laden die env_file, aber überschreiben die kritischen Werte
-    # im environment-Block für maximale Sicherheit
     env_file: .env.dev
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-secret}
@@ -71,14 +117,18 @@ services:
     volumes:
       - ../.dev/vault_data:/vault/file
     command: server
+
   docs:
     image: python:3.11-slim
     container_name: lyndrix-docs-dev
     ports:
       - "8000:8000"
     volumes:
-      # Mountet das gesamte Repo-Root (damit er mkdocs.yml und docs/ findet)
       - ../:/workspace
     working_dir: /workspace
-    # Installiert Zensical on-the-fly und bindet den Server an 0.0.0.0 (für Docker Port-Forwarding)
     command: bash -c "pip install zensical && zensical serve -a 0.0.0.0:8000"
+
+networks:
+  default: {}
+  secured:
+    name: "dev-secured"

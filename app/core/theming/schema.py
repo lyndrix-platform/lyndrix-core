@@ -19,6 +19,18 @@ REQUIRED_TOKEN_KEYS: frozenset[str] = frozenset({
     "text_body", "text_muted", "text_subtle",
 })
 
+# Recognised ``--lx-*`` custom properties an optional css_variables override may
+# pin. Not required (themes need none); used only to warn on likely typos.
+KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
+    "--lx-bg", "--lx-surface", "--lx-surface-glass", "--lx-elevated",
+    "--lx-accent", "--lx-accent-2", "--lx-accent-3",
+    "--lx-text", "--lx-text-muted",
+    "--lx-border", "--lx-border-soft", "--lx-glow",
+    "--lx-radius-sm", "--lx-radius-md", "--lx-radius-lg",
+    "--lx-state-up", "--lx-state-down", "--lx-state-paused", "--lx-state-unknown",
+    "--lx-warning", "--lx-log-bg", "--lx-log-fg", "--lx-log-accent",
+})
+
 
 def _required_component_keys() -> frozenset[str]:
     from ui.theme import UIStyles
@@ -43,6 +55,17 @@ def validate_theme_pack(pack: "ThemePack") -> list[str]:
     for key in REQUIRED_TOKEN_KEYS:
         if key not in pack.tokens.colors:
             warnings.append(f"Theme '{pack.theme_id}': missing token color '{key}'")
+
+    # --- optional css_variables overrides (best-effort typo guard) ---
+    css_vars = getattr(pack.tokens, "css_variables", None)
+    if css_vars is not None:
+        for mode in ("light", "dark"):
+            for key in getattr(css_vars, mode, {}) or {}:
+                if key not in KNOWN_CSS_VAR_KEYS:
+                    warnings.append(
+                        f"Theme '{pack.theme_id}': unknown css_variables.{mode} "
+                        f"key '{key}' (not a recognised --lx-* property)"
+                    )
 
     # --- component styles ---
     required = _required_component_keys()

@@ -63,6 +63,105 @@ class ThemeEngine:
             "warning": color("warning", "#f59e0b"),
         }
 
+    def resolve_css_variables(self, dark: bool, theme_id: str | None = None) -> dict[str, str]:
+        """Resolve the full ``--lx-*`` CSS custom-property map for one colour mode.
+
+        This is the single source of truth for the Lyndrix design tokens that
+        both the React UI (over HTTP) and NiceGUI consume. Values are derived
+        from the theme's semantic ``colors`` where a clean mapping exists; each
+        with a hard fallback equal to the canonical Lyndrix UI palette so the
+        ``default`` theme reproduces today's look exactly. Variables without a
+        clean semantic source (alpha borders, glass, glow, radii, log palette)
+        use canonical literals. Any ``tokens.json`` ``css_variables[mode]``
+        overrides are applied last. Pure — no side effects.
+        """
+        theme = self.resolve_theme(theme_id)
+        colors = theme.tokens.colors
+
+        def c(name: str, fallback: str) -> str:
+            item = colors.get(name)
+            if not item:
+                return fallback
+            return item.dark if dark else item.light
+
+        if dark:
+            css: dict[str, str] = {
+                # --- derived from semantic colour tokens ---
+                "--lx-bg": c("bg_body", "#0a0e1a"),
+                "--lx-surface": c("bg_surface", "#0f1629"),
+                "--lx-elevated": c("bg_elevated", "#162040"),
+                "--lx-accent": c("primary", "#00d4ff"),
+                "--lx-accent-2": c("secondary", "#0ea5e9"),
+                "--lx-accent-3": c("accent", "#8b5cf6"),
+                "--lx-text": c("text_body", "#f0f6ff"),
+                "--lx-text-muted": c("text_muted", "#94a3b8"),
+                "--lx-state-up": c("positive", "#22d3ee"),
+                "--lx-state-down": c("negative", "#f87171"),
+                "--lx-state-paused": c("warning", "#fbbf24"),
+                "--lx-warning": c("warning", "#fbbf24"),
+                "--lx-state-unknown": c("text_subtle", "#94a3b8"),
+                # --- canonical literals (no clean semantic source) ---
+                "--lx-surface-glass": "rgba(15, 22, 41, 0.58)",
+                "--lx-border": "rgba(0, 212, 255, 0.2)",
+                "--lx-border-soft": "rgba(255, 255, 255, 0.08)",
+                "--lx-glow": "0 0 30px rgba(0, 212, 255, 0.3)",
+                "--lx-radius-sm": "6px",
+                "--lx-radius-md": "12px",
+                "--lx-radius-lg": "20px",
+            }
+        else:
+            css = {
+                "--lx-bg": c("bg_body", "#f1f5f9"),
+                "--lx-surface": c("bg_surface", "#ffffff"),
+                "--lx-elevated": c("bg_elevated", "#e2e8f0"),
+                "--lx-accent": c("primary", "#0891b2"),
+                "--lx-accent-2": c("secondary", "#0284c7"),
+                "--lx-accent-3": c("accent", "#7c3aed"),
+                "--lx-text": c("text_body", "#0f172a"),
+                "--lx-text-muted": c("text_muted", "#64748b"),
+                "--lx-state-up": c("positive", "#0891b2"),
+                "--lx-state-down": c("negative", "#ef4444"),
+                "--lx-state-paused": c("warning", "#f59e0b"),
+                "--lx-warning": c("warning", "#f59e0b"),
+                "--lx-state-unknown": c("text_subtle", "#94a3b8"),
+                "--lx-surface-glass": "rgba(255, 255, 255, 0.72)",
+                "--lx-border": "rgba(8, 145, 178, 0.3)",
+                "--lx-border-soft": "rgba(0, 0, 0, 0.09)",
+                "--lx-glow": "0 0 20px rgba(8, 145, 178, 0.12)",
+                "--lx-radius-sm": "6px",
+                "--lx-radius-md": "12px",
+                "--lx-radius-lg": "20px",
+            }
+
+        # Log palette mirrors the page surface so terminals match the theme.
+        css["--lx-log-bg"] = css["--lx-bg"]
+        css["--lx-log-fg"] = css["--lx-text"]
+        css["--lx-log-accent"] = css["--lx-state-up"]
+
+        # Optional themed background image (mode-resolved). Served by the asset
+        # route at /api/themes/{id}/assets/{file}. Emitted before css_variables
+        # so an explicit per-theme override still wins. Default is "none".
+        bg_images = getattr(theme.tokens, "background_images", None)
+        bg_file = None
+        if bg_images is not None:
+            bg_file = bg_images.dark if dark else bg_images.light
+        if bg_file:
+            active_id = theme_id or settings.DEFAULT_THEME_ID
+            css["--lx-bg-image"] = f'url("/api/themes/{active_id}/assets/{bg_file}")'
+        else:
+            css["--lx-bg-image"] = "none"
+        css["--lx-bg-image-size"] = "cover"
+        css["--lx-bg-image-position"] = "center"
+
+        # Optional per-theme overrides from tokens.json css_variables[mode].
+        overrides = getattr(theme.tokens, "css_variables", None)
+        if overrides is not None:
+            mode_overrides = overrides.dark if dark else overrides.light
+            for key, value in (mode_overrides or {}).items():
+                css[str(key)] = str(value)
+
+        return css
+
     def register_plugin_overrides(self, plugin_id: str, overrides: dict[str, str]) -> None:
         """Register partial UIStyles overrides for a specific plugin.
 

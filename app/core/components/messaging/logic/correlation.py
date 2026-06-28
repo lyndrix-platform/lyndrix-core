@@ -29,8 +29,8 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from core.components.database.logic.db_service import db_instance
-from .models import InboundMessage
-from .pending_action import PendingActionRecord
+from core.components.messaging.model.schemas import InboundMessage
+from core.components.messaging.model.pending_action import PendingActionRecord
 
 log = logging.getLogger("Core:CorrelationStore")
 

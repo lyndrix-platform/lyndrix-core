@@ -136,7 +136,7 @@ class Settings(BaseSettings):
 
     # --- INTERNATIONALISATION ---
     # BCP-47 language tag used when no user preference is stored.
-    DEFAULT_LOCALE: str = "en"
+    DEFAULT_LOCALE: str = "de"
     # Comma-separated list of supported locales.  Only locales in this list
     # are offered in the language switcher.
     SUPPORTED_LOCALES: str = "en,de"
@@ -156,13 +156,13 @@ class Settings(BaseSettings):
     LYNDRIX_GATEWAY_CORRELATION_TTL_SECONDS: int = 3600
 
     # --- UI ENGINE ---
-    # Which UI engine(s) core serves:
-    #   "nicegui" — NiceGUI at / only (default; current behaviour)
-    #   "react"   — React SPA at /app, and / redirects to /app (React is the front door)
-    #   "both"    — NiceGUI at / and the React SPA at /app, both selectable
-    # The React SPA is only served when app/ui_dist exists (built bundle). NiceGUI keeps
-    # running in every mode so not-yet-migrated plugin NiceGUI UIs stay available.
-    LYNDRIX_UI_ENGINE: str = "nicegui"
+    # Comma-separated list of UI engines to activate alongside the API:
+    #   "api"     — pure API only, no UI (default)
+    #   "react"   — React SPA served at /app (requires app/ui_dist build)
+    #   "nicegui" — NiceGUI admin dashboard at / (optional, session-based)
+    # Examples: "react", "nicegui", "react,nicegui"
+    # The API always runs regardless of this setting.
+    LYNDRIX_UI_ENGINE: str = "api"
 
     model_config = SettingsConfigDict(
         env_file=".env",

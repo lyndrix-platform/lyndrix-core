@@ -11,16 +11,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from nicegui import ui
 from pydantic import BaseModel
 
 from config import settings, EDITABLE_SETTINGS
 from core.bus import bus
 from core.logger import setup_logging, get_logger
-from core.session import is_authenticated
-
-# --- FIX: Load exclusively from the facade ---
 from core.services import vault_instance, boot_service
+
+# --- UI engine flags (computed once at import time) ---
+_ui_engines: set = {e.strip() for e in settings.LYNDRIX_UI_ENGINE.split(",") if e.strip()}
+_nicegui_enabled = "nicegui" in _ui_engines
+_react_enabled = "react" in _ui_engines
 
 # --- Global API surface ---
 from core.api import __api_version__, __core_version__, router_registry
@@ -32,28 +33,31 @@ from core.api import (
     system_api_key_configured,
 )
 from core.api.permissions_api import permissions_router
-from core.api.auth_api import auth_router
+from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
+from core.api.i18n_api import i18n_router
 from core.components.auth.api.users_api import users_router
 from core.components.plugins.api.plugins_api import plugins_router
 from core.components.settings.api.themes_api import themes_router
 from core.components.vault.api.vault_api import vault_api_router
 from core.components.sockets.api.socket_api import socket_router
 from core.components.notification_router.api import notification_router_api
-
-# --- Route Registrations ---
-from core.components.auth.ui.routes import (
-    register_auth_routes,
-    register_oidc_fastapi_routes,
-)
-from core.components.settings.ui.routes import register_settings_routes
-from core.components.vault.ui.routes import register_vault_routes
-from core.components.dashboard.ui.routes import register_dashboard_routes
 from core.components.notifications.api import register_notification_fastapi_routes, notifications_router
 
-# --- Global UI ---
-from ui.theme import apply_theme
-from ui.maintenance import attach_maintenance_overlay
+# --- NiceGUI-specific imports (only when engine is active) ---
+if _nicegui_enabled:
+    from nicegui import ui
+    from core.session import is_authenticated
+    from ui.theme import apply_theme
+    from ui.maintenance import attach_maintenance_overlay
+    from core.components.auth.ui.routes import (
+        register_auth_routes,
+        register_oidc_fastapi_routes,
+    )
+    from core.components.settings.ui.routes import register_settings_routes
+    from core.components.vault.ui.routes import register_vault_routes
+    from core.components.dashboard.ui.routes import register_dashboard_routes
+
 from version import __version__
 
 setup_logging()
@@ -162,6 +166,8 @@ async def custom_redoc_html():
 
 
 def _safe_is_authenticated() -> bool:
+    if not _nicegui_enabled:
+        return False
     return is_authenticated()
 
 
@@ -192,6 +198,12 @@ def _public_config_snapshot() -> dict:
             "kind": s.kind,
             "options": s.options,
             "category": s.category,
+            "description": s.description,
+            "sensitive": s.sensitive,
+            "env_var": s.env_var,
+            "label_key": f"settings:field.{s.field}",
+            "description_key": f"settings:field_desc.{s.field}",
+            "category_key": f"settings:category.{s.category}",
         }
         for s in EDITABLE_SETTINGS
     ]
@@ -252,68 +264,80 @@ async def manifest_redirect():
     )
 
 
-@ui.page("/")
-def entry_point():
-    # In 'react' mode the React SPA is the front door — send / to it. NiceGUI pages
-    # (and this one in 'nicegui'/'both' mode) keep working underneath.
-    if settings.LYNDRIX_UI_ENGINE == "react":
-        ui.navigate.to("/app/")
-        return
+if _nicegui_enabled:
+    @ui.page("/")
+    def entry_point():
+        apply_theme(page_title="Home")
 
-    apply_theme(page_title="Home")
+        if getattr(app.state, "maintenance", {}).get("active", False):
+            attach_maintenance_overlay()
+            return
 
-    if getattr(app.state, "maintenance", {}).get("active", False):
-        attach_maintenance_overlay()
-        return
+        # 1. Check Vault Status
+        if vault_instance.ui_state == "needs_init":
+            ui.navigate.to("/setup")
+            return
 
-    # 1. Check Vault Status
-    if vault_instance.ui_state == "needs_init":
-        ui.navigate.to("/setup")
-        return
+        if vault_instance.ui_state == "needs_unseal":
+            ui.navigate.to("/unseal")
+            return
 
-    if vault_instance.ui_state == "needs_unseal":
-        ui.navigate.to("/unseal")
-        return
+        # 2. Boot Lock (Loading Screen)
+        if boot_service.is_booting or vault_instance.ui_state == "loading":
+            phase = getattr(boot_service, "phase", None)
+            phase_label = phase.value.replace("_", " ") if phase else "initializing"
+            with ui.column().classes("w-full h-screen items-center justify-center gap-4"):
+                ui.spinner("dots", size="3em", color="white")
+                ui.label("Lyndrix Boot Sequence...").classes(
+                    "text-zinc-500 text-sm tracking-widest uppercase"
+                )
+                ui.label(f"phase: {phase_label}").classes(
+                    "text-zinc-600 text-xs tracking-wide uppercase"
+                )
 
-    # 2. Boot Lock (Loading Screen)
-    if boot_service.is_booting or vault_instance.ui_state == "loading":
-        phase = getattr(boot_service, "phase", None)
-        phase_label = phase.value.replace("_", " ") if phase else "initializing"
-        with ui.column().classes("w-full h-screen items-center justify-center gap-4"):
-            ui.spinner("dots", size="3em", color="white")
-            ui.label("Lyndrix Boot Sequence...").classes(
-                "text-zinc-500 text-sm tracking-widest uppercase"
-            )
-            ui.label(f"phase: {phase_label}").classes(
-                "text-zinc-600 text-xs tracking-wide uppercase"
-            )
+            async def poll_boot_complete():
+                while boot_service.is_booting or vault_instance.ui_state == "loading":
+                    await asyncio.sleep(0.2)
+                ui.navigate.to("/")
 
-        # Poll and navigate when boot completes or vault state changes
-        async def poll_boot_complete():
-            while (boot_service.is_booting or vault_instance.ui_state == "loading"):
-                await asyncio.sleep(0.2)
-            ui.navigate.to("/")
-        
-        bus.create_tracked_task(poll_boot_complete(), name="boot_poll")
-        return
+            bus.create_tracked_task(poll_boot_complete(), name="boot_poll")
+            return
 
-    # 3. System is ready
-    # TODO: apply a centralized auth/authorization gate for protected pages like /dashboard, /settings, and /plugins.
-    if _safe_is_authenticated():
-        ui.navigate.to("/dashboard")
-    else:
-        ui.navigate.to("/login")
+        # 3. System is ready
+        # TODO: apply a centralized auth/authorization gate for protected pages like /dashboard, /settings, and /plugins.
+        if _safe_is_authenticated():
+            ui.navigate.to("/dashboard")
+        else:
+            ui.navigate.to("/login")
+
+else:
+    @app.get("/", include_in_schema=False)
+    async def api_root():
+        """Root redirect — React SPA when available, otherwise API info."""
+        if _react_enabled:
+            return RedirectResponse(url="/app/")
+        return {
+            "service": "Lyndrix Core API",
+            "version": __version__,
+            "docs": "/docs",
+            "health": "/api/health",
+        }
 
 
 # ==========================================
 # SYSTEM START & REGISTRATION
 # ==========================================
 
-register_auth_routes()
-register_oidc_fastapi_routes(app)
-register_settings_routes()
-register_vault_routes()
-register_dashboard_routes()
+# NiceGUI pages (login, dashboard, settings, vault setup UI) — only when engine is active.
+# OIDC callback also lives here because its handoff targets the NiceGUI /auth/complete page.
+if _nicegui_enabled:
+    register_auth_routes()
+    register_oidc_fastapi_routes(app)
+    register_settings_routes()
+    register_vault_routes()
+    register_dashboard_routes()
+
+# FastAPI notification feed — always active (used by React notification bell + API clients).
 register_notification_fastapi_routes(app)
 
 # Bind the running app to the plugin router registry so plugins that call
@@ -335,6 +359,9 @@ app.include_router(notifications_router)
 # Auth REST API — login / logout / me (used by lyndrix-ui).
 app.include_router(auth_router)
 
+# Per-user background images (/api/me/background*, /api/users/{u}/background/{m}).
+app.include_router(me_router)
+
 # Server-Sent Events stream for real-time updates.
 app.include_router(events_router)
 
@@ -349,6 +376,9 @@ app.include_router(themes_router)
 
 # Vault setup endpoints (unauthenticated — needed before Vault is ready).
 app.include_router(vault_api_router)
+
+# i18n catalog endpoint (unauthenticated — login/setup pages localize pre-auth).
+app.include_router(i18n_router)
 
 
 # ==========================================
@@ -445,10 +475,11 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_permission(
     Requires authentication and the ``api:read`` permission (system API key,
     HTTP Basic, per-user API key, or dashboard session).
     """
+    snapshot = _public_config_snapshot()
     return {
         "status": "ok",
         "authenticated_as": identity.username,
-        "config": _public_config_snapshot(),
+        "config": snapshot,
     }
 
 
@@ -576,15 +607,19 @@ async def _hydrate_settings_from_vault(payload=None):
 bus.subscribe("vault:opened")(_hydrate_settings_from_vault)
 
 
-ui.run_with(app, storage_secret=settings.STORAGE_SECRET)
+# --- NiceGUI (optional admin dashboard) ---
+# ui.run_with() mounts NiceGUI's ASGI middleware and routes onto the FastAPI app.
+# When disabled, uvicorn serves the pure FastAPI app directly — no NiceGUI overhead.
+if _nicegui_enabled:
+    ui.run_with(app, storage_secret=settings.STORAGE_SECRET)
+    log.info("UI: NiceGUI admin dashboard active at / (LYNDRIX_UI_ENGINE includes 'nicegui')")
+else:
+    log.info("UI: NiceGUI disabled — core running as pure API backend")
 
-
-# --- React SPA serving (selectable UI engine) ---
-# Must run AFTER ui.run_with(): that call installs NiceGUI's root catch-all (path ""),
-# and move_routes_before_catchall() splices the /app mount in front of it so the SPA is
-# reachable. Served only when a built bundle exists at app/ui_dist (see the multi-stage
-# Dockerfile / the dev build step). NiceGUI keeps owning / unless engine == "react".
-if settings.LYNDRIX_UI_ENGINE in ("react", "both"):
+# --- React SPA (optional, served after NiceGUI mounts its catch-all) ---
+# When NiceGUI is active, must run after ui.run_with() so move_routes_before_catchall()
+# can splice /app in front of NiceGUI's root catch-all.
+if _react_enabled:
     from pathlib import Path as _Path
 
     from starlette.exceptions import HTTPException as _StarletteHTTPException
@@ -592,8 +627,7 @@ if settings.LYNDRIX_UI_ENGINE in ("react", "both"):
     from core.api.route_order import move_routes_before_catchall
 
     class _SPAStaticFiles(StaticFiles):
-        """StaticFiles that falls back to index.html on 404 so client-side routes
-        (e.g. /app/dashboard, /app/apps/...) resolve on hard-load / refresh."""
+        """StaticFiles that falls back to index.html on 404 so client-side routes resolve on hard-load."""
 
         async def get_response(self, path, scope):
             try:
@@ -607,9 +641,8 @@ if settings.LYNDRIX_UI_ENGINE in ("react", "both"):
     if _ui_dist.is_dir() and (_ui_dist / "index.html").exists():
         app.mount("/app", _SPAStaticFiles(directory=str(_ui_dist), html=True), name="react_ui")
         move_routes_before_catchall(app, "/app")
-        log.info("UI: React SPA served at /app (engine=%s)", settings.LYNDRIX_UI_ENGINE)
+        log.info("UI: React SPA served at /app (LYNDRIX_UI_ENGINE includes 'react')")
     else:
         log.warning(
-            "UI: LYNDRIX_UI_ENGINE=%s but app/ui_dist is missing/empty — serving NiceGUI only.",
-            settings.LYNDRIX_UI_ENGINE,
+            "UI: LYNDRIX_UI_ENGINE includes 'react' but app/ui_dist is missing/empty — React SPA unavailable.",
         )

@@ -291,7 +291,9 @@ def authenticate_request(request: Request) -> Optional[ApiIdentity]:
 
     Returns ``None`` when the request carries no valid credentials.
     """
-    for method in (_try_api_key, _try_user_api_key, _try_basic_auth, _try_session):
+    # TODO(agent): re-add a session method here once React has a proper
+    # JWT/cookie session that works outside the NiceGUI storage context.
+    for method in (_try_api_key, _try_user_api_key, _try_basic_auth):
         identity = method(request)
         if identity is not None:
             return identity

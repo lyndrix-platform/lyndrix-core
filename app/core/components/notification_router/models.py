@@ -12,7 +12,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from core.components.messaging.models import MessageSeverity
+from core.components.messaging.model.schemas import MessageSeverity
 
 
 class NotificationEnvelope(BaseModel):

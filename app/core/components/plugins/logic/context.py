@@ -117,7 +117,7 @@ class ModuleContext:
             def setup(ctx):
                 ctx.register_gateway_adapter(MyAdapter(ctx))
         """
-        from core.components.messaging.gateway import messaging_gateway
+        from core.components.messaging.logic.gateway import messaging_gateway
         messaging_gateway.register(adapter)
         self.log.info("GATEWAY: Registered adapter '%s'.", adapter.provider_id)
 

@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core.api.security import ApiIdentity, require_permission
-from core.components.messaging.adapter import GatewayCapability
-from core.components.messaging.gateway import messaging_gateway
+from core.components.messaging.logic.adapter import GatewayCapability
+from core.components.messaging.logic.gateway import messaging_gateway
 
 from .logic.endpoint_registry import endpoint_registry
 from .logic.precedence import (

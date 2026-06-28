@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import logging
 
-from .adapter import GatewayAdapter, GatewayCapability
-from .models import OutboundMessage
+from core.components.messaging.logic.adapter import GatewayAdapter, GatewayCapability
+from core.components.messaging.model.schemas import OutboundMessage
 
 log = logging.getLogger("Core:InternalAdapter")
 

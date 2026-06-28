@@ -1,16 +1,63 @@
 import asyncio
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from config import settings
 from core.api.security import ApiIdentity, require_api_auth, require_permission
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
 
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+# Per-user background images live on the filesystem (no DB change). Existence on
+# disk is the source of truth. Served unauthenticated by username-in-path so the
+# browser can load them via CSS url(...) (which cannot carry an auth header).
+me_router = APIRouter(prefix="/api", tags=["User Background"])
+
+_BG_MODES = {"dark", "light"}
+_BG_CONTENT_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+_BG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+_MAX_BG_BYTES = 8 * 1024 * 1024
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _user_backgrounds_base() -> Path:
+    return Path(settings.STORAGE_DIR) / "user_backgrounds"
+
+
+def _safe_username_component(username: str) -> str | None:
+    """Sanitize a username into a single safe directory component, or None."""
+    if not username:
+        return None
+    safe = _SAFE_NAME_RE.sub("_", username)
+    safe = safe.strip(".")
+    if not safe or safe in {".", ".."}:
+        return None
+    return safe
+
+
+def _find_bg_file(username: str, mode: str) -> Path | None:
+    """Return the existing background file for a user+mode, or None."""
+    safe = _safe_username_component(username)
+    if safe is None or mode not in _BG_MODES:
+        return None
+    user_dir = _user_backgrounds_base() / safe
+    for ext in _BG_EXTS:
+        candidate = user_dir / f"{mode}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class LoginRequest(BaseModel):
@@ -220,3 +267,117 @@ async def me(identity: ApiIdentity = Depends(require_api_auth)):
         "method": identity.method,
         "is_system": identity.is_system,
     }
+
+
+# ==========================================
+# Per-user background images (filesystem; no DB change)
+# ==========================================
+def _bg_url(username: str, mode: str, path: Path) -> str:
+    safe = _safe_username_component(username) or username
+    try:
+        version = int(path.stat().st_mtime)
+    except OSError:
+        version = 0
+    return f"/api/users/{safe}/background/{mode}?v={version}"
+
+
+@me_router.get("/me/background", summary="List the caller's background image URLs")
+async def get_my_background(identity: ApiIdentity = Depends(require_api_auth)):
+    """Return ``{light, dark}`` URLs for whichever per-user images exist.
+
+    URLs point at the unauthenticated ``/api/users/{username}/background/{mode}``
+    route (loadable from CSS) and carry ``?v=<mtime>`` for cache-busting.
+    """
+    result: Dict[str, Optional[str]] = {"light": None, "dark": None}
+    for mode in ("light", "dark"):
+        existing = _find_bg_file(identity.username, mode)
+        if existing is not None:
+            result[mode] = _bg_url(identity.username, mode, existing)
+    return result
+
+
+@me_router.post("/me/background", summary="Upload the caller's background image")
+async def upload_my_background(
+    mode: str = Query(...),
+    file: UploadFile = File(...),
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    if mode not in _BG_MODES:
+        raise HTTPException(status_code=422, detail="mode must be 'dark' or 'light'")
+
+    ext = _BG_CONTENT_TYPES.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(
+            status_code=422, detail="Unsupported content type (allowed: png, jpeg, webp)"
+        )
+
+    safe = _safe_username_component(identity.username)
+    if safe is None:
+        raise HTTPException(status_code=400, detail="Invalid username")
+
+    data = await file.read()
+    if len(data) > _MAX_BG_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds 8 MB limit")
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty upload")
+
+    user_dir = _user_backgrounds_base() / safe
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove any prior file for this mode with a different extension.
+    for prior_ext in _BG_EXTS:
+        prior = user_dir / f"{mode}{prior_ext}"
+        if prior_ext != ext and prior.exists():
+            try:
+                prior.unlink()
+            except OSError:
+                pass
+
+    target = user_dir / f"{mode}{ext}"
+    target.write_bytes(data)
+
+    log.info(f"AUTH API: background ({mode}) uploaded for '{identity.username}'.")
+    return {"status": "ok", "mode": mode, "url": _bg_url(identity.username, mode, target)}
+
+
+@me_router.delete("/me/background/{mode}", summary="Delete the caller's background image")
+async def delete_my_background(
+    mode: str,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    if mode not in _BG_MODES:
+        raise HTTPException(status_code=422, detail="mode must be 'dark' or 'light'")
+
+    existing = _find_bg_file(identity.username, mode)
+    if existing is not None:
+        try:
+            existing.unlink()
+        except OSError:
+            pass
+    return {"status": "ok", "mode": mode, "deleted": existing is not None}
+
+
+# Unauthenticated on purpose: the browser loads this via CSS url(...) which
+# cannot carry an Authorization header. The username is in the path; background
+# images are not secret, and only files that exist on disk are served.
+@me_router.get("/users/{username}/background/{mode}", summary="Serve a user's background image")
+async def get_user_background(username: str, mode: str):
+    if mode not in _BG_MODES:
+        raise HTTPException(status_code=404, detail="Not found")
+    existing = _find_bg_file(username, mode)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(existing.suffix.lower(), "application/octet-stream")
+
+    # Short cache + ?v=mtime busting: the file changes on re-upload.
+    return FileResponse(
+        existing,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=300, must-revalidate"},
+    )

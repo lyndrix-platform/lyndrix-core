@@ -26,7 +26,7 @@ from ..logic.precedence import (
     resolve_endpoint_state,
 )
 from ..logic.router_service import notification_router
-from core.components.messaging.gateway import messaging_gateway
+from core.components.messaging.logic.gateway import messaging_gateway
 
 
 _DEFAULT_VALUE = "__default__"

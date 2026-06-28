@@ -24,8 +24,26 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+# Two placeholder dialects coexist (see app/core/i18n.py):
+#   - NiceGUI core namespaces use %{name}
+#   - i18next-facing namespaces (ui, settings) use {{name}} (+ _one/_other plurals)
 PLACEHOLDER_RE = re.compile(r"%\{(\w+)\}")
+I18NEXT_PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)[^}]*\}\}")
 SOURCE_LOCALE = "en"
+
+try:
+    # Reuse the canonical allowlist when importable without side effects.
+    from core.i18n import I18NEXT_NAMESPACES  # type: ignore
+except Exception:
+    # Fallback — keep in sync with app/core/i18n.py:I18NEXT_NAMESPACES.
+    I18NEXT_NAMESPACES = {"ui", "settings"}
+
+
+def placeholder_re_for(namespace: str) -> re.Pattern[str]:
+    """Select the placeholder dialect for *namespace*."""
+    if namespace in I18NEXT_NAMESPACES:
+        return I18NEXT_PLACEHOLDER_RE
+    return PLACEHOLDER_RE
 
 
 def flatten(data: Any, prefix: str = "") -> dict[str, str]:
@@ -56,8 +74,8 @@ def load_files(locales_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
     return by_namespace
 
 
-def placeholders(value: str) -> set[str]:
-    return set(PLACEHOLDER_RE.findall(value))
+def placeholders(value: str, pattern: re.Pattern[str] = PLACEHOLDER_RE) -> set[str]:
+    return set(pattern.findall(value))
 
 
 def check(by_namespace: dict[str, dict[str, dict[str, str]]]) -> int:
@@ -68,6 +86,7 @@ def check(by_namespace: dict[str, dict[str, dict[str, str]]]) -> int:
             issues += 1
             continue
         src = locales[SOURCE_LOCALE]
+        ph_re = placeholder_re_for(namespace)
         for locale, entries in sorted(locales.items()):
             if locale == SOURCE_LOCALE:
                 continue
@@ -75,7 +94,9 @@ def check(by_namespace: dict[str, dict[str, dict[str, str]]]) -> int:
             extra = sorted(set(entries) - set(src))
             ph_mismatch: list[str] = []
             for key, value in src.items():
-                if key in entries and placeholders(value) != placeholders(entries[key]):
+                if key in entries and placeholders(value, ph_re) != placeholders(
+                    entries[key], ph_re
+                ):
                     ph_mismatch.append(key)
             if missing or extra or ph_mismatch:
                 print(f"--- namespace '{namespace}' locale '{locale}' ---")

@@ -14,7 +14,7 @@ from core.components.database.logic.db_service import db_instance
 from .models import ModuleManifest, PluginState, PluginVersionHistory
 from .context import ModuleContext
 from config import settings
-from core.i18n import register_plugin_locales
+from core.i18n import register_client_namespace, register_plugin_locales
 
 log = get_logger("Core:ModuleManager")
 
@@ -207,6 +207,10 @@ class ModuleManager:
             if is_plugin:
                 plugin_dir_path = Path(self.base_path) / "plugins" / module_name
                 register_plugin_locales(plugin_dir_path)
+                # Opt the plugin's declared i18next namespace into the HTTP
+                # catalog allowlist so the React UI receives its strings.
+                if getattr(manifest, "i18n_namespace", None):
+                    register_client_namespace(manifest.i18n_namespace)
 
             # Determine initial status. Only CRITICAL issues (incompatible core
             # version, missing/incompatible dependencies) mark a plugin 'degraded'

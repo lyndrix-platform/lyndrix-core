@@ -26,6 +26,8 @@ don't need to change.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -40,6 +42,23 @@ log = get_logger("Core:i18n")
 # Internal catalogue:  {locale: {dotted.key: "translated string"}}
 # ------------------------------------------------------------------
 _catalogue: dict[str, dict[str, str]] = {}
+
+# Parallel NESTED store for HTTP catalog serving (i18next-shaped clients):
+#   {locale: {namespace: <nested dict>}}
+# This keeps the original tree intact (no flattening) so it can be served
+# straight to i18next's ``addResourceBundle``.
+_nested: dict[str, dict[str, Any]] = {}
+
+# Catalog content fingerprint (first 12 hex chars of a sha256 over every
+# locale file's path/mtime/size).  Used for HTTP ETag / version negotiation.
+# Bumps automatically when plugins register new locale directories.
+_catalog_version: str | None = None
+
+# Namespaces served to i18next-shaped (React/external) clients.  These use the
+# ``{{name}}`` placeholder dialect + ``_one``/``_other`` plurals — never the
+# NiceGUI ``%{name}`` dialect — so they are kept on an explicit allowlist that
+# the HTTP catalog endpoint serves by default.
+I18NEXT_NAMESPACES: set[str] = {"ui", "settings"}
 
 # Directories that have been scanned already (avoid double-loading).
 _registered_dirs: set[str] = set()
@@ -69,6 +88,20 @@ def _flatten(data: Any, prefix: str = "") -> dict[str, str]:
     return out
 
 
+def _deep_merge(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *src* into *dst* in place and return *dst*.
+
+    Nested dicts are merged key-by-key; any non-dict value (or a type change)
+    overwrites the destination.
+    """
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            dst[k] = v
+    return dst
+
+
 def _load_dir(directory: Path) -> None:
     """Load all ``{namespace}.{locale}.json`` files from *directory*."""
     key = str(directory)
@@ -85,9 +118,39 @@ def _load_dir(directory: Path) -> None:
             data = json.loads(path.read_text(encoding="utf-8"))
             flat = _flatten(data, namespace)
             _catalogue.setdefault(locale, {}).update(flat)
+            # Also keep the original nested tree for HTTP catalog serving.
+            ns_root = _nested.setdefault(locale, {}).setdefault(namespace, {})
+            _deep_merge(ns_root, data)
             log.debug(f"i18n: loaded {path.name} ({len(flat)} keys)")
         except Exception as exc:
             log.warning(f"i18n: failed to load {path}: {exc}")
+    _recompute_version()
+
+
+def _recompute_version() -> None:
+    """Recompute the catalog content fingerprint over all registered dirs.
+
+    Hashes the sorted ``(path, mtime_ns, size)`` triples of every locale file
+    so the version is stable across processes and bumps whenever a file is
+    added/changed (e.g. a plugin registering its ``locales/`` directory).
+    """
+    global _catalog_version
+    items: list[tuple[str, int, int]] = []
+    for dir_key in _registered_dirs:
+        directory = Path(dir_key)
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("*.*.json"):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            items.append((str(path), st.st_mtime_ns, st.st_size))
+    items.sort()
+    h = hashlib.sha256()
+    for path_str, mtime_ns, size in items:
+        h.update(f"{path_str}|{mtime_ns}|{size}\n".encode("utf-8"))
+    _catalog_version = h.hexdigest()[:12]
 
 
 # Load core locale files immediately.
@@ -163,6 +226,90 @@ def set_locale(locale: str) -> None:
         log.warning(f"i18n: unsupported locale '{locale}', ignoring")
         return
     set_user_value("locale", locale)
+
+
+# ------------------------------------------------------------------
+# HTTP catalog API (nested, i18next-shaped) — additive; does not touch t()
+# ------------------------------------------------------------------
+
+
+def client_namespaces() -> list[str]:
+    """Return the sorted allowlist of namespaces served to i18next clients."""
+    return sorted(I18NEXT_NAMESPACES)
+
+
+def register_client_namespace(ns: str) -> None:
+    """Add *ns* to the i18next client allowlist and bump the catalog version.
+
+    Plugins call this (indirectly, via the ``i18n_namespace`` manifest field)
+    to opt one of their already-registered ``locales/<ns>.<locale>.json``
+    namespaces into the HTTP catalog the React UI consumes.  The namespace
+    files must use the i18next ``{{name}}`` placeholder dialect (and
+    ``_one``/``_other`` plurals) — never the NiceGUI ``%{name}`` dialect.
+
+    Idempotent: re-registering an existing namespace is a no-op (the version
+    recompute is harmless).  ``_recompute_version()`` runs *after* the set
+    mutation so clients revalidating with ``?v=`` see the version change and
+    pick up the new namespace instead of getting a stale 304.
+    """
+    if not ns:
+        return
+
+    # Cheap dialect sanity check: warn if a served file for this namespace
+    # uses the NiceGUI ``%{...}`` placeholder dialect (client namespaces must
+    # use i18next ``{{ }}``).  Best-effort only — never blocks registration.
+    try:
+        for loc_tree in _nested.values():
+            ns_tree = loc_tree.get(ns)
+            if ns_tree and _PLACEHOLDER_RE.search(json.dumps(ns_tree)):
+                log.warning(
+                    f"i18n: client namespace '{ns}' contains NiceGUI '%{{}}' "
+                    f"placeholders; client namespaces must use i18next '{{{{ }}}}'"
+                )
+                break
+    except Exception:
+        pass
+
+    I18NEXT_NAMESPACES.add(ns)
+    # Order matters: recompute AFTER mutating the set so the version reflects
+    # the newly-allowed namespace.
+    _recompute_version()
+
+
+def get_catalog_version() -> str:
+    """Return the current catalog content fingerprint (recomputed if needed)."""
+    if _catalog_version is None:
+        _recompute_version()
+    return _catalog_version or ""
+
+
+def get_catalog(locale: str, namespaces: list[str] | None = None) -> dict[str, Any]:
+    """Return the nested ``{namespace: {...}}`` catalog for *locale*.
+
+    Each namespace is deep-merged OVER the English nested tree, so a partial
+    non-English locale falls back to EN at serve time — mirroring ``t()``'s
+    English fallback.  Restricted to *namespaces* when given.
+    """
+    en_tree = _nested.get("en", {})
+    loc_tree = _nested.get(locale, {})
+    ns_keys = set(namespaces) if namespaces is not None else (
+        set(en_tree) | set(loc_tree)
+    )
+    out: dict[str, Any] = {}
+    for ns in ns_keys:
+        # Deep-copy both trees: _deep_merge aliases nested dicts by reference,
+        # so merging directly over `en_tree` would mutate the shared English
+        # store in place (poisoning EN with the requested locale's strings).
+        merged: dict[str, Any] = copy.deepcopy(en_tree.get(ns, {}))
+        if locale != "en":
+            _deep_merge(merged, copy.deepcopy(loc_tree.get(ns, {})))
+        out[ns] = merged
+    return out
+
+
+def available_locales() -> list[str]:
+    """Return locales present in the nested store, limited to supported ones."""
+    return sorted(set(_nested) & _get_supported())
 
 
 def reload_core_locales() -> None:
