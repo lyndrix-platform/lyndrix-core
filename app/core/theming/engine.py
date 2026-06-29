@@ -147,7 +147,18 @@ class ThemeEngine:
             bg_file = bg_images.dark if dark else bg_images.light
         if bg_file:
             active_id = theme_id or settings.DEFAULT_THEME_ID
-            css["--lx-bg-image"] = f'url("/api/themes/{active_id}/assets/{bg_file}")'
+            url = f"/api/themes/{active_id}/assets/{bg_file}"
+            # The asset is served `Cache-Control: immutable` (1y), so swapping the
+            # image in place — same filename — would otherwise never reach clients
+            # that already cached it. Fingerprint the URL with the file's
+            # mtime+size (mirrors the per-user background `?v=` cache-buster) so a
+            # content change yields a new URL and busts the immutable cache.
+            try:
+                st = (self.base_dir / active_id / "assets" / bg_file).stat()
+                url += f"?v={int(st.st_mtime)}-{st.st_size}"
+            except OSError:
+                pass
+            css["--lx-bg-image"] = f'url("{url}")'
         else:
             css["--lx-bg-image"] = "none"
         css["--lx-bg-image-size"] = "cover"
