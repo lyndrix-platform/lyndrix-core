@@ -267,7 +267,20 @@
     "add_repo": "Add",
     "repo_added": "Repository added",
     "repo_add_failed": "Error adding repository",
-    "action_failed": "Action failed"
+    "action_failed": "Action failed",
+    "health_btn": "Health",
+    "health_title": "Health — {{name}}",
+    "health_status": "Status",
+    "health_latency": "Latency",
+    "health_details": "Details",
+    "health_no_data": "This plugin does not report health data.",
+    "health_fetch_failed": "Failed to load health status.",
+    "health_refresh": "Refresh",
+    "health_close": "Close",
+    "health_state_ok": "Healthy",
+    "health_state_degraded": "Degraded",
+    "health_state_error": "Unhealthy",
+    "health_state_unknown": "Unknown"
   },
   "dashboard": {
     "greeting_morning": "Good morning",

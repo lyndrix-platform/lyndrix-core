@@ -267,7 +267,20 @@
     "add_repo": "Hinzufügen",
     "repo_added": "Repository hinzugefügt",
     "repo_add_failed": "Fehler beim Hinzufügen",
-    "action_failed": "Aktion fehlgeschlagen"
+    "action_failed": "Aktion fehlgeschlagen",
+    "health_btn": "Zustand",
+    "health_title": "Zustand — {{name}}",
+    "health_status": "Status",
+    "health_latency": "Latenz",
+    "health_details": "Details",
+    "health_no_data": "Dieses Plugin meldet keine Zustandsdaten.",
+    "health_fetch_failed": "Zustandsstatus konnte nicht geladen werden.",
+    "health_refresh": "Aktualisieren",
+    "health_close": "Schließen",
+    "health_state_ok": "Fehlerfrei",
+    "health_state_degraded": "Eingeschränkt",
+    "health_state_error": "Fehler",
+    "health_state_unknown": "Unbekannt"
   },
   "dashboard": {
     "greeting_morning": "Guten Morgen",
