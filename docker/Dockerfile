@@ -61,4 +61,7 @@ RUN dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 EXPOSE 8081
 
 ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8081"]
+# --timeout-graceful-shutdown: open SSE streams (/api/events) never close on
+# their own, so without a cap uvicorn's graceful shutdown waits on them forever
+# and every restart/redeploy wedges with "Waiting for connections to close".
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8081", "--timeout-graceful-shutdown", "5"]

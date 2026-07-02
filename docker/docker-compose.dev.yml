@@ -61,7 +61,11 @@ services:
       - .env.dev
     environment:
       - PYTHONUNBUFFERED=1
-    command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload
+    # --timeout-graceful-shutdown: SSE connections (/api/events) never close on
+    # their own; without a cap every --reload cycle wedges in "Waiting for
+    # connections to close" and the API becomes unreachable until a manual
+    # container restart.
+    command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload --timeout-graceful-shutdown 5
     networks:
       - default
       - secured
