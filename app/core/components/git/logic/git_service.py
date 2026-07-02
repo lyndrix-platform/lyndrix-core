@@ -250,6 +250,8 @@ def _commit_and_push(
     message: str,
     path: Path,
     is_local: bool,
+    auth_type: str = "none",
+    secret_value: str | None = None,
 ) -> str:
     """Stage all changes, commit and optionally push.  Returns a status string."""
     Repo, Actor = _lazy_git()
@@ -270,6 +272,31 @@ def _commit_and_push(
     log.info(f"[GIT:{repo_id}] Committed: '{message}'")
 
     if not is_local and repo.remotes:
+        if auth_type == "token" and secret_value:
+            env = _https_credential_env(secret_value)
+            repo.git.update_environment(**env)
+        elif auth_type == "ssh" and secret_value:
+            fd, key_path = tempfile.mkstemp(prefix="lyndrix_git_push_", suffix=".pem")
+            try:
+                os.write(fd, secret_value.encode())
+                os.close(fd)
+                os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+                known_hosts = os.environ.get(
+                    "GIT_KNOWN_HOSTS_FILE", str(_DEFAULT_BASE / ".ssh" / "known_hosts")
+                )
+                ssh_cmd = (
+                    f"ssh -i {key_path} -o StrictHostKeyChecking=accept-new "
+                    f"-o UserKnownHostsFile={known_hosts} -o BatchMode=yes"
+                )
+                repo.git.update_environment(GIT_SSH_COMMAND=ssh_cmd)
+                repo.remotes.origin.push()
+            finally:
+                try:
+                    os.unlink(key_path)
+                except OSError:
+                    log.warning(f"[GIT:{repo_id}] Could not delete temporary SSH key file {key_path}.")
+            log.info(f"[GIT:{repo_id}] Pushed to remote (SSH).")
+            return "pushed"
         repo.remotes.origin.push()
         log.info(f"[GIT:{repo_id}] Pushed to remote.")
         return "pushed"
@@ -359,6 +386,8 @@ class GitService:
 
         message: str = payload.get("message", "Update via Lyndrix IaC GUI")
         is_local: bool = payload.get("is_local", False)
+        auth_type: str = payload.get("auth_type", "none")
+        secret_value: str | None = payload.get("secret_value")
         request_id: str | None = payload.get("request_id")
         try:
             path = self._repo_path(repo_id)
@@ -371,12 +400,12 @@ class GitService:
             return
         _ensure_safe_directory(path, repo_id)
 
-        log.info(f"[GIT:COMMIT] Starting commit/push for '{repo_id}' (is_local={is_local})")
+        log.info(f"[GIT:COMMIT] Starting commit/push for '{repo_id}' (is_local={is_local}, auth={auth_type})")
 
         async with self._repo_lock(repo_id):
             try:
                 result = await asyncio.to_thread(
-                    _commit_and_push, repo_id, message, path, is_local
+                    _commit_and_push, repo_id, message, path, is_local, auth_type, secret_value
                 )
                 log.info(f"[GIT:COMMIT] '{repo_id}' finished with result: {result}")
                 bus.emit("git:status_update", {"repo_id": repo_id, "status": result, "request_id": request_id})
