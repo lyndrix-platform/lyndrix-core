@@ -79,6 +79,17 @@ class DockerProvider(BaseSocketProvider):
             "images": info.get("Images", 0),
         }
 
+    async def resolve_container_id(self, name_or_id: str) -> Optional[str]:
+        """Resolve a container name/short-id/hostname to its full container id via
+        ``docker inspect``. Returns None when the daemon does not know it — used to
+        validate ``own_container_id()``'s HOSTNAME fallback before a self-restart."""
+        if not self.is_available:
+            return None
+        code, stdout, _ = await self._run_docker("inspect", "--format", "{{.Id}}", name_or_id)
+        if code != 0 or not stdout:
+            return None
+        return stdout.strip() or None
+
     async def restart_container(self, name_or_id: str, timeout: int = 30) -> Tuple[bool, Optional[str]]:
         """Restart a container by name or id. Used for the core's self-restart so a
         plugin upgrade reliably takes effect without an external ``docker restart``."""

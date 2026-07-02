@@ -553,6 +553,18 @@ async def system_restart(identity: ApiIdentity = Depends(require_permission("api
     if not cid:
         raise HTTPException(status_code=503, detail="Could not determine own container id.")
 
+    # own_container_id() can fall back to HOSTNAME (cgroup v2 / WSL2), which the
+    # Docker daemon may not resolve. Verify with `docker inspect` BEFORE promising
+    # a restart — otherwise the background task fails silently after the 200 and
+    # the operator believes a restart happened when nothing did.
+    resolved = await provider.resolve_container_id(cid)
+    if not resolved:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Container id '{cid[:12]}' does not resolve via the Docker socket — cannot self-restart.",
+        )
+    cid = resolved
+
     async def _do_restart():
         await asyncio.sleep(1)  # let the 200 flush before the container goes down
         ok, err = await provider.restart_container(cid)

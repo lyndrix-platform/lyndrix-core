@@ -226,6 +226,8 @@
     "install_btn": "Installieren",
     "installing": "Installiere…",
     "install_started": "Installation gestartet",
+    "install_completed": "Plugin \"{{repo}}\" erfolgreich installiert",
+    "install_failed_detail": "Installation von \"{{repo}}\" fehlgeschlagen: {{error}}",
     "upgrade_title": "{{name}} aktualisieren",
     "current_version": "Aktuell: v{{version}}",
     "target_version": "Ziel-Version",

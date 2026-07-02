@@ -3,15 +3,28 @@ Server-Sent Events endpoint for real-time platform updates.
 
 Each active SSE connection registers an asyncio.Queue in _SSE_QUEUES.
 Module-level bus subscribers forward whitelisted topics to all queues.
+
+Browser ``EventSource`` cannot send an Authorization header, so header-based
+auth alone would leave every React client on the public topic subset. To grant
+browsers the authenticated stream without leaking the long-lived session bearer
+into URLs, an authenticated client first mints a short-TTL HMAC ticket via
+``POST /api/events/ticket`` and passes it as ``GET /api/events?ticket=…``.
+The signing secret is process-random: tickets only need to outlive the few
+seconds between mint and connect, and a restart invalidating them is fine.
 """
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
-from typing import Set
+import secrets
+import time
+from typing import Optional, Set
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from core.api.security import ApiIdentity, optional_api_auth
+from core.api.security import ApiIdentity, optional_api_auth, require_api_auth
 from fastapi import Depends
 from core.bus import bus
 from core.logger import get_logger
@@ -26,6 +39,8 @@ _SSE_QUEUES: Set[asyncio.Queue] = set()
 _AUTH_TOPICS = frozenset({
     "system:boot_complete",
     "plugin:state_changed",
+    "plugin:installed",
+    "plugin:install_failed",
     "ui:needs_refresh",
     "system:metrics_update",
     "vault:status_changed",
@@ -37,6 +52,59 @@ _PUBLIC_TOPICS = frozenset({
     "system:boot_complete",
     "vault:status_changed",
 })
+
+
+# ─── Stream tickets ──────────────────────────────────────────────────────────
+
+_TICKET_SECRET = secrets.token_bytes(32)
+_TICKET_TTL_SECONDS = 60
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padding = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + padding)
+
+
+def _mint_stream_ticket(username: str) -> str:
+    payload = _b64url_encode(
+        json.dumps({"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}).encode("utf-8")
+    )
+    sig = hmac.new(_TICKET_SECRET, payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_stream_ticket(ticket: str) -> Optional[str]:
+    """Return the ticket's username when valid and unexpired, else None."""
+    try:
+        payload, sig = ticket.split(".", 1)
+        expected = hmac.new(_TICKET_SECRET, payload.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(_b64url_decode(payload))
+        if int(data.get("exp", 0)) < time.time():
+            return None
+        username = data.get("u")
+        return username if isinstance(username, str) and username else None
+    except Exception:
+        return None
+
+
+@events_router.post("/api/events/ticket", summary="Mint a short-lived SSE stream ticket")
+async def mint_stream_ticket(identity: ApiIdentity = Depends(require_api_auth)):
+    """
+    Mint a short-TTL ticket granting one authenticated ``/api/events`` connection.
+
+    Browser ``EventSource`` cannot send an Authorization header; passing the
+    long-lived session bearer as a query param would leak it into access logs.
+    Clients call this endpoint (header-authenticated) right before connecting and
+    pass the returned ticket as ``/api/events?ticket=…``. Tickets are process-local
+    and expire after ``expires_in`` seconds — mint a fresh one per (re)connect.
+    """
+    return {"ticket": _mint_stream_ticket(identity.username), "expires_in": _TICKET_TTL_SECONDS}
 
 
 def _publish(topic: str, payload: dict) -> None:
@@ -67,6 +135,7 @@ for _topic in _AUTH_TOPICS:
 @events_router.get("/api/events", summary="Server-Sent Events stream")
 async def sse_stream(
     request: Request,
+    ticket: Optional[str] = None,
     identity: ApiIdentity = Depends(optional_api_auth),
 ):
     """
@@ -76,10 +145,15 @@ async def sse_stream(
     Unauthenticated clients receive only ``system:boot_complete`` and
     ``vault:status_changed``.
 
+    Authentication: standard header auth (Bearer / X-API-Key), or a short-TTL
+    ``?ticket=`` minted via ``POST /api/events/ticket`` — the only way a browser
+    ``EventSource`` (which cannot send headers) can join the authenticated stream.
+
     Each event payload is a JSON object: ``{"topic": "...", "payload": {...}}``.
     """
-    allowed = _AUTH_TOPICS if identity else _PUBLIC_TOPICS
-    username = identity.username if identity else None
+    ticket_user = _verify_stream_ticket(ticket) if ticket else None
+    allowed = _AUTH_TOPICS if (identity or ticket_user) else _PUBLIC_TOPICS
+    username = identity.username if identity else ticket_user
     q: asyncio.Queue = asyncio.Queue(maxsize=128)
     _SSE_QUEUES.add(q)
 

@@ -138,9 +138,15 @@ async def reload_plugin(
     mgr = _manager()
     if plugin_id not in mgr.registry:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-    bus.emit("plugin:reload_requested", {"plugin_id": plugin_id})
+    # Reload synchronously so the response reflects the real outcome. The old
+    # implementation emitted plugin:reload_requested, which had no subscriber —
+    # the button was a no-op.
     log.info(f"API: Reload requested for '{plugin_id}' by '{identity.username}'.")
-    return {"status": "ok", "plugin_id": plugin_id, "action": "reload_requested"}
+    ok = await mgr.reload_module(plugin_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Reload of '{plugin_id}' failed — see server logs.")
+    bus.emit("plugin:state_changed", {"plugin_id": plugin_id, "action": "reloaded"})
+    return {"status": "ok", "plugin_id": plugin_id, "action": "reloaded"}
 
 
 @plugins_router.post("/install", summary="Install a plugin from a GitHub/Git URL")

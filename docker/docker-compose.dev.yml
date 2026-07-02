@@ -39,6 +39,9 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: lyndrix-core-dev
+    # Required for the /api/system/restart self-restart: without a policy, a
+    # container that stops (or fails to come back cleanly) stays down.
+    restart: "unless-stopped"
     ports:
       - "8081:8081"
     volumes:

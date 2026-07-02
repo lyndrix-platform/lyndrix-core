@@ -306,11 +306,21 @@ class ModuleManager:
                 and resolved_module_id
                 and await self._verify_after_install(resolved_module_id)
             )
-            if not verified:
+            if verified:
+                # Push the new state to connected UIs. The fresh-install path
+                # (load_module) emits no ui:needs_refresh of its own, and the React
+                # client invalidates its plugin list + bundle caches only on
+                # plugin:state_changed — without these, a successful install stays
+                # invisible until a manual page reload.
+                bus.emit("plugin:state_changed", {"plugin_id": resolved_module_id, "action": "installed"})
+                bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
+            else:
                 await self._auto_revert(module_name, resolved_module_id)
         elif action == "uninstall":
             module_id = payload.get("id")
             self.unload_module(module_id)
+            bus.emit("plugin:state_changed", {"plugin_id": module_id, "action": "uninstalled"})
+            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} uninstalled."})
 
     async def _verify_after_install(self, module_id: str) -> bool:
         """Post-install/upgrade health gate. The plugin must be loaded, not in a
