@@ -82,8 +82,17 @@ def _render_editable_settings_card() -> None:
                             if spec.kind == 'bool':
                                 widget = ui.switch(value=bool(current))
                             elif spec.kind == 'select':
+                                # A configured value outside the declared options
+                                # (e.g. a CSV LYNDRIX_UI_ENGINE, a lowercase
+                                # LOG_LEVEL) must not 500 the whole Settings page —
+                                # surface it as a selectable option instead of
+                                # letting NiceGUI reject an out-of-list value.
+                                current_str = str(current)
+                                select_options = list(spec.options or [])
+                                if current_str not in select_options:
+                                    select_options.append(current_str)
                                 widget = ui.select(
-                                    options=spec.options, value=str(current),
+                                    options=select_options, value=current_str,
                                 ).props('dense options-dense outlined').classes('w-44')
                             elif spec.kind == 'int':
                                 widget = ui.number(value=current).props('dense outlined').classes('w-44')
@@ -176,8 +185,18 @@ def _render_theme_management_card() -> None:
             # ── Theme switcher ───────────────────────────────────────────────
             with ui.row().classes('items-center gap-3 w-full flex-wrap'):
                 ui.label('Switch Theme').classes('text-sm font-bold text-slate-800 dark:text-zinc-200 shrink-0')
+                # Guard against DEFAULT_THEME_ID naming a theme not on disk: an
+                # active_id absent from the options list would 500 the page.
+                if isinstance(available, dict):
+                    theme_options = dict(available)
+                    if active_id not in theme_options:
+                        theme_options[active_id] = f"{active_id}  ·  (missing)"
+                else:
+                    theme_options = list(available)
+                    if active_id not in theme_options:
+                        theme_options.append(active_id)
                 theme_select = ui.select(
-                    options=available,
+                    options=theme_options,
                     value=active_id,
                 ).props('dense outlined options-dense').classes('w-48')
 

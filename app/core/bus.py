@@ -41,6 +41,19 @@ class GlobalEventBus:
             )
         return str(payload)
 
+    def _callback_key(self, callback) -> str:
+        """Stable identity for de-dup, keyed by import path + qualname.
+
+        The same across reloads of a plugin (folder/qualname unchanged), which is
+        exactly why ``unsubscribe`` must free it on unload — otherwise a reloaded
+        plugin's fresh handler is dropped as a "duplicate" and the stale
+        pre-reload closure remains the only live subscriber.
+        """
+        return (
+            f"{getattr(callback, '__module__', 'unknown')}:"
+            f"{getattr(callback, '__qualname__', getattr(callback, '__name__', repr(callback)))}"
+        )
+
     def subscribe(self, topic: str):
         """Decorator: @bus.subscribe('topic') registers a callback."""
 
@@ -49,10 +62,7 @@ class GlobalEventBus:
                 self.subscribers[topic] = []
                 self._subscriber_keys[topic] = set()
 
-            callback_key = (
-                f"{getattr(callback, '__module__', 'unknown')}:"
-                f"{getattr(callback, '__qualname__', callback.__name__)}"
-            )
+            callback_key = self._callback_key(callback)
             if callback_key in self._subscriber_keys[topic]:
                 self.log.debug(
                     f"SUBSCRIBE: Ignored duplicate subscriber for {topic} ({callback.__name__})"
@@ -64,6 +74,25 @@ class GlobalEventBus:
             return callback
 
         return decorator
+
+    def unsubscribe(self, topic: str, callback) -> bool:
+        """Remove a previously registered callback and free its de-dup key.
+
+        Called on plugin unload/disable so the old handler stops firing and a
+        subsequent re-subscribe of the reloaded code is not rejected as a
+        duplicate. Removal is by object identity; a reloaded module re-subscribes
+        a brand-new callback object.
+        """
+        removed = False
+        subs = self.subscribers.get(topic)
+        if subs:
+            kept = [cb for cb in subs if cb is not callback]
+            removed = len(kept) != len(subs)
+            self.subscribers[topic] = kept
+        keys = self._subscriber_keys.get(topic)
+        if keys:
+            keys.discard(self._callback_key(callback))
+        return removed
 
     def emit(self, topic: str, payload: dict = None):
         """Dispatches an event to all subscribers, tracking async tasks."""

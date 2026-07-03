@@ -13,7 +13,11 @@ _TYPE_STYLES: dict[str, tuple[str, str, str]] = {
 }
 
 
-def render_notification_bell(user_id: str = "admin"):
+def render_notification_bell(user_id: str | None = None):
+    # Scope the bell to the logged-in session user. Defaulting to "admin" (the old
+    # behaviour) showed admin's feed to every NiceGUI client and routed their
+    # clear/mute/dismiss into admin's per-user state. A missing user_id now yields
+    # an empty feed rather than leaking another user's notifications.
     last_state_hash = None
 
     with ui.button(icon='notifications').props('flat round color=slate-300') as btn:

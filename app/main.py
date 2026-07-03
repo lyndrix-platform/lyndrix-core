@@ -19,7 +19,14 @@ from core.logger import setup_logging, get_logger
 from core.services import vault_instance, boot_service
 
 # --- UI engine flags (computed once at import time) ---
-_ui_engines: set = {e.strip() for e in settings.LYNDRIX_UI_ENGINE.split(",") if e.strip()}
+# NOTE: this is evaluated at import, before Vault hydration, so LYNDRIX_UI_ENGINE
+# is effectively env-only (a value saved via the Settings UI → Vault takes effect
+# only after a restart re-reads the env). The "both" convenience token expands to
+# the concrete engines so selecting it in the Settings dropdown actually enables a UI.
+_ui_engines: set = {e.strip().lower() for e in settings.LYNDRIX_UI_ENGINE.split(",") if e.strip()}
+if "both" in _ui_engines:
+    _ui_engines.discard("both")
+    _ui_engines.update({"nicegui", "react"})
 _nicegui_enabled = "nicegui" in _ui_engines
 _react_enabled = "react" in _ui_engines
 
