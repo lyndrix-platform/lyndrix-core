@@ -41,21 +41,29 @@ From a clean machine:
 docker compose -f docker/docker-compose.dev.yml up -d --build
 ```
 
-Endpoints: app `http://localhost:8081`, Vault `:8200`, docs `:8000`. Confirm the
-app is healthy (also prints the running version):
+Endpoints: app `http://localhost:8081`, Vault `:8200`, docs `:8000`.
+
+`/api/health` is **hardened**: an anonymous caller gets only the coarse
+top-level status; the `core_version`/`api_version` and per-plugin breakdown are
+returned only to an authenticated caller with `api:read` (HTTP Basic as `admin`
+works). So confirm the app is healthy like this:
 
 ```bash
 curl -s http://localhost:8081/api/health
-# {"status":"unknown","core_version":"0.2.2","api_version":"1.2.0","plugins":{… 6 active …}}
-curl -s http://localhost:8081/api/vault/status   # unauthenticated; returns sealed/connected/ui_state
+# {"status":"ok"}                         ← anonymous: coarse status only
+PW="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' docker/.env.dev | cut -d= -f2- | tr -d '\r')"
+curl -s -u "admin:$PW" http://localhost:8081/api/health | python3 -m json.tool
+# {"status":"ok","core_version":"0.5.0","api_version":"1.3.0","plugins":{ …6… }}
+curl -s http://localhost:8081/api/vault/status   # unauthenticated; sealed/connected/ui_state
 ```
 
-> `plugins` lists active *external* plugins by id (this stack currently has 6:
-> state_monitoring, docker, bingo, iac_orchestrator, discord, server_manager). An
-> empty `{}` just means none are enabled — core modules (Dashboard, Messaging
-> Gateway, Plugin Manager, etc.) are always loaded regardless. `core_version` +
-> `api_version` are the useful signal; top-level `status` stays `"unknown"` unless a
-> plugin implements `health()`.
+> `plugins` lists **active** external plugins by id (this stack currently has 6:
+> `external_services`, `docker`, `bingo`, `iac_orchestrator`, `discord`,
+> `server_manager`). A 7th, `state_monitoring`, is installed but **disabled**, so
+> it's absent from health — enable it in `/plugins` to have it appear. An empty
+> `{}` means none are enabled; core modules (Dashboard, Messaging Gateway, Plugin
+> Manager, …) are always loaded regardless. Top-level `status` is the worst-case
+> across active plugins (`ok` here).
 
 ## Run (agent path) — driver.py
 
@@ -71,17 +79,21 @@ python driver.py
 ```
 
 Output → `.claude/skills/run-lyndrix-core/shots/<route>.<desktop|mobile>.png`
-(plus `login.desktop.png`). Verified shots this session: `login`, `root`,
-`dashboard`, `plugins`, `settings` — the Plugin Manager renders a 3-col grid
-of core modules on desktop and a 1-col stack on mobile. Settings shows Profile,
-System, Notifications, Appearance, Auth, Groups, Permissions, Plugins, Info tabs.
+(plus `login.desktop.png`). Verified-good shots this session: `login`, `root`,
+`dashboard`, `plugins` — the dashboard shows Vault/DB/Plugin-subsystem health +
+hardware utilization + module cards; the Plugin Manager renders a 3-col grid of
+core modules on desktop and a 1-col stack on mobile (6 active plugins;
+`state_monitoring` shows as *Deaktiviert*). **`/settings` currently returns a
+500** in this stack — the driver still captures it (the PNG shows NiceGUI's 500
+page), so a red settings shot is an app bug, not a driver failure. See Gotchas
+("`/settings` 500s…") for the exact cause and workaround.
 
 Useful variants:
 
 ```bash
 python driver.py --routes /plugins                 # just the Plugin Manager
 python driver.py --routes /iac --no-mobile         # a plugin UI route (IaC Orchestrator)
-python driver.py --health-only                     # no browser; print /api/health and exit
+python driver.py --health-only                     # no browser; prints /api/health (versions+plugins when a password is set, else coarse status) and exits
 python driver.py --base http://localhost:8081 --user admin   # explicit target/user
 ```
 
@@ -102,7 +114,17 @@ unauthenticated checks:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8081/         # 200 (login shell)
-curl -s http://localhost:8081/api/health | python3 -m json.tool
+curl -s http://localhost:8081/api/health                               # {"status":"ok"} (coarse)
+curl -s http://localhost:8081/api/vault/status | python3 -m json.tool  # sealed/connected/ui_state
+```
+
+Authenticated (HTTP Basic as `admin`) for versions/uptime/connectivity:
+
+```bash
+PW="$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' docker/.env.dev | cut -d= -f2- | tr -d '\r')"
+curl -s -u "admin:$PW" http://localhost:8081/api/health      | python3 -m json.tool  # + core/api ver + plugins
+curl -s -u "admin:$PW" http://localhost:8081/api/system/info | python3 -m json.tool  # app/core/api ver, uptime, db/vault
+# {"app_version":"0.5.0","core_version":"0.5.0","api_version":"1.3.0","python_version":"3.11.15", … "vault_connected":true,"db_connected":true}
 ```
 
 ## Run (human path)
@@ -118,6 +140,24 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 
 ## Gotchas
 
+- **`/api/health` is auth-gated (info-disclosure hardening).** Anonymous callers
+  get only `{"status":"ok"}` — no versions, no plugin inventory. Those come back
+  only for an authenticated caller with `api:read` (HTTP Basic as `admin` works).
+  The driver's `http_health()` sends Basic auth when a password is present and
+  degrades to the coarse status otherwise, so `--health-only` prints versions only
+  when `LYNDRIX_ADMIN_PASSWORD` is set. `/api/system/info` (also `api:read`) is a
+  cleaner version/uptime/connectivity snapshot.
+- **`/settings` 500s when `LYNDRIX_UI_ENGINE` is a multi-value CSV.** The
+  `LYNDRIX_UI_ENGINE` editable setting (`app/config.py`) is modeled as a
+  single-`select` (`options=["nicegui","react","both"]`), but the field is a
+  comma-separated list and this dev stack sets it to `api,nicegui,react`.
+  NiceGUI's single-select rejects a value not in its options →
+  `ValueError: Invalid value: api,nicegui,react` at
+  `core/components/settings/ui/settings_ui.py:85`, which 500s the *whole*
+  Settings page. App bug, not a driver bug. Workaround: set `LYNDRIX_UI_ENGINE`
+  to a single option (e.g. `nicegui`) in `docker/.env.dev` and restart, or make
+  that field a multi-select. Trace:
+  `docker logs lyndrix-core-dev 2>&1 | grep -A20 'Invalid value'`.
 - **NiceGUI session race on page navigation.** NiceGUI stores auth in
   `app.storage.user`, which is hydrated by the WebSocket connection opened when
   a page loads. Each Playwright navigation creates a new WS, and the server's
