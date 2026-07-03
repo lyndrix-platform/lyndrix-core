@@ -125,7 +125,8 @@ def _key_to_out(k) -> ApiKeyOut:
 # ── User CRUD ────────────────────────────────────────────────────────────────
 
 @users_router.get("", summary="List all users")
-async def list_users(identity: ApiIdentity = Depends(require_permission("api:read"))):
+def list_users(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    # Sync (threadpool): get_all() is a blocking DB read.
     users = [_to_user_out(u).model_dump() for u in _user_service().get_all()]
     return {"status": "ok", "count": len(users), "users": users}
 
@@ -142,7 +143,7 @@ async def create_user(
     uname = payload.username.strip()
     if not uname:
         raise HTTPException(status_code=422, detail="Username must not be empty")
-    if svc.get_by_username(uname):
+    if await asyncio.to_thread(svc.get_by_username, uname):
         raise HTTPException(status_code=409, detail=f"User '{uname}' already exists")
     if len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
@@ -151,30 +152,35 @@ async def create_user(
     # never blocks every other client (same rule as change_password).
     hashed = await asyncio.to_thread(hash_password, payload.password)
 
-    with _db().SessionLocal() as s:
-        user = User(
-            username=uname,
-            hashed_password=hashed,
-            full_name=(payload.full_name or "").strip() or None,
-            email=(payload.email or "").strip() or None,
-            roles=sorted(set(payload.roles)),
-            groups=sorted(set(payload.groups)),
-            extra_permissions=[],
-        )
-        s.add(user)
-        s.commit()
-        s.refresh(user)
-        out = _to_user_out(user)
+    def _persist():
+        with _db().SessionLocal() as s:
+            user = User(
+                username=uname,
+                hashed_password=hashed,
+                full_name=(payload.full_name or "").strip() or None,
+                email=(payload.email or "").strip() or None,
+                roles=sorted(set(payload.roles)),
+                groups=sorted(set(payload.groups)),
+                extra_permissions=[],
+            )
+            s.add(user)
+            s.commit()
+            s.refresh(user)
+            return _to_user_out(user)
+
+    # The DB insert is blocking pymysql — keep it off the event loop too.
+    out = await asyncio.to_thread(_persist)
 
     log.info(f"API: User '{uname}' created by '{identity.username}'.")
     return {"status": "ok", "user": out.model_dump()}
 
 
 @users_router.get("/{username}", summary="Get a user")
-async def get_user(
+def get_user(
     username: str,
     identity: ApiIdentity = Depends(require_permission("api:read")),
 ):
+    # Sync (threadpool): get_by_username() is a blocking DB read.
     user = _user_service().get_by_username(username)
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
@@ -190,7 +196,7 @@ async def update_user(
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
 
-    if not _user_service().get_by_username(username):
+    if not await asyncio.to_thread(_user_service().get_by_username, username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     if payload.password is not None and len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
@@ -202,31 +208,41 @@ async def update_user(
         else None
     )
 
-    with _db().SessionLocal() as s:
-        user = s.query(User).filter(User.username == username).first()
-        if payload.full_name is not None:
-            user.full_name = payload.full_name.strip() or None
-        if payload.email is not None:
-            user.email = payload.email.strip() or None
-        if hashed is not None:
-            user.hashed_password = hashed
-        if payload.roles is not None:
-            user.roles = sorted(set(payload.roles))
-        if payload.groups is not None:
-            user.groups = sorted(set(payload.groups))
-        s.commit()
-        s.refresh(user)
-        out = _to_user_out(user)
+    def _persist():
+        with _db().SessionLocal() as s:
+            user = s.query(User).filter(User.username == username).first()
+            if user is None:
+                # Deleted between the existence check and this write.
+                return None
+            if payload.full_name is not None:
+                user.full_name = payload.full_name.strip() or None
+            if payload.email is not None:
+                user.email = payload.email.strip() or None
+            if hashed is not None:
+                user.hashed_password = hashed
+            if payload.roles is not None:
+                user.roles = sorted(set(payload.roles))
+            if payload.groups is not None:
+                user.groups = sorted(set(payload.groups))
+            s.commit()
+            s.refresh(user)
+            return _to_user_out(user)
+
+    # The blocking read-modify-write runs off the event loop.
+    out = await asyncio.to_thread(_persist)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
     log.info(f"API: User '{username}' updated by '{identity.username}'.")
     return {"status": "ok", "user": out.model_dump()}
 
 
 @users_router.delete("/{username}", summary="Delete a user")
-async def delete_user(
+def delete_user(
     username: str,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
+    # Sync (threadpool): the existence check + delete are blocking DB calls.
     if username == identity.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     from core.components.auth.logic.models import User
@@ -247,10 +263,11 @@ async def delete_user(
 # ── Per-user API key management ─────────────────────────────────────────────
 
 @users_router.get("/{username}/api-keys", summary="List API keys for a user")
-async def list_api_keys(
+def list_api_keys(
     username: str,
     identity: ApiIdentity = Depends(require_permission("api:read")),
 ):
+    # Sync (threadpool): the lookups are blocking DB reads.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     keys = [_key_to_out(k).model_dump() for k in _api_key_service().list_for_user(username)]
@@ -258,11 +275,12 @@ async def list_api_keys(
 
 
 @users_router.post("/{username}/api-keys", summary="Create an API key for a user", status_code=201)
-async def create_api_key(
+def create_api_key(
     username: str,
     payload: ApiKeyCreateRequest,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
+    # Sync (threadpool): the lookup + key insert are blocking DB calls.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
@@ -277,11 +295,12 @@ async def create_api_key(
 
 
 @users_router.delete("/{username}/api-keys/{key_id}", summary="Revoke an API key")
-async def revoke_api_key(
+def revoke_api_key(
     username: str,
     key_id: int,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
+    # Sync (threadpool): the lookup + revoke are blocking DB calls.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     ok = _api_key_service().delete(key_id, username=username)

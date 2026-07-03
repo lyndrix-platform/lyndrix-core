@@ -29,6 +29,23 @@ class DatabaseService:
         bus.subscribe("vault:opened")(self.init_db_connection)
 
     async def init_db_connection(self, payload=None):
+        # ``vault:opened`` fires repeatedly (reconnects, multiple vault code
+        # paths). If an engine is already live or a connection loop is in flight,
+        # this is a no-op — recreating would leak the previous pool and bounce a
+        # healthy connection. Only (re)initialize when there is no active engine
+        # or the previous connection attempt has finished (e.g. exhausted).
+        loop_active = self._connection_task is not None and not self._connection_task.done()
+        if self.engine is not None and (self.is_connected or loop_active):
+            log.debug("DATABASE: engine already initialized; ignoring duplicate vault:opened.")
+            return
+        if self.engine is not None:
+            # Stale engine from a prior failed/exhausted attempt — dispose its
+            # pool before creating a fresh one so connections are not leaked.
+            try:
+                self.engine.dispose()
+            except Exception as e:
+                log.debug(f"DATABASE: prior engine dispose failed: {e}")
+
         log.info(f"DATABASE: Vault is open. Initializing engine for {settings.DATABASE_URL_SAFE}")
         try:
             self.engine = create_engine(

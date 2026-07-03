@@ -308,7 +308,11 @@ class ModuleManager:
 
             # Persist + activate (runs setup) before the health gate.
             if load_ok and resolved_module_id:
-                self._persist_plugin_state(resolved_module_id, True)
+                # Standalone blocking DB write — keep it off the event loop.
+                # (_activate_saved_plugins still runs sync DB interleaved with
+                # loop-bound lifecycle work; separating those is a dedicated
+                # follow-up refactor, not offloaded here.)
+                await asyncio.to_thread(self._persist_plugin_state, resolved_module_id, True)
                 await self._activate_saved_plugins()
 
             # Verification transaction: load + setup + health() must all pass; on

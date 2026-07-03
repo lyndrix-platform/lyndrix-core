@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import platform
@@ -320,6 +321,20 @@ def _render_theme_management_card() -> None:
 async def render_settings_page():
     """Renders the complete Settings dashboard."""
 
+    # Prefetch the Vault-backed tokens once, off the event loop. These are sync
+    # hvac reads; doing them inline during render (three separate blocking reads)
+    # stalls every other websocket client while the page builds.
+    from core.components.settings.logic.system_config_service import system_config_service
+
+    def _load_secrets():
+        return {
+            'github_token': system_config_service.get_value('github_token', ''),
+            'gitlab_token': system_config_service.get_value('gitlab_token', ''),
+            'system_api_key': system_config_service.get_value('system_api_key', ''),
+        }
+
+    _secrets = await asyncio.to_thread(_load_secrets)
+
     with ui.column().classes('w-full max-w-5xl mx-auto gap-6'):
         # ── Page Header ─────────────────────────────────────────────────────
         with ui.row().classes('w-full items-center gap-4'):
@@ -419,8 +434,7 @@ async def render_settings_page():
                             ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_HINT)
                             ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            from core.components.settings.logic.system_config_service import system_config_service
-                            current_token = system_config_service.get_value('github_token', '')
+                            current_token = _secrets['github_token']
 
                             gh_input = ui.input(t('core.settings.system.github_api_token'), value=current_token, password=True).classes('w-full max-w-md').props('outlined dark')
 
@@ -449,7 +463,7 @@ async def render_settings_page():
                             ui.separator().classes('my-3 bg-slate-200 dark:bg-white/10')
                             ui.label('GitLab Personal Access Token, stored in Vault.  ·  Env: GITLAB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            current_gl_token = system_config_service.get_value('gitlab_token', '')
+                            current_gl_token = _secrets['gitlab_token']
 
                             gl_input = ui.input(t('core.settings.system.gitlab_api_token'), value=current_gl_token, password=True).classes('w-full max-w-md').props('outlined dark')
 
@@ -491,7 +505,7 @@ async def render_settings_page():
                                     'API-key method disabled.'
                                 ).classes(UIStyles.TEXT_HINT)
 
-                            current_api_key = system_config_service.get_value('system_api_key', '')
+                            current_api_key = _secrets['system_api_key']
 
                             api_key_input = ui.input(
                                 'System API Key',
