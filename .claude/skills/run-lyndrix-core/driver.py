@@ -16,6 +16,7 @@ Examples:
     python driver.py --base http://localhost:8081 --user admin --password secret
 """
 import argparse
+import base64
 import json
 import os
 import sys
@@ -27,8 +28,21 @@ DESKTOP = {"width": 1440, "height": 900}
 MOBILE = {"width": 390, "height": 844}  # iPhone 12-ish
 
 
-def http_health(base: str) -> dict:
-    with urllib.request.urlopen(f"{base}/api/health", timeout=10) as r:
+def http_health(base: str, user: str = "", password: str = "") -> dict:
+    """GET /api/health.
+
+    Hardening note: anonymous callers now receive only the coarse
+    ``{"status": ...}``; the ``core_version``/``api_version`` and the
+    per-plugin breakdown are returned *only* to an authenticated caller with
+    the ``api:read`` permission. So when we have a password we send HTTP Basic
+    (admin has api:read) to get the full payload; without one we still get the
+    status and degrade gracefully.
+    """
+    req = urllib.request.Request(f"{base}/api/health")
+    if password:
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.load(r)
 
 
@@ -106,9 +120,13 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    health = http_health(args.base)
-    print(f"core_version={health.get('core_version')} api_version={health.get('api_version')} "
-          f"plugins={len(health.get('plugins', {}))}")
+    health = http_health(args.base, args.user, args.password or "")
+    if health.get("core_version"):
+        print(f"core_version={health.get('core_version')} api_version={health.get('api_version')} "
+              f"plugins={len(health.get('plugins', {}))}")
+    else:
+        print(f"status={health.get('status')} "
+              f"(anonymous /api/health — pass --password / LYNDRIX_ADMIN_PASSWORD for version + plugin detail)")
     if args.health_only:
         print(json.dumps(health, indent=2))
         return 0

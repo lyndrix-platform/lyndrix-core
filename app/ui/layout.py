@@ -258,7 +258,7 @@ def main_layout(page_title: str, *, wide: bool = False, permission: str | None =
 
                     ui.space()
 
-                    render_notification_bell()
+                    render_notification_bell(_safe_user_value("username"))
 
                     with ui.button(icon="account_circle").props(
                         "flat round text-color=current"

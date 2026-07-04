@@ -7,7 +7,8 @@ caller receives a list of warning strings to log or surface in the UI.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.theming.models import ThemePack
@@ -26,10 +27,118 @@ KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
     "--lx-accent", "--lx-accent-2", "--lx-accent-3",
     "--lx-text", "--lx-text-muted",
     "--lx-border", "--lx-border-soft", "--lx-glow",
-    "--lx-radius-sm", "--lx-radius-md", "--lx-radius-lg",
+    "--lx-radius-sm", "--lx-radius", "--lx-radius-md", "--lx-radius-lg",
+    "--lx-radius-xl", "--lx-radius-2xl", "--lx-radius-3xl", "--lx-radius-full",
+    "--lx-space-unit",
+    "--lx-font-sans", "--lx-font-mono", "--lx-text-scale",
+    "--lx-shadow-sm", "--lx-shadow-md", "--lx-shadow-lg", "--lx-shadow-glow",
+    "--lx-blur-sm", "--lx-blur-md", "--lx-blur-lg",
+    "--lx-blur-xs",
+    "--lx-transition-fast", "--lx-transition-base", "--lx-transition-slow", "--lx-ease",
+    "--lx-gradient-accent",
+    "--lx-gradient-success", "--lx-gradient-warning", "--lx-gradient-info", "--lx-gradient-danger",
+    "--lx-border-width", "--lx-rail-width",
     "--lx-state-up", "--lx-state-down", "--lx-state-paused", "--lx-state-unknown",
+    "--lx-state-success", "--lx-state-marked",
     "--lx-warning", "--lx-log-bg", "--lx-log-fg", "--lx-log-accent",
+    "--lx-terminal-bg", "--lx-terminal-fg", "--lx-terminal-accent",
+    "--lx-chart-1", "--lx-chart-2", "--lx-chart-3", "--lx-chart-4",
+    "--lx-chart-5", "--lx-chart-6", "--lx-chart-7", "--lx-chart-8",
+    "--lx-icon-xs", "--lx-icon-sm", "--lx-icon-md", "--lx-icon-lg",
+    "--lx-z-dropdown", "--lx-z-modal", "--lx-z-toast", "--lx-scrim",
+    "--lx-text-2xs", "--lx-text-3xs",
+    "--lx-glass-saturate", "--lx-on-accent-text", "--lx-on-accent-text-light",
+    "--lx-badge-bg-opacity", "--lx-badge-border-opacity",
 })
+
+
+# --- Cheap, non-fatal CSS value-level validation (Theming v2 Phase 1) -----
+# These check *shape*, not full CSS grammar — good enough to catch obvious
+# typos/garbage in an uploaded theme pack without becoming a CSS parser.
+# Callers treat a failed check as "use the built-in default", never as a
+# hard error, so a pack with one bad value still loads.
+
+_CSS_LENGTH_RE = re.compile(
+    r"^-?\d+(\.\d+)?(px|rem|em|%|vh|vw|vmin|vmax|ch|ex|pt|pc|in|cm|mm)$"
+)
+_CSS_DURATION_RE = re.compile(r"^-?\d+(\.\d+)?(ms|s)$")
+_CSS_NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_UNSAFE_CSS_CHARS_RE = re.compile(r"[<>{}]")
+
+
+def is_valid_css_length(value: str) -> bool:
+    """True for a plain CSS length like ``0.25rem``, ``9999px`` or ``0``."""
+    v = value.strip()
+    if v in ("0", "0px"):
+        return True
+    return bool(_CSS_LENGTH_RE.match(v))
+
+
+def is_valid_css_duration(value: str) -> bool:
+    """True for a plain CSS time value like ``150ms`` or ``0.4s``."""
+    return bool(_CSS_DURATION_RE.match(value.strip()))
+
+
+def is_valid_css_number(value: str) -> bool:
+    """True for a bare number (e.g. a unitless scale factor like ``1``)."""
+    return bool(_CSS_NUMBER_RE.match(value.strip()))
+
+
+def is_safe_css_value(value: str) -> bool:
+    """True for a non-empty free-form CSS value with no injection markers.
+
+    Used for values too varied to shape-check precisely (font stacks,
+    box-shadow lists, gradients, easing functions) — themes may be uploaded
+    as a ZIP, and these strings are interpolated directly into a ``<style>``
+    block, so reject characters that could break out of it.
+    """
+    v = value.strip()
+    if not v:
+        return False
+    return not _UNSAFE_CSS_CHARS_RE.search(v)
+
+
+# Per-category, per-key validator for the Phase-1 token categories. Shared by
+# ThemeEngine (backfill decisions) and validate_theme_pack (load-time
+# warnings) so both agree on what "valid" means.
+TOKEN_VALUE_VALIDATORS: dict[str, dict[str, Callable[[str], bool]]] = {
+    "radius": {
+        key: is_valid_css_length
+        for key in ("sm", "DEFAULT", "md", "lg", "xl", "2xl", "3xl", "full")
+    },
+    "spacing": {"unit": is_valid_css_length},
+    "typography": {
+        "font_sans": is_safe_css_value,
+        "font_mono": is_safe_css_value,
+        "text_scale": is_valid_css_number,
+        # calc(...) micro-type values — shape too varied to length-check.
+        "text_2xs": is_safe_css_value,
+        "text_3xs": is_safe_css_value,
+    },
+    "shadow": {key: is_safe_css_value for key in ("sm", "md", "lg", "glow")},
+    "blur": {key: is_valid_css_length for key in ("xs", "sm", "md", "lg")},
+    "transition": {
+        "fast": is_valid_css_duration,
+        "base": is_valid_css_duration,
+        "slow": is_valid_css_duration,
+        "ease": is_safe_css_value,
+    },
+    "gradient": {
+        key: is_safe_css_value
+        for key in ("accent", "success", "warning", "info", "danger")
+    },
+    "border": {"width": is_valid_css_length, "rail": is_valid_css_length},
+    "icon": {key: is_valid_css_length for key in ("xs", "sm", "md", "lg")},
+    # z-index values are bare integers.
+    "zindex": {key: is_valid_css_number for key in ("dropdown", "modal", "toast")},
+    "effect": {
+        # glass_saturate is a percentage (is_valid_css_length accepts `%`);
+        # the badge opacities are unitless 0..1 numbers.
+        "glass_saturate": is_valid_css_length,
+        "badge_bg_opacity": is_valid_css_number,
+        "badge_border_opacity": is_valid_css_number,
+    },
+}
 
 
 def _required_component_keys() -> frozenset[str]:
@@ -66,6 +175,26 @@ def validate_theme_pack(pack: "ThemePack") -> list[str]:
                         f"Theme '{pack.theme_id}': unknown css_variables.{mode} "
                         f"key '{key}' (not a recognised --lx-* property)"
                     )
+
+    # --- Phase-1 token categories (radius/spacing/typography/shadow/blur/
+    # transition/gradient/border) — optional, best-effort typo + value guard.
+    # Never mutated here: ThemeEngine independently backfills any missing or
+    # invalid key with the contract default at resolve time, so these are
+    # warnings only, not corrections.
+    for category, validators in TOKEN_VALUE_VALIDATORS.items():
+        values = getattr(pack.tokens, category, None) or {}
+        for key, value in values.items():
+            validator = validators.get(key)
+            if validator is None:
+                warnings.append(
+                    f"Theme '{pack.theme_id}': unknown {category}.{key} key "
+                    f"(not a recognised token)"
+                )
+            elif not validator(str(value)):
+                warnings.append(
+                    f"Theme '{pack.theme_id}': invalid value for {category}.{key} "
+                    f"({value!r}) — falling back to the built-in default"
+                )
 
     # --- component styles ---
     required = _required_component_keys()

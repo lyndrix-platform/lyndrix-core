@@ -23,10 +23,22 @@ class ModuleManager:
         self.registry = {}
         self._plugin_state_schema_ready = False
         self._mounted_static_paths: set = set()
+        # Per-module locks serialize reload/upgrade so two concurrent
+        # plugin:files_changed events for the same plugin cannot interleave the
+        # unload → re-import → activate swap and leave a half-registered plugin.
+        self._locks: dict = {}
         current_file_path = os.path.abspath(__file__)
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
         # Subscribe to filesystem change events from the PluginService
         bus.subscribe("plugin:files_changed")(self._handle_plugin_change)
+
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        """Return (creating on first use) the reload lock for a module/folder key."""
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
 
     def _find_plugin_id_by_folder(self, module_name: str):
         """Resolve an already-loaded plugin id from its folder/package name."""
@@ -296,7 +308,11 @@ class ModuleManager:
 
             # Persist + activate (runs setup) before the health gate.
             if load_ok and resolved_module_id:
-                self._persist_plugin_state(resolved_module_id, True)
+                # Standalone blocking DB write — keep it off the event loop.
+                # (_activate_saved_plugins still runs sync DB interleaved with
+                # loop-bound lifecycle work; separating those is a dedicated
+                # follow-up refactor, not offloaded here.)
+                await asyncio.to_thread(self._persist_plugin_state, resolved_module_id, True)
                 await self._activate_saved_plugins()
 
             # Verification transaction: load + setup + health() must all pass; on
@@ -431,6 +447,29 @@ class ModuleManager:
             log.info(f"STATIC: React UI bundle mounted for '{module_id}'")
         except Exception as exc:
             log.debug(f"STATIC: Could not mount static files for '{module_id}': {exc}")
+
+    def _unmount_plugin_statics(self, module_id: str):
+        """Remove a plugin's mounted static bundle route (inverse of _mount_plugin_statics).
+
+        Without this the StaticFiles mount survives uninstall pointing at a
+        deleted directory, and because the id lingers in ``_mounted_static_paths``
+        a later reinstall early-returns and never re-mounts.
+        """
+        if module_id not in self._mounted_static_paths:
+            return
+        try:
+            from main import app as fastapi_app
+            mount_path = f"/api/plugins/{module_id}/static"
+            fastapi_app.router.routes[:] = [
+                route for route in fastapi_app.router.routes
+                if getattr(route, "path", None) != mount_path
+            ]
+            fastapi_app.openapi_schema = None
+            log.info(f"STATIC: React UI bundle unmounted for '{module_id}'")
+        except Exception as exc:
+            log.debug(f"STATIC: Could not unmount static files for '{module_id}': {exc}")
+        finally:
+            self._mounted_static_paths.discard(module_id)
 
     def _execute_setup(self, module_id):
         """Helper to safely execute the module's setup function."""
@@ -659,6 +698,18 @@ class ModuleManager:
                 else:
                     teardown_func(entry["context"])
 
+            # Stop the disabled plugin's bus subscriptions + background tasks and
+            # drop its static mount. dispose() clears the context's tracking lists,
+            # so a later re-enable (which re-runs setup on the same context)
+            # re-subscribes cleanly instead of being blocked as a duplicate.
+            ctx = entry.get("context") if entry else None
+            if ctx is not None and hasattr(ctx, "dispose"):
+                try:
+                    ctx.dispose()
+                except Exception as e:
+                    log.warning(f"DISABLE: dispose failed for '{module_id}': {e}")
+            self._unmount_plugin_statics(module_id)
+
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
             
         return True
@@ -689,6 +740,19 @@ class ModuleManager:
 
         self._teardown_ui(module_id)
         entry = self.registry[module_id]
+
+        # Dispose bus subscriptions + background tasks owned by this module so a
+        # reloaded/uninstalled plugin's stale handlers stop firing (and its
+        # de-dup keys are freed so the re-imported code can re-subscribe).
+        ctx = entry.get("context")
+        if ctx is not None and hasattr(ctx, "dispose"):
+            try:
+                ctx.dispose()
+            except Exception as e:
+                log.warning(f"UNLOAD: dispose failed for '{module_id}': {e}")
+
+        # Remove any mounted React bundle route.
+        self._unmount_plugin_statics(module_id)
 
         # Drop notification endpoints for this plugin (router sync_declared_endpoints
         # will clean up DB rows on next ui:needs_refresh / db:connected pass).
@@ -725,29 +789,32 @@ class ModuleManager:
         return True
 
     async def reload_module(self, module_id: str, module_folder: str | None = None):
-        if module_id not in self.registry:
-            return False
+        # Serialize concurrent reloads of the same plugin so the unload → re-import
+        # → activate swap cannot interleave with another reload/install of it.
+        async with self._lock_for(module_id):
+            if module_id not in self.registry:
+                return False
 
-        entry = self.registry[module_id]
-        is_plugin = entry["manifest"].type == "PLUGIN"
-        # Default to the currently-loaded folder, but callers may override when an
-        # upgrade changed the on-disk folder name: the stale module object still
-        # points at the OLD folder, so deriving it here would reload the wrong
-        # (now-removed) path. unload still purges by the old package name first.
-        if not module_folder:
-            module_folder = entry["module"].__name__.split('.')[-2]
+            entry = self.registry[module_id]
+            is_plugin = entry["manifest"].type == "PLUGIN"
+            # Default to the currently-loaded folder, but callers may override when an
+            # upgrade changed the on-disk folder name: the stale module object still
+            # points at the OLD folder, so deriving it here would reload the wrong
+            # (now-removed) path. unload still purges by the old package name first.
+            if not module_folder:
+                module_folder = entry["module"].__name__.split('.')[-2]
 
-        self.unload_module(module_id)
-        importlib.invalidate_caches()
-        await asyncio.sleep(0.1) # Brief pause to let things settle
-        
-        success = self.load_module(module_folder, is_plugin=is_plugin)
-        
-        if success and is_plugin and db_instance.is_connected:
-            await self._activate_saved_plugins()
-            
-        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} reloaded."})
-        return success
+            self.unload_module(module_id)
+            importlib.invalidate_caches()
+            await asyncio.sleep(0.1) # Brief pause to let things settle
+
+            success = self.load_module(module_folder, is_plugin=is_plugin)
+
+            if success and is_plugin and db_instance.is_connected:
+                await self._activate_saved_plugins()
+
+            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} reloaded."})
+            return success
 
     def _validate_manifest(self, manifest: ModuleManifest):
         """Validate manifest constraints.

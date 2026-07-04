@@ -602,30 +602,35 @@ class PluginService:
                     response = await client.get(zip_url)
 
                 response.raise_for_status()
-                
-                with open(zip_path, 'wb') as f:
-                    f.write(response.content)
+
+                # File write is blocking; keep it off the event loop.
+                await asyncio.to_thread(zip_path.write_bytes, response.content)
 
             # 3. Safe Extraction into Staging (ZIP Slip protected)
             log.info("FILESYSTEM: Extracting archive into hidden staging area...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                # TODO(agent): require signed/allowlisted plugin sources before
-                # extraction and install (supply-chain hardening — CORE-AUTH-PLUGINS-008).
-                # This is a larger architectural change (signing keys + source
-                # allowlist + dependency sandboxing) deferred out of this pass;
-                # the ZIP-slip and requirements checks below are the interim guards.
-                staging_resolved = staging_base.resolve()
-                root_folder = zip_ref.namelist()[0].split('/')[0]
-                # Validate all paths stay within staging_base. Use is_relative_to
-                # (not a string prefix, which a sibling dir sharing the prefix could
-                # satisfy) so the ZIP-slip guard is correct.
-                for member in zip_ref.namelist():
-                    member_path = (staging_base / member).resolve()
-                    if member_path != staging_resolved and not member_path.is_relative_to(staging_resolved):
-                        raise ValueError(f"SECURITY: ZIP contains path traversal entry: {member}")
-                zip_ref.extractall(staging_base)
-                extracted_dir = staging_base / root_folder
-            
+
+            def _extract_archive() -> Path:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    # TODO(agent): require signed/allowlisted plugin sources before
+                    # extraction and install (supply-chain hardening — CORE-AUTH-PLUGINS-008).
+                    # This is a larger architectural change (signing keys + source
+                    # allowlist + dependency sandboxing) deferred out of this pass;
+                    # the ZIP-slip and requirements checks below are the interim guards.
+                    staging_resolved = staging_base.resolve()
+                    root_folder = zip_ref.namelist()[0].split('/')[0]
+                    # Validate all paths stay within staging_base. Use is_relative_to
+                    # (not a string prefix, which a sibling dir sharing the prefix could
+                    # satisfy) so the ZIP-slip guard is correct.
+                    for member in zip_ref.namelist():
+                        member_path = (staging_base / member).resolve()
+                        if member_path != staging_resolved and not member_path.is_relative_to(staging_resolved):
+                            raise ValueError(f"SECURITY: ZIP contains path traversal entry: {member}")
+                    zip_ref.extractall(staging_base)
+                    return staging_base / root_folder
+
+            # Extraction is CPU + IO heavy for large archives — run it off the loop.
+            extracted_dir = await asyncio.to_thread(_extract_archive)
+
             # 4. Dependency Management in Staging
             await self._install_requirements(extracted_dir)
 
@@ -647,28 +652,34 @@ class PluginService:
                     )
                     return False
 
-            # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes)
-            backup_path = self.plugin_dir / f".backup_{safe_repo_name}"
-            previous_path = self._previous_path(safe_repo_name)
-            prior_version = self._read_manifest_version(plugin_path) if plugin_path.exists() else None
-            if plugin_path.exists():
-                log.info(f"UPGRADE: Swapping old directory {plugin_path} for new version...")
+            # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes).
+            # Runs off the event loop: staging is a tempdir that may be on a
+            # different filesystem than /app/plugins, so shutil.move can be a full
+            # copy, and rmtree of a retained prior version is IO-heavy.
+            def _swap_in_new_version():
+                backup_path = self.plugin_dir / f".backup_{safe_repo_name}"
+                previous_path = self._previous_path(safe_repo_name)
+                prior = self._read_manifest_version(plugin_path) if plugin_path.exists() else None
+                if plugin_path.exists():
+                    log.info(f"UPGRADE: Swapping old directory {plugin_path} for new version...")
+                    if backup_path.exists():
+                        shutil.rmtree(backup_path, ignore_errors=True)
+                    plugin_path.rename(backup_path)
+
+                shutil.move(str(extracted_dir), str(plugin_path))
+
+                # Retain the prior version as a rollback restore point (replacing
+                # any older one). On a fresh install there is no backup, so no
+                # restore point is created. The ModuleManager health-gates the new
+                # version and auto-reverts to this directory if verification fails.
                 if backup_path.exists():
-                    shutil.rmtree(backup_path, ignore_errors=True)
-                plugin_path.rename(backup_path)
+                    if previous_path.exists():
+                        shutil.rmtree(previous_path, ignore_errors=True)
+                    backup_path.rename(previous_path)
 
-            shutil.move(str(extracted_dir), str(plugin_path))
+                return prior, self._read_manifest_version(plugin_path)
 
-            # Retain the prior version as a rollback restore point (replacing any
-            # older one). On a fresh install there is no backup, so no restore
-            # point is created. The ModuleManager health-gates the new version and
-            # auto-reverts to this directory if verification fails.
-            if backup_path.exists():
-                if previous_path.exists():
-                    shutil.rmtree(previous_path, ignore_errors=True)
-                backup_path.rename(previous_path)
-
-            new_version = self._read_manifest_version(plugin_path)
+            prior_version, new_version = await asyncio.to_thread(_swap_in_new_version)
             self._record_history(
                 None, repo, new_version,
                 action="upgrade" if upgrade else "install",

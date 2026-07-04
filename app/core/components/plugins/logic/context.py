@@ -21,6 +21,11 @@ class ModuleContext:
         prefix = "Core" if manifest.type == "CORE" else "Plugin"
         self.log = get_logger(f"{prefix}:{manifest.name}")
         self.state = {}
+        # Track this module's bus subscriptions and background tasks so the
+        # ModuleManager can tear them down on unload/disable/reload — otherwise a
+        # reloaded plugin keeps firing its old handlers and leaks a task per cycle.
+        self._subscriptions: list[tuple[str, object]] = []
+        self._tasks: list = []
 
     # --- EVENT BUS PROXY ---
 
@@ -29,6 +34,7 @@ class ModuleContext:
             if topic in self.manifest.permissions.subscribe or "*" in self.manifest.permissions.subscribe:
                 self.log.debug(f"SUBSCRIBE: Subscribed to topic: {topic}")
                 global_bus.subscribe(topic)(callback)
+                self._subscriptions.append((topic, callback))
             else:
                 message = (
                     f"Plugin '{self.manifest.id}' is not permitted to subscribe to "
@@ -53,7 +59,33 @@ class ModuleContext:
     def create_task(self, coro, *, name: str = None):
         """Create an observed background task owned by this module."""
         task_name = name or f"module:{self.manifest.id}"
-        return global_bus.create_tracked_task(coro, name=task_name)
+        task = global_bus.create_tracked_task(coro, name=task_name)
+        self._tasks.append(task)
+        return task
+
+    def dispose(self) -> None:
+        """Remove this module's bus subscriptions and cancel its background tasks.
+
+        Called by the ModuleManager on unload/disable so a reloaded or disabled
+        plugin's stale handlers stop firing (freeing their de-dup keys for a fresh
+        re-subscribe) and its long-lived tasks don't leak. Synchronous by design
+        so the sync ``unload_module`` path can call it; ``task.cancel()`` only
+        schedules cancellation, which lands at the task's next await point.
+        """
+        for topic, callback in self._subscriptions:
+            try:
+                global_bus.unsubscribe(topic, callback)
+            except Exception:
+                self.log.debug("DISPOSE: unsubscribe failed for '%s'", topic, exc_info=True)
+        self._subscriptions.clear()
+
+        for task in self._tasks:
+            try:
+                if not task.done():
+                    task.cancel()
+            except Exception:
+                self.log.debug("DISPOSE: task cancel failed", exc_info=True)
+        self._tasks.clear()
 
     def notify(
         self,

@@ -36,6 +36,23 @@ class Group(Base):
     ldap_mappings = Column(JSON, default=list)  # List[str]  — LDAP group DNs
 
 
+class UserPreference(Base):
+    """
+    Per-user, namespaced preference document (Theming v2 "My account" scope).
+
+    A single JSON blob per user holding cross-device preferences — theme
+    selection (react/nicegui), token overrides, language, layout/visibility.
+    Kept deliberately generic: the server treats ``data`` as an opaque
+    namespaced dict and deep-merges partial patches into it. One row per user.
+    """
+    __tablename__ = "user_preferences"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True)  # owner username
+    data = Column(JSON, default=dict)                        # namespaced prefs dict
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UserApiKey(Base):
     """
     A per-user API key for machine-to-machine HTTP access.

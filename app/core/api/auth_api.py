@@ -103,7 +103,10 @@ async def login(payload: LoginRequest):
         )
 
     label = f"web-session-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-    raw_token, _ = api_key_service.create(str(user.username), label=label, scopes=[])
+    # The key insert is a sync DB write — keep it off the event loop.
+    raw_token, _ = await asyncio.to_thread(
+        api_key_service.create, str(user.username), label=label, scopes=[]
+    )
 
     log.info(f"AUTH API: Login succeeded for '{user.username}'.")
     return LoginResponse(
@@ -115,8 +118,12 @@ async def login(payload: LoginRequest):
 
 
 @auth_router.post("/logout", summary="Revoke the current session token")
-async def logout(request: Request, identity: ApiIdentity = Depends(require_api_auth)):
-    """Deletes the caller's UserApiKey row — immediate, irrevocable revocation."""
+def logout(request: Request, identity: ApiIdentity = Depends(require_api_auth)):
+    """Deletes the caller's UserApiKey row — immediate, irrevocable revocation.
+
+    Sync (threadpool): the api_key verify/delete are blocking DB calls, so this
+    runs in FastAPI's threadpool rather than on the event loop.
+    """
     from core.components.auth.logic.api_key_service import api_key_service
 
     raw_key: Optional[str] = None
@@ -159,7 +166,7 @@ def _serialize_auth_field(spec, value: str, source: str) -> Dict[str, object]:
 
 
 @auth_router.get("/config", summary="Get auth provider configuration (secrets masked)")
-async def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
+def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
     """Return the auth provider configuration as a metadata-rich ``fields`` array.
 
     Each field reports its label/hint/env-var, the effective value + its source
@@ -183,7 +190,7 @@ async def get_auth_config(identity: ApiIdentity = Depends(require_permission("ap
 
 
 @auth_router.patch("/config", summary="Update auth provider configuration")
-async def update_auth_config(
+def update_auth_config(
     payload: AuthConfigUpdate,
     identity: ApiIdentity = Depends(require_permission("api:write")),
 ):
@@ -231,7 +238,7 @@ async def update_auth_config(
 
 
 @auth_router.post("/reload", summary="Reinitialize the auth provider chain")
-async def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("api:write"))):
+def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("api:write"))):
     """Re-read provider configuration and rebuild the auth chain (local/LDAP/OIDC)."""
     from core.components.auth.logic.auth_service import auth_service
 
@@ -241,8 +248,8 @@ async def reload_auth_providers(identity: ApiIdentity = Depends(require_permissi
 
 
 @auth_router.get("/me", summary="Current user profile")
-async def me(identity: ApiIdentity = Depends(require_api_auth)):
-    """Returns full profile for the authenticated user."""
+def me(identity: ApiIdentity = Depends(require_api_auth)):
+    """Returns full profile for the authenticated user (sync DB read → threadpool)."""
     from core.components.auth.logic.user_service import user_service
 
     user = user_service.get_by_username(identity.username)
@@ -267,6 +274,58 @@ async def me(identity: ApiIdentity = Depends(require_api_auth)):
         "method": identity.method,
         "is_system": identity.is_system,
     }
+
+
+# ==========================================
+# Per-user preferences ("My account" scope — Theming v2 Phase 2)
+# ==========================================
+class PreferencesUpdate(BaseModel):
+    """Partial, namespaced preferences patch. Deep-merged into the stored document."""
+    preferences: Dict[str, object]
+
+
+@me_router.get("/me/preferences", summary="Get the caller's account preferences")
+def get_my_preferences(identity: ApiIdentity = Depends(require_api_auth)):
+    """Return the authenticated user's namespaced preferences document.
+
+    Sync ``def`` (threadpool): the read is a blocking DB query, so it runs in
+    FastAPI's threadpool rather than on the shared event loop. Keyed strictly by
+    ``identity.username`` — a user only ever sees their own preferences.
+    """
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    return {"preferences": preferences_service.get(identity.username)}
+
+
+@me_router.put("/me/preferences", summary="Deep-merge a patch into the caller's preferences")
+def update_my_preferences(
+    payload: PreferencesUpdate,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """Deep-merge ``payload.preferences`` into the caller's stored document.
+
+    Nested objects merge recursively; scalars/lists replace. Returns the full
+    merged document. Sync ``def`` (threadpool) — the merge is a blocking DB
+    read-modify-write. Keyed by ``identity.username`` only.
+    """
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    merged = preferences_service.merge(identity.username, payload.preferences)
+    log.info(f"AUTH API: preferences updated for '{identity.username}'.")
+    return {"preferences": merged}
+
+
+@me_router.delete("/me/preferences/{dotted_key}", summary="Remove one preference path")
+def delete_my_preference(
+    dotted_key: str,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """Remove a single dotted path (e.g. ``theme.selection.react``) from the caller's
+    document and return the remaining preferences. Sync ``def`` (threadpool)."""
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    remaining = preferences_service.delete_path(identity.username, dotted_key)
+    return {"preferences": remaining}
 
 
 # ==========================================
