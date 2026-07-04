@@ -95,6 +95,31 @@ Important points:
 - provider activation is driven by `LYNDRIX_AUTH_PROVIDERS`
 - plugins can register providers dynamically, but the provider chain still controls activation order
 
+## Access control (1.0)
+
+Authorization is **group-based RBAC**, resolved server-side for every request
+(see [Auth](core-components/auth.md)):
+
+- Effective permissions come from **group membership** (`INT_ADMIN` / `INT_USER` / `INT_VIEWER` are seeded) plus per-user direct grants — never from raw role strings. The React UI mirrors this via `GET /api/me/access` but enforcement is always server-side.
+- **`superadmin` is a break-glass bypass, disabled by default.** Do not rely on it for day-to-day admin; grant `INT_ADMIN` instead. Enable it only deliberately via `LYNDRIX_ADMIN_FORCE_SUPERADMIN=true`.
+- **Per-plugin API scoping**: prefer `plugin:<id>:api:read` / `:api:write` (and plugin-declared custom permissions) over the broad global `api:read` / `api:write`, so a token/group can be limited to individual plugins.
+- **Notification visibility** can be gated per endpoint by permission id, so sensitive events (e.g. plugin lifecycle) are only visible to admins.
+
+### External identity linking
+
+Each login resolves to one local profile via a stable identity link
+(`UserIdentity`). Auto-matching an external account to an existing user by email
+only happens when the provider **vouches** for it — AD/LDAP directory mail, or an
+OIDC `email_verified: true` claim. An unverified or ambiguous email never merges
+accounts; a new profile is created instead (spoofing protection). The OIDC
+redirect flow uses **PKCE + a session-bound state**.
+
+### Session tokens
+
+Web logins mint a `UserApiKey` labelled `web-session · <browser> on <os> · <time>`.
+Users can review and revoke their **active sessions** individually (or "sign out
+all other sessions") from Settings → Profile, separate from long-lived API keys.
+
 ## Hardening recommendations
 
 For any non-local environment, apply these minimum controls:

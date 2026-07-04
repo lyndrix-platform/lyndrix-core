@@ -36,7 +36,7 @@ Lyndrix Core ships a dynamic theme engine (`app/core/theming/`, exported through
 
 Each theme lives under `app/assets/themes/<id>/` and has two files:
 
-1. **Token layer** — `tokens.json`: semantic colour tokens with `light`/`dark` variants (`primary`, `secondary`, `accent`, `bg_body`, `text_muted`, …).
+1. **Token layer** — `tokens.json`: semantic colour tokens with `light`/`dark` variants (`primary`, `secondary`, `accent`, `bg_body`, `text_muted`, …). Since 1.0 the **glass & border surfaces are colour tokens too** (`surface_glass`, `elevated_glass`, `glass_border`, `border_accent`, `border_soft`) — rgba values with alpha, so a theme can tone the glass effect down or off; the engine emits them as `--lx-surface-glass` / `--lx-elevated-glass` / `--lx-glass-border` / `--lx-border` / `--lx-border-soft`, consumed by both the React and NiceGUI UIs.
 2. **Component layer** — `components.json`: maps every `UIStyles` class-attribute name to a Tailwind class string.
 
 The theme validator (`core/theming/schema.py`) backfills any missing keys with `UIStyles` defaults, so **partial themes are valid**.

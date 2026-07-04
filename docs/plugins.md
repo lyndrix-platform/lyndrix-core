@@ -130,16 +130,57 @@ class MyRecord(Base):
 | `author` | recommended | Author name or organization |
 | `icon` | recommended | Material icon name for the plugin card |
 | `type` | ✅ | Use `PLUGIN` for user plugins |
-| `ui_route` | if using UI | Route mounted by the plugin |
+| `ui_route` | if using NiceGUI | NiceGUI sidebar route mounted by the plugin |
+| `react_ui` / `react_routes` | if using React | Whether the plugin ships a React bundle + its routes `[{path, label, icon, sidebar_visible}]`. Each route auto-registers a `plugin:<id>:route:<path>` permission. |
 | `permissions.subscribe` | as needed | Topics the plugin may subscribe to — unauthorized access raises a `PermissionError` |
 | `permissions.emit` | as needed | Topics the plugin may emit — unauthorized access raises a `PermissionError` |
 | `permissions.vault_paths` | as needed | Additional Vault paths beyond the plugin's default namespace |
-| `settings_schema` | optional | Reserved — not yet in stable use; omit or leave as `{}` |
+| `custom_permissions` | as needed | Fine-grained permissions the plugin declares (see below) — `[ManifestPermission]` |
+| `roles` | as needed | Named permission bundles with optional group auto-mapping — `[ManifestRole]` |
+| `settings_schema` | optional | Schema-driven settings rendered by core (`GET/PUT /api/plugins/<id>/settings`) |
 | `dependencies` | as needed | List of `{id, version_constraint}` entries for required plugins/modules |
 | `min_core_version` | recommended | Minimum Lyndrix API version required by this plugin |
 | `auto_enable_on_install` | recommended | Whether the plugin auto-activates on install — **default is `False`; the manifest defaults to not activating until configured** |
 | `repo_url` | recommended | Source repository URL — used for update checks and marketplace metadata — must point to the canonical `lyndrix-platform` org URL |
 | `notification_endpoints` | as needed | List of `NotificationEndpoint`s the plugin can route through the central [Notification Router](core-components/notification-router.md) |
+
+### Permissions & roles (1.0)
+
+Every plugin automatically gets `plugin:<id>`, `plugin:<id>:api:read` and
+`plugin:<id>:api:write` in the permission catalog — no declaration needed. Guard
+a route with the per-plugin id via the context helper (which namespaces it for
+you):
+
+```python
+# in a route mounted through ctx.register_routes(...)
+router.get("/things", dependencies=[Depends(ctx.require_permission("api:read"))])
+```
+
+Declare finer permissions and roles in the manifest:
+
+```python
+from core.api import ModuleManifest, ManifestPermission, ManifestRole
+
+manifest = ModuleManifest(
+    id="lyndrix.plugin.example",
+    # ...
+    custom_permissions=[
+        ManifestPermission(id="api:apply", label="Apply changes", icon="bolt"),
+    ],
+    roles=[
+        ManifestRole(
+            id="admin", label="Example Administrator",
+            # local suffixes are namespaced; already-qualified ids pass through
+            permissions=["api:read", "api:write", "plugin:lyndrix.plugin.example:api:apply"],
+            auto_map_groups=["INT_ADMIN"],   # applied once, ledger-guarded
+        ),
+    ],
+)
+```
+
+- A **custom permission** `api:apply` becomes `plugin:<id>:api:apply` in the catalog and is enforced with `ctx.require_permission("api:apply")`.
+- A **role** is registry metadata, not a DB entity. Its `permissions` attach to each `auto_map_groups` group exactly once (see [Auth](core-components/auth.md)). Reference a custom permission by its **fully-qualified** id inside a role — a bare `api:*` suffix is treated as the global permission, not the plugin one.
+- Global `api:read`/`api:write` remain a permanent fallback, so a plugin that never declares anything still works for any user holding them.
 
 **Important notes on `repo_url`:**
 
@@ -197,7 +238,8 @@ Each plugin receives a `ModuleContext` instance named `ctx`. This is the support
 | Member | Description |
 |---|---|
 | `ctx.manifest` | Validated manifest object |
-| `ctx.log` | Plugin-specific logger |
+| `ctx.log` | Plugin-specific logger — lines are tagged `Plugin:<name>` and are viewable in the plugin manager and via `GET /api/logs?source=Plugin:<name>` |
+| `ctx.require_permission(suffix)` | FastAPI dependency that requires `plugin:<this-id>:<suffix>` (namespaced automatically) |
 | `ctx.state` | Transient in-memory state dictionary — **lost on restart** |
 | `ctx.subscribe(topic)` | Permission-checked event subscription decorator |
 | `ctx.emit(topic, payload)` | Permission-checked event emission |
