@@ -139,7 +139,10 @@
     "glass_radius_desc": "Controls the roundness of the glass corners.",
     "glass_overlight": "Over Light",
     "glass_overlight_desc": "Darkens the glass for better contrast on bright backgrounds.",
-    "glass_reset": "Reset to defaults"
+    "glass_reset": "Reset to defaults",
+    "facet_account": "My account: {{n}} (synced)",
+    "scope_account_hint": "Follow this theme on all your devices",
+    "src_account": "{{id}} — following my account (syncs across devices)"
   },
   "common": {
     "save": "Save",
@@ -379,7 +382,11 @@
       "motion": "Motion",
       "gradient": "Gradient",
       "effects": "Effects",
-      "background": "Background"
+      "background": "Background",
+      "charts": "Data / Charts",
+      "terminal": "Terminal",
+      "sizing": "Sizing",
+      "raw": "Advanced — raw variables"
     },
     "preview": {
       "label": "Preview",
@@ -391,7 +398,36 @@
       "input": "Input field",
       "card": "Card",
       "glass": "Glass",
-      "gradient": "Accent gradient"
+      "gradient": "Accent gradient",
+      "focus": "This section",
+      "full": "Everything",
+      "mono": "const mono = \"0123\";",
+      "type_display": "Display",
+      "type_heading": "Heading",
+      "type_body": "Body copy",
+      "type_meta": "Meta / caption",
+      "secondary_btn": "Secondary",
+      "success": "success",
+      "marked": "selected",
+      "on_accent": "on accent",
+      "badges": "State badges",
+      "semantic": "Semantic extras",
+      "rail_active": "Active nav item",
+      "rail_idle": "Idle nav item",
+      "shadows": "Shadow tiers",
+      "modal": "Modal over scrim",
+      "rounded_btn": "Rounded button",
+      "row_one": "List row one",
+      "row_two": "List row two",
+      "row_three": "List row three",
+      "motion_note": "Loops at the slow-transition duration.",
+      "gradient_family": "Semantic stripes",
+      "charts": "Chart palette",
+      "terminal": "Terminal",
+      "surfaces": "Surfaces & glass",
+      "icons": "Icon sizes",
+      "rail": "Nav rail",
+      "scrim": "Modal scrim"
     },
     "bg": {
       "intro": "Backdrop image filenames baked into the theme pack. Your personal background lives in Appearance → Background.",
@@ -404,7 +440,9 @@
       "accents": "Accents",
       "surfaces": "Surfaces",
       "text": "Text",
-      "states": "States"
+      "states": "States",
+      "semantic": "Semantic extras",
+      "semantic_note": "Saved as raw css_variables overrides (no colour token drives these)."
     },
     "color": {
       "primary": "Primary",
@@ -420,7 +458,10 @@
       "negative": "Negative",
       "info": "Info",
       "warning": "Warning",
-      "info_note": "No live preview — feeds the server (NiceGUI) palette only."
+      "info_note": "No live preview — feeds the server (NiceGUI) palette only.",
+      "state_success": "Success",
+      "state_marked": "Marked / selected",
+      "on_accent": "Text on accent"
     },
     "density": {
       "spacing": "Spacing unit",
@@ -439,13 +480,28 @@
       "blur": "Backdrop blur tiers"
     },
     "effects": {
-      "scope_note": "This browser only — not saved to a theme pack."
+      "scope_note": "This browser only — not saved to a theme pack.",
+      "theme": "Theme effect tokens",
+      "glass_saturate": "Glass saturation",
+      "glass_saturate_desc": "Backdrop-filter saturate() behind frosted surfaces (theme-wide).",
+      "badge_bg": "Badge fill opacity",
+      "badge_border": "Badge border opacity",
+      "scrim": "Modal scrim",
+      "scrim_desc": "Overlay behind modals. Saved as a css_variables override.",
+      "glass": "Liquid glass"
     },
     "gradient": {
       "rebuild": "Rebuild from accent colours",
       "angle": "Angle",
       "angle_desc": "Rebuilds the accent gradient at this angle.",
-      "raw": "Raw gradient value"
+      "raw": "Raw gradient value",
+      "accent": "Accent gradient",
+      "success": "Success",
+      "warning": "Warning",
+      "info": "Info",
+      "danger": "Danger",
+      "family": "Semantic stripe family",
+      "rebuild_tokens": "rebuild from tokens"
     },
     "motion": {
       "fast": "Fast transition",
@@ -467,7 +523,11 @@
       "font_sans": "Sans font stack",
       "font_mono": "Mono font stack",
       "text_scale": "Text scale",
-      "text_scale_desc": "Theme-level type scale (saved with the pack, all viewers see it)."
+      "text_scale_desc": "Theme-level type scale (saved with the pack, all viewers see it).",
+      "micro": "Advanced — micro type sizes",
+      "micro_desc": "Eyebrow / meta label sizes. Default is calc(rem × text scale), so they follow the scale above — override to pin exactly.",
+      "text_2xs": "Micro (2xs)",
+      "text_3xs": "Micro (3xs)"
     },
     "save": {
       "name_invalid": "Use 2–41 characters: lowercase letters, digits, - or _ (and not \"default\").",
@@ -494,7 +554,53 @@
       "keep_editing": "Keep editing",
       "system_confirm_title": "Change the system default?",
       "system_confirm_body": "Applying “{{id}}” as the system default changes the theme for all users (including the NiceGUI UI).",
-      "system_confirm_apply": "Apply for all"
+      "system_confirm_apply": "Apply for all",
+      "account_hint": "Apply these edits on all your devices"
+    },
+    "applied_account": "Applied to my account (all devices).",
+    "charts": {
+      "intro": "The categorical 8-hue palette for charts and qualitative data. Saved as css_variables overrides.",
+      "hue": "Hue {{n}}"
+    },
+    "terminal": {
+      "intro": "The raw console palette (log viewers / shells). Saved as css_variables overrides.",
+      "bg": "Console background",
+      "fg": "Console text",
+      "accent": "Console accent"
+    },
+    "sizing": {
+      "icons": "Icon sizes",
+      "rail": "Rail width",
+      "rail_desc": "Thickness of the active-nav accent rail.",
+      "zindex": "Stacking order (z-index)",
+      "zindex_note": "Ordering of floating layers. No visual preview — keep dropdown < modal < toast.",
+      "z_dropdown": "Dropdown",
+      "z_modal": "Modal",
+      "z_toast": "Toast"
+    },
+    "raw": {
+      "intro": "Override ANY --lx-* variable directly (current {{mode}} mode). Includes engine-composed vars with no semantic control. Saved into the pack’s css_variables.",
+      "filter": "Filter variables…",
+      "no_match": "No variables match “{{q}}”.",
+      "surfaces": "Surfaces & text",
+      "accents": "Accents",
+      "states": "States",
+      "charts": "Chart hues",
+      "gradients": "Gradients",
+      "terminal": "Terminal / log",
+      "borders": "Borders & glass",
+      "borders_note": "Engine-composed literals + shell-only glass/popover vars. No colour token drives these — overriding them here is the only way to reach them.",
+      "radius": "Radius",
+      "shadow": "Shadow & blur",
+      "type": "Typography",
+      "motion": "Motion",
+      "misc": "Misc",
+      "kind_colour": "colour",
+      "kind_dimension": "dimension",
+      "kind_gradient": "gradient",
+      "kind_effect": "effect",
+      "kind_engine": "engine-composed",
+      "kind_mixed": "mixed"
     }
   }
 }

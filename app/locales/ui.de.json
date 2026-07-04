@@ -139,7 +139,10 @@
     "glass_radius_desc": "Steuert die Rundung der Glasecken.",
     "glass_overlight": "Über hellem Hintergrund",
     "glass_overlight_desc": "Verdunkelt das Glas für besseren Kontrast auf hellen Hintergründen.",
-    "glass_reset": "Auf Standard zurücksetzen"
+    "glass_reset": "Auf Standard zurücksetzen",
+    "facet_account": "Mein Konto: {{n}} (synchronisiert)",
+    "scope_account_hint": "Dieses Theme auf allen Geräten übernehmen",
+    "src_account": "{{id}} — folgt meinem Konto (geräteübergreifend synchronisiert)"
   },
   "common": {
     "save": "Speichern",
@@ -379,7 +382,11 @@
       "motion": "Bewegung",
       "gradient": "Verlauf",
       "effects": "Effekte",
-      "background": "Hintergrund"
+      "background": "Hintergrund",
+      "charts": "Daten / Diagramme",
+      "terminal": "Terminal",
+      "sizing": "Größen",
+      "raw": "Erweitert — Rohvariablen"
     },
     "preview": {
       "label": "Vorschau",
@@ -391,7 +398,36 @@
       "input": "Eingabefeld",
       "card": "Karte",
       "glass": "Glas",
-      "gradient": "Akzent-Verlauf"
+      "gradient": "Akzent-Verlauf",
+      "focus": "Dieser Bereich",
+      "full": "Alles",
+      "mono": "const mono = \"0123\";",
+      "type_display": "Display",
+      "type_heading": "Überschrift",
+      "type_body": "Fließtext",
+      "type_meta": "Meta / Bildunterschrift",
+      "secondary_btn": "Sekundär",
+      "success": "erfolg",
+      "marked": "ausgewählt",
+      "on_accent": "auf Akzent",
+      "badges": "Status-Badges",
+      "semantic": "Semantische Zusätze",
+      "rail_active": "Aktives Navigationselement",
+      "rail_idle": "Inaktives Navigationselement",
+      "shadows": "Schatten-Stufen",
+      "modal": "Modal über Abdunkelung",
+      "rounded_btn": "Abgerundeter Button",
+      "row_one": "Listenzeile eins",
+      "row_two": "Listenzeile zwei",
+      "row_three": "Listenzeile drei",
+      "motion_note": "Wiederholt sich in der Dauer des langsamen Übergangs.",
+      "gradient_family": "Semantische Streifen",
+      "charts": "Diagrammpalette",
+      "terminal": "Terminal",
+      "surfaces": "Flächen & Glas",
+      "icons": "Icon-Größen",
+      "rail": "Navigationsleiste",
+      "scrim": "Modal-Abdunkelung"
     },
     "bg": {
       "intro": "Hintergrundbild-Dateinamen, fest im Theme-Paket hinterlegt. Das persönliche Hintergrundbild befindet sich unter Darstellung → Hintergrund.",
@@ -404,7 +440,9 @@
       "accents": "Akzente",
       "surfaces": "Flächen",
       "text": "Text",
-      "states": "Zustände"
+      "states": "Zustände",
+      "semantic": "Semantische Zusätze",
+      "semantic_note": "Wird als Rohwert-Override in css_variables gespeichert (kein Farb-Token steuert dies)."
     },
     "color": {
       "primary": "Primär",
@@ -420,7 +458,10 @@
       "negative": "Negativ",
       "info": "Info",
       "warning": "Warnung",
-      "info_note": "Keine Live-Vorschau — wirkt nur auf die Server-Palette (NiceGUI)."
+      "info_note": "Keine Live-Vorschau — wirkt nur auf die Server-Palette (NiceGUI).",
+      "state_success": "Erfolg",
+      "state_marked": "Markiert / ausgewählt",
+      "on_accent": "Text auf Akzent"
     },
     "density": {
       "spacing": "Abstandseinheit",
@@ -439,13 +480,28 @@
       "blur": "Hintergrundweichzeichnung-Stufen"
     },
     "effects": {
-      "scope_note": "Nur dieser Browser — wird nicht im Theme-Paket gespeichert."
+      "scope_note": "Nur dieser Browser — wird nicht im Theme-Paket gespeichert.",
+      "theme": "Theme-Effekt-Tokens",
+      "glass_saturate": "Glas-Sättigung",
+      "glass_saturate_desc": "Backdrop-Filter saturate() hinter Mattglas-Flächen (theme-weit).",
+      "badge_bg": "Deckkraft der Badge-Füllung",
+      "badge_border": "Deckkraft des Badge-Rands",
+      "scrim": "Modal-Abdunkelung",
+      "scrim_desc": "Abdunkelung hinter Modals. Wird als css_variables-Override gespeichert.",
+      "glass": "Liquid Glass"
     },
     "gradient": {
       "rebuild": "Aus Akzentfarben neu erstellen",
       "angle": "Winkel",
       "angle_desc": "Erstellt den Akzent-Verlauf mit diesem Winkel neu.",
-      "raw": "Rohwert des Verlaufs"
+      "raw": "Rohwert des Verlaufs",
+      "accent": "Akzent-Verlauf",
+      "success": "Erfolg",
+      "warning": "Warnung",
+      "info": "Info",
+      "danger": "Fehler",
+      "family": "Semantische Streifenfamilie",
+      "rebuild_tokens": "aus Tokens neu erstellen"
     },
     "motion": {
       "fast": "Schneller Übergang",
@@ -467,7 +523,11 @@
       "font_sans": "Schriftstapel (serifenlos)",
       "font_mono": "Schriftstapel (Monospace)",
       "text_scale": "Textskalierung",
-      "text_scale_desc": "Textskalierung auf Theme-Ebene (wird mit dem Paket gespeichert, für alle sichtbar)."
+      "text_scale_desc": "Textskalierung auf Theme-Ebene (wird mit dem Paket gespeichert, für alle sichtbar).",
+      "micro": "Erweitert — Mikro-Schriftgrößen",
+      "micro_desc": "Größen für Eyebrow-/Meta-Beschriftungen. Standard ist calc(rem × Textskalierung), sie folgen also der Skalierung oben — zum exakten Fixieren überschreiben.",
+      "text_2xs": "Mikro (2xs)",
+      "text_3xs": "Mikro (3xs)"
     },
     "save": {
       "name_invalid": "2–41 Zeichen verwenden: Kleinbuchstaben, Ziffern, - oder _ (nicht „default“).",
@@ -494,7 +554,53 @@
       "keep_editing": "Weiter bearbeiten",
       "system_confirm_title": "Systemstandard ändern?",
       "system_confirm_body": "Wird „{{id}}“ als Systemstandard übernommen, ändert sich das Theme für alle Benutzer (einschließlich der NiceGUI-Oberfläche).",
-      "system_confirm_apply": "Für alle übernehmen"
+      "system_confirm_apply": "Für alle übernehmen",
+      "account_hint": "Diese Änderungen auf allen Geräten übernehmen"
+    },
+    "applied_account": "Auf mein Konto angewendet (alle Geräte).",
+    "charts": {
+      "intro": "Die 8 kategorialen Farbtöne für Diagramme und qualitative Daten. Wird als css_variables-Override gespeichert.",
+      "hue": "Farbton {{n}}"
+    },
+    "terminal": {
+      "intro": "Die Rohkonsolen-Palette (Log-Ansichten / Shells). Wird als css_variables-Override gespeichert.",
+      "bg": "Konsolen-Hintergrund",
+      "fg": "Konsolen-Text",
+      "accent": "Konsolen-Akzent"
+    },
+    "sizing": {
+      "icons": "Icon-Größen",
+      "rail": "Leistenbreite",
+      "rail_desc": "Dicke der Akzentleiste am aktiven Navigationselement.",
+      "zindex": "Stapelreihenfolge (z-index)",
+      "zindex_note": "Reihenfolge der schwebenden Ebenen. Keine visuelle Vorschau — Dropdown < Modal < Toast beibehalten.",
+      "z_dropdown": "Dropdown",
+      "z_modal": "Modal",
+      "z_toast": "Toast"
+    },
+    "raw": {
+      "intro": "Überschreibt jede beliebige --lx-*-Variable direkt (aktueller Modus: {{mode}}). Enthält auch engine-komponierte Variablen ohne semantische Kontrolle. Wird in die css_variables des Pakets gespeichert.",
+      "filter": "Variablen filtern…",
+      "no_match": "Keine Variablen gefunden für „{{q}}“.",
+      "surfaces": "Flächen & Text",
+      "accents": "Akzente",
+      "states": "Zustände",
+      "charts": "Diagramm-Farbtöne",
+      "gradients": "Verläufe",
+      "terminal": "Terminal / Log",
+      "borders": "Ränder & Glas",
+      "borders_note": "Engine-komponierte Literale + reine Shell-Variablen für Glas/Popover. Kein Farb-Token steuert diese — ein Override hier ist der einzige Weg, sie zu erreichen.",
+      "radius": "Radius",
+      "shadow": "Schatten & Weichzeichnung",
+      "type": "Typografie",
+      "motion": "Bewegung",
+      "misc": "Sonstiges",
+      "kind_colour": "farbe",
+      "kind_dimension": "dimension",
+      "kind_gradient": "verlauf",
+      "kind_effect": "effekt",
+      "kind_engine": "engine-komponiert",
+      "kind_mixed": "gemischt"
     }
   }
 }
