@@ -82,6 +82,31 @@
     "STATUS_TEXT_SUCCESS": "text-xs text-emerald-400",
     "STATUS_TEXT_ERROR": "text-xs text-red-400",
     "STATUS_TEXT_WARNING": "text-xs text-amber-400",
-    "STATUS_TEXT_NEUTRAL": "text-xs text-zinc-500"
+    "STATUS_TEXT_NEUTRAL": "text-xs text-zinc-500",
+
+    "LOG_PANEL": "lx-log-panel",
+    "TERMINAL": "lx-terminal",
+    "CARD_ACCENT": "lx-card-accent",
+    "CARD_ACCENT_SUCCESS": "lx-card-accent lx-card-accent--success",
+    "CARD_ACCENT_WARNING": "lx-card-accent lx-card-accent--warning",
+    "CARD_ACCENT_INFO": "lx-card-accent lx-card-accent--info",
+    "CARD_ACCENT_DANGER": "lx-card-accent lx-card-accent--danger",
+    "MODAL_OVERLAY": "lx-modal-overlay",
+    "MODAL_GLASS": "lx-modal",
+    "STATUS_RAIL": "lx-status-rail",
+    "STATUS_RAIL_UP": "lx-status-rail lx-status-rail--up",
+    "STATUS_RAIL_DOWN": "lx-status-rail lx-status-rail--down",
+    "STATUS_RAIL_PAUSED": "lx-status-rail lx-status-rail--paused",
+    "STATUS_RAIL_SUCCESS": "lx-status-rail lx-status-rail--success",
+    "ROW_HOVER": "lx-row-hover",
+    "BADGE_STATE": "lx-badge",
+    "BADGE_STATE_UP": "lx-badge lx-badge--up",
+    "BADGE_STATE_DOWN": "lx-badge lx-badge--down",
+    "BADGE_STATE_PAUSED": "lx-badge lx-badge--paused",
+    "BADGE_STATE_UNKNOWN": "lx-badge lx-badge--unknown",
+    "BADGE_STATE_SUCCESS": "lx-badge lx-badge--success",
+    "STEPPER": "lx-stepper",
+    "ENTITY_CARD": "lx-entity-card",
+    "IFRAME_FRAME": "lx-iframe-frame"
   }
 }

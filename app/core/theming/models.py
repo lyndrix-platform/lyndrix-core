@@ -48,6 +48,10 @@ class ThemeTokens(BaseModel):
     transition: dict[str, str] = Field(default_factory=dict)
     gradient: dict[str, str] = Field(default_factory=dict)
     border: dict[str, str] = Field(default_factory=dict)
+    # Theming v2 T0 additions (icon-size / z-index / misc effect scalars).
+    icon: dict[str, str] = Field(default_factory=dict)
+    zindex: dict[str, str] = Field(default_factory=dict)
+    effect: dict[str, str] = Field(default_factory=dict)
 
     css_variables: ThemeCssVariables | None = None
     background_images: ThemeBackgroundImages | None = None

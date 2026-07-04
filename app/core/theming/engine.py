@@ -51,11 +51,17 @@ _TYPOGRAPHY_DEFAULTS: dict[str, str] = {
     "font_sans": '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
     "font_mono": '"JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, monospace',
     "text_scale": "1",
+    # Micro-typography (eyebrow / meta labels), scaled by --lx-text-scale so
+    # they track the global density knob like the Tailwind fontSize scale does.
+    "text_2xs": "calc(0.6875rem * var(--lx-text-scale))",
+    "text_3xs": "calc(0.625rem * var(--lx-text-scale))",
 }
 _TYPOGRAPHY_VARS: dict[str, str] = {
     "font_sans": "--lx-font-sans",
     "font_mono": "--lx-font-mono",
     "text_scale": "--lx-text-scale",
+    "text_2xs": "--lx-text-2xs",
+    "text_3xs": "--lx-text-3xs",
 }
 
 _SHADOW_DEFAULTS: dict[str, str] = {
@@ -71,9 +77,9 @@ _SHADOW_VARS: dict[str, str] = {
     "glow": "--lx-shadow-glow",
 }
 
-_BLUR_DEFAULTS: dict[str, str] = {"sm": "8px", "md": "16px", "lg": "24px"}
+_BLUR_DEFAULTS: dict[str, str] = {"xs": "10px", "sm": "8px", "md": "16px", "lg": "24px"}
 _BLUR_VARS: dict[str, str] = {
-    "sm": "--lx-blur-sm", "md": "--lx-blur-md", "lg": "--lx-blur-lg",
+    "xs": "--lx-blur-xs", "sm": "--lx-blur-sm", "md": "--lx-blur-md", "lg": "--lx-blur-lg",
 }
 
 _TRANSITION_DEFAULTS: dict[str, str] = {
@@ -91,11 +97,47 @@ _TRANSITION_VARS: dict[str, str] = {
 
 _GRADIENT_DEFAULTS: dict[str, str] = {
     "accent": "linear-gradient(135deg, var(--lx-accent), var(--lx-accent-2), var(--lx-accent-3))",
+    # Semantic header-stripe family (the `.lx-card-accent[--variant]` motif).
+    # Built from the state/accent/chart tokens so they re-skin with the theme.
+    "success": "linear-gradient(90deg, var(--lx-state-success), var(--lx-chart-8))",
+    "warning": "linear-gradient(90deg, var(--lx-warning), var(--lx-chart-4))",
+    "info": "linear-gradient(90deg, var(--lx-accent-2), var(--lx-accent))",
+    "danger": "linear-gradient(90deg, var(--lx-state-down), var(--lx-chart-5))",
 }
-_GRADIENT_VARS: dict[str, str] = {"accent": "--lx-gradient-accent"}
+_GRADIENT_VARS: dict[str, str] = {
+    "accent": "--lx-gradient-accent",
+    "success": "--lx-gradient-success",
+    "warning": "--lx-gradient-warning",
+    "info": "--lx-gradient-info",
+    "danger": "--lx-gradient-danger",
+}
 
-_BORDER_DEFAULTS: dict[str, str] = {"width": "1px"}
-_BORDER_VARS: dict[str, str] = {"width": "--lx-border-width"}
+_BORDER_DEFAULTS: dict[str, str] = {"width": "1px", "rail": "3px"}
+_BORDER_VARS: dict[str, str] = {"width": "--lx-border-width", "rail": "--lx-rail-width"}
+
+# Icon-size scale (material-icons font-size / svg box). Mode-invariant.
+_ICON_DEFAULTS: dict[str, str] = {"xs": "14px", "sm": "16px", "md": "18px", "lg": "32px"}
+_ICON_VARS: dict[str, str] = {
+    "xs": "--lx-icon-xs", "sm": "--lx-icon-sm", "md": "--lx-icon-md", "lg": "--lx-icon-lg",
+}
+
+# Stacking-context scale for floating layers.
+_ZINDEX_DEFAULTS: dict[str, str] = {"dropdown": "1000", "modal": "1100", "toast": "1200"}
+_ZINDEX_VARS: dict[str, str] = {
+    "dropdown": "--lx-z-dropdown", "modal": "--lx-z-modal", "toast": "--lx-z-toast",
+}
+
+# Misc effect scalars: promoted glass-saturate magic number + badge tint opacities.
+_EFFECT_DEFAULTS: dict[str, str] = {
+    "glass_saturate": "160%",
+    "badge_bg_opacity": "0.15",
+    "badge_border_opacity": "0.30",
+}
+_EFFECT_VARS: dict[str, str] = {
+    "glass_saturate": "--lx-glass-saturate",
+    "badge_bg_opacity": "--lx-badge-bg-opacity",
+    "badge_border_opacity": "--lx-badge-border-opacity",
+}
 
 # (category name, defaults, var names) — iterated by _resolve_token_category.
 _TOKEN_CATEGORIES: tuple[tuple[str, dict[str, str], dict[str, str]], ...] = (
@@ -107,6 +149,9 @@ _TOKEN_CATEGORIES: tuple[tuple[str, dict[str, str], dict[str, str]], ...] = (
     ("transition", _TRANSITION_DEFAULTS, _TRANSITION_VARS),
     ("gradient", _GRADIENT_DEFAULTS, _GRADIENT_VARS),
     ("border", _BORDER_DEFAULTS, _BORDER_VARS),
+    ("icon", _ICON_DEFAULTS, _ICON_VARS),
+    ("zindex", _ZINDEX_DEFAULTS, _ZINDEX_VARS),
+    ("effect", _EFFECT_DEFAULTS, _EFFECT_VARS),
 )
 
 
@@ -202,6 +247,18 @@ class ThemeEngine:
                 "--lx-state-paused": c("warning", "#fbbf24"),
                 "--lx-warning": c("warning", "#fbbf24"),
                 "--lx-state-unknown": c("text_subtle", "#94a3b8"),
+                # Semantic state extensions (distinct from the ops --lx-state-*).
+                "--lx-state-success": "#10b981",
+                "--lx-state-marked": "#6366f1",
+                # Categorical 8-hue palette (qualitative data: phases, entities).
+                "--lx-chart-1": "#8b5cf6",
+                "--lx-chart-2": "#0ea5e9",
+                "--lx-chart-3": "#10b981",
+                "--lx-chart-4": "#f59e0b",
+                "--lx-chart-5": "#f43f5e",
+                "--lx-chart-6": "#6366f1",
+                "--lx-chart-7": "#06b6d4",
+                "--lx-chart-8": "#14b8a6",
                 # --- canonical literals (no clean semantic source) ---
                 "--lx-surface-glass": "rgba(15, 22, 41, 0.58)",
                 "--lx-border": "rgba(0, 212, 255, 0.2)",
@@ -222,6 +279,16 @@ class ThemeEngine:
                 "--lx-state-paused": c("warning", "#f59e0b"),
                 "--lx-warning": c("warning", "#f59e0b"),
                 "--lx-state-unknown": c("text_subtle", "#94a3b8"),
+                "--lx-state-success": "#059669",
+                "--lx-state-marked": "#4f46e5",
+                "--lx-chart-1": "#7c3aed",
+                "--lx-chart-2": "#0284c7",
+                "--lx-chart-3": "#059669",
+                "--lx-chart-4": "#d97706",
+                "--lx-chart-5": "#e11d48",
+                "--lx-chart-6": "#4f46e5",
+                "--lx-chart-7": "#0891b2",
+                "--lx-chart-8": "#0d9488",
                 "--lx-surface-glass": "rgba(255, 255, 255, 0.72)",
                 "--lx-border": "rgba(8, 145, 178, 0.3)",
                 "--lx-border-soft": "rgba(0, 0, 0, 0.09)",
@@ -244,6 +311,16 @@ class ThemeEngine:
         css["--lx-log-bg"] = css["--lx-bg"]
         css["--lx-log-fg"] = css["--lx-text"]
         css["--lx-log-accent"] = css["--lx-state-up"]
+
+        # Mode-invariant literals (same in light + dark). The terminal/console
+        # variant is intentionally always green-on-black (a raw console reads
+        # dark in any theme), distinct from the theme-tracking --lx-log-*. The
+        # scrim + on-accent-text are stable overlay/foreground helpers.
+        css["--lx-scrim"] = "rgb(0 0 0 / 0.55)"
+        css["--lx-on-accent-text"] = "#0a0e1a"
+        css["--lx-terminal-bg"] = "#050807"
+        css["--lx-terminal-fg"] = "#4ade80"
+        css["--lx-terminal-accent"] = "#22d3ee"
 
         # Optional themed background image (mode-resolved). Served by the asset
         # route at /api/themes/{id}/assets/{file}. Emitted before css_variables

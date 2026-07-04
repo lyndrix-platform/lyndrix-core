@@ -33,11 +33,22 @@ KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
     "--lx-font-sans", "--lx-font-mono", "--lx-text-scale",
     "--lx-shadow-sm", "--lx-shadow-md", "--lx-shadow-lg", "--lx-shadow-glow",
     "--lx-blur-sm", "--lx-blur-md", "--lx-blur-lg",
+    "--lx-blur-xs",
     "--lx-transition-fast", "--lx-transition-base", "--lx-transition-slow", "--lx-ease",
     "--lx-gradient-accent",
-    "--lx-border-width",
+    "--lx-gradient-success", "--lx-gradient-warning", "--lx-gradient-info", "--lx-gradient-danger",
+    "--lx-border-width", "--lx-rail-width",
     "--lx-state-up", "--lx-state-down", "--lx-state-paused", "--lx-state-unknown",
+    "--lx-state-success", "--lx-state-marked",
     "--lx-warning", "--lx-log-bg", "--lx-log-fg", "--lx-log-accent",
+    "--lx-terminal-bg", "--lx-terminal-fg", "--lx-terminal-accent",
+    "--lx-chart-1", "--lx-chart-2", "--lx-chart-3", "--lx-chart-4",
+    "--lx-chart-5", "--lx-chart-6", "--lx-chart-7", "--lx-chart-8",
+    "--lx-icon-xs", "--lx-icon-sm", "--lx-icon-md", "--lx-icon-lg",
+    "--lx-z-dropdown", "--lx-z-modal", "--lx-z-toast", "--lx-scrim",
+    "--lx-text-2xs", "--lx-text-3xs",
+    "--lx-glass-saturate", "--lx-on-accent-text",
+    "--lx-badge-bg-opacity", "--lx-badge-border-opacity",
 })
 
 
@@ -100,17 +111,33 @@ TOKEN_VALUE_VALIDATORS: dict[str, dict[str, Callable[[str], bool]]] = {
         "font_sans": is_safe_css_value,
         "font_mono": is_safe_css_value,
         "text_scale": is_valid_css_number,
+        # calc(...) micro-type values — shape too varied to length-check.
+        "text_2xs": is_safe_css_value,
+        "text_3xs": is_safe_css_value,
     },
     "shadow": {key: is_safe_css_value for key in ("sm", "md", "lg", "glow")},
-    "blur": {key: is_valid_css_length for key in ("sm", "md", "lg")},
+    "blur": {key: is_valid_css_length for key in ("xs", "sm", "md", "lg")},
     "transition": {
         "fast": is_valid_css_duration,
         "base": is_valid_css_duration,
         "slow": is_valid_css_duration,
         "ease": is_safe_css_value,
     },
-    "gradient": {"accent": is_safe_css_value},
-    "border": {"width": is_valid_css_length},
+    "gradient": {
+        key: is_safe_css_value
+        for key in ("accent", "success", "warning", "info", "danger")
+    },
+    "border": {"width": is_valid_css_length, "rail": is_valid_css_length},
+    "icon": {key: is_valid_css_length for key in ("xs", "sm", "md", "lg")},
+    # z-index values are bare integers.
+    "zindex": {key: is_valid_css_number for key in ("dropdown", "modal", "toast")},
+    "effect": {
+        # glass_saturate is a percentage (is_valid_css_length accepts `%`);
+        # the badge opacities are unitless 0..1 numbers.
+        "glass_saturate": is_valid_css_length,
+        "badge_bg_opacity": is_valid_css_number,
+        "badge_border_opacity": is_valid_css_number,
+    },
 }
 
 
