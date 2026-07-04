@@ -183,7 +183,7 @@ nothing). Lint/type/i18n gates: `ruff check app/`, `black app/`,
 - **Secrets stay out of the repo.** The driver refuses to run without
   `LYNDRIX_ADMIN_PASSWORD` in the env rather than carrying a default.
 - **Sibling plugin repos are volume-mounted** by `docker-compose.dev.yml`
-  (e.g. `../../lyndrix-plugin-*` → `/app/plugins/*`), so plugin code edits on the
+  (e.g. `../../plugins/lyndrix-plugin-*` → `/app/plugins/*`), so plugin code edits on the
   host are live in the container.
 - **The venv + screenshots are gitignored** (`.dev/` repo-wide; `shots/` in the
   skill dir) — only `SKILL.md` and `driver.py` are committed.

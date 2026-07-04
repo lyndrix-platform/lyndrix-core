@@ -49,13 +49,13 @@ services:
       - ../app:/app
       - ../.dev/secure_data:/data/security
       - ./entrypoint.sh:/app/entrypoint.sh
-      - ../../lyndrix-plugin-iac-orchestrator:/app/plugins/iac_orchestrator
-      - ../../lyndrix-plugin-discord-notifier:/app/plugins/discord_notifier
-      - ../../lyndrix-plugin-meeting-bingo:/app/plugins/meeting_bingo
-      - ../../lyndrix-plugin-monitoring:/app/plugins/state_monitoring
-      - ../../lyndrix-plugin-external-services:/app/plugins/external_services
-      - ../../lyndrix-plugin-server-manager:/app/plugins/server_manager
-      - ../../lyndrix-plugin-docker-manager:/app/plugins/docker_manager
+      - ../../plugins/lyndrix-plugin-iac-orchestrator:/app/plugins/iac_orchestrator
+      - ../../plugins/lyndrix-plugin-discord-notifier:/app/plugins/discord_notifier
+      - ../../plugins/lyndrix-plugin-meeting-bingo:/app/plugins/meeting_bingo
+      - ../../plugins/lyndrix-plugin-monitoring:/app/plugins/state_monitoring
+      - ../../plugins/lyndrix-plugin-external-services:/app/plugins/external_services
+      - ../../plugins/lyndrix-plugin-server-manager:/app/plugins/server_manager
+      - ../../plugins/lyndrix-plugin-docker-manager:/app/plugins/docker_manager
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env.dev
