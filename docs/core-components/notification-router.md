@@ -20,9 +20,9 @@ This decouples *what* a plugin wants to announce from *whether and where* it is 
 - discover every plugin-declared `NotificationEndpoint` and keep a registry in sync with the live manifests
 - persist per-endpoint binding state (`plugin_notification_endpoints` table) and prune rows for endpoints that disappeared
 - validate each incoming `NotificationEnvelope` against the registry (unknown endpoint → warning + drop)
-- resolve the effective active state and provider via **env var > DB row > manifest default** precedence
-- apply internal effects (toast / persisted history) through the notification service
-- dispatch externally through the messaging gateway when a registered provider is bound
+- resolve the effective active state, **provider list** and **required-permission** via **env var > DB row > manifest default** precedence
+- apply internal effects (toast / persisted history) through the notification service, honouring the endpoint's audience gate
+- **fan out externally to every bound provider** through the messaging gateway
 - support sticky/updatable notifications and `clear` semantics by `notification_id`
 
 ## Events
@@ -58,6 +58,7 @@ manifest = ModuleManifest(
             internal_toast=True,      # raise an in-app toast
             internal_persist=True,    # append to notification history
             external_default=False,   # route to the global default provider when no binding exists
+            required_permission=None, # None = visible to all; e.g. "feature:plugins.manage" = admins only
         ),
     ],
 )
@@ -78,20 +79,38 @@ async def on_deploy_done(ctx):
 
 ## Operator configuration and precedence
 
-For each `(plugin_id, endpoint_name)` the **active** flag and **provider** binding resolve in this order:
+For each `(plugin_id, endpoint_name)` the **active** flag, the **provider list** and the **required permission** each resolve in this order:
 
 1. **Environment variable** (highest priority, locks the value in the UI)
    - `LYNDRIX_NOTIF__<PLUGIN_ID>__<ENDPOINT_NAME>__ACTIVE`
-   - `LYNDRIX_NOTIF__<PLUGIN_ID>__<ENDPOINT_NAME>__PROVIDER`
+   - `LYNDRIX_NOTIF__<PLUGIN_ID>__<ENDPOINT_NAME>__PROVIDER` — **comma-separated list** of provider ids (fan-out); present-but-empty means "no external providers".
+   - `LYNDRIX_NOTIF__<PLUGIN_ID>__<ENDPOINT_NAME>__PERMISSION` — the visibility gate.
    - `<PLUGIN_ID>` is upper-cased with `.` and `-` replaced by `_` (e.g. `lyndrix.plugin.deployer` → `LYNDRIX_PLUGIN_DEPLOYER`).
-2. **DB row** — set from the Notifications settings UI.
-3. **Manifest default** — `default_active`, and for the provider the global default `LYNDRIX_NOTIF_DEFAULT_PROVIDER` (only when the endpoint sets `external_default=True`).
+2. **DB row** — set from the React Notifications settings UI (provider chips + visibility select).
+3. **Manifest default** — `default_active`, `required_permission`, and for the providers the global default `LYNDRIX_NOTIF_DEFAULT_PROVIDER` (only when `external_default=True`).
 
-`ResolvedState` reports both the effective value and its `active_source` / `provider_source` so the UI can show where a setting comes from.
+`ResolvedState` reports the effective `providers`, `required_permission` and each source (`active_source` / `provider_source` / `required_permission_source`).
+
+### Multi-provider fan-out (1.0)
+
+A binding is a **list** of provider ids, so one endpoint can deliver to several
+providers at once (e.g. the internal `system` feed **and** `discord`). The router
+builds one message per bound-and-registered provider and dispatches them
+concurrently; unregistered providers are skipped with a warning.
+
+### Delivery visibility & personal mutes (1.0)
+
+`required_permission` gates who can **see** an endpoint's notifications
+internally (feed, id-targeted read/dismiss, SSE stream and NiceGUI toast all
+apply it via `ApiIdentity.allows` / the session's effective permissions). `None`
+= everyone; e.g. `feature:plugins.manage` restricts plugin-lifecycle
+notifications to admins. On top of that, users self-manage a personal mute list
+(`GET /api/notifications/subscribable` — filtered to what they may see — stored
+in `notifications.muted_endpoints` under `/api/me/preferences`).
 
 ## Persistence
 
-The `plugin_notification_endpoints` table (created on `db:connected`) stores one row per `(plugin_id, endpoint_name)` with `is_active`, `provider_binding`, and the declared defaults. On every discovery sync, current manifest declarations are upserted and rows whose declaration disappeared (plugin uninstalled or endpoint renamed) are deleted in one transaction.
+The `plugin_notification_endpoints` table (created on `db:connected`) stores one row per `(plugin_id, endpoint_name)` with `is_active`, `provider_bindings` (JSON list), `required_permission_override` (tri-state: NULL = manifest default, `""` = explicitly unrestricted, value = required id), and the declared defaults. On every discovery sync, current manifest declarations are upserted and rows whose declaration disappeared (plugin uninstalled or endpoint renamed) are deleted in one transaction.
 
 ## Integration notes
 
