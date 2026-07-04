@@ -9,7 +9,7 @@ Usage::
 
 from datetime import datetime
 
-__version__: str = "0.7.0"
+__version__: str = "0.8.0"
 __version_info__: tuple[int, int, int] = (0, 6, 0)
 __release_date__: str = "2026-07-02"
 __codename__: str = "First Light Alpha"
