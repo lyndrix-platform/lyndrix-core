@@ -75,10 +75,21 @@ def _provider_options() -> dict[str, str]:
     return options
 
 
-def _provider_value_for_state(provider: str | None, provider_source: str) -> str:
-    if provider_source in ("default", "global_default", "none") or provider is None:
+_MULTI_VALUE = "__multi__"
+
+
+def _provider_value_for_state(providers: list[str], provider_source: str) -> str:
+    """Map the v2 provider LIST onto the legacy single-select.
+
+    0 entries → default; 1 entry → that provider; >1 (configured via the React
+    multi-select) → a disabled sentinel so saving here never silently collapses
+    a fan-out binding down to one provider.
+    """
+    if provider_source in ("default", "global_default", "none") or not providers:
         return _DEFAULT_VALUE
-    return provider
+    if len(providers) > 1:
+        return _MULTI_VALUE
+    return providers[0]
 
 
 def _render_endpoint_row(
@@ -117,14 +128,16 @@ def _render_endpoint_row(
                     active_switch.props("disable").classes("opacity-60")
 
                 opts = dict(provider_options)
-                current_pv = _provider_value_for_state(state.provider, state.provider_source)
-                if current_pv not in opts:
+                current_pv = _provider_value_for_state(state.providers, state.provider_source)
+                if current_pv == _MULTI_VALUE:
+                    opts[_MULTI_VALUE] = "multiple providers — manage in React settings"
+                elif current_pv not in opts:
                     opts[current_pv] = f"{current_pv}  ·  (not registered)"
                 provider_select = ui.select(
                     options=opts,
                     value=current_pv,
                 ).props("dense options-dense outlined").classes("w-72")
-                if provider_locked:
+                if provider_locked or current_pv == _MULTI_VALUE:
                     provider_select.props("disable").classes("opacity-60")
 
         if active_locked or provider_locked:
@@ -349,10 +362,10 @@ def render_notifications_settings_card() -> None:
                             kwargs: dict = {}
                             if not act_locked:
                                 kwargs["active"] = bool(act_sw.value)
-                            if not prov_locked:
+                            if not prov_locked and prov_sel.value != _MULTI_VALUE:
                                 raw = prov_sel.value
-                                kwargs["provider"] = (
-                                    None if raw == _DEFAULT_VALUE else raw
+                                kwargs["providers"] = (
+                                    None if raw == _DEFAULT_VALUE else [raw]
                                 )
                             if not kwargs:
                                 continue

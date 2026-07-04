@@ -168,12 +168,27 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
 notifications_router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
 
 
-def _visible_for(username: str) -> List[Dict[str, Any]]:
-    """Notifications visible to ``username``: own + broadcast, minus dismissed.
+def _muted_endpoints(username: str) -> set:
+    """The caller's personal mute set from /api/me/preferences (best effort)."""
+    try:
+        from core.components.auth.logic.preferences_service import preferences_service
 
-    Each entry carries a per-user ``read`` flag; newest-first ordering preserved.
-    """
-    return notification_service.visible_for(username)
+        prefs = preferences_service.get(username) or {}
+        muted = ((prefs.get("notifications") or {}).get("muted_endpoints")) or []
+        return {str(m) for m in muted}
+    except Exception:
+        return set()
+
+
+def _visible_for(identity) -> List[Dict[str, Any]]:
+    """Notifications visible to the caller: own + broadcast, minus dismissed,
+    minus audience-gated entries the caller lacks (identity.allows inherits the
+    superadmin/system bypass), minus personally muted endpoints."""
+    return notification_service.visible_for(
+        identity.username,
+        permission_check=identity.allows,
+        muted_endpoints=_muted_endpoints(identity.username),
+    )
 
 
 def _require_visible(notif_id: str, username: str) -> Dict[str, Any]:
@@ -192,6 +207,17 @@ def _require_visible(notif_id: str, username: str) -> Dict[str, Any]:
     return match
 
 
+def _require_visible_for_identity(notif_id: str, identity) -> Dict[str, Any]:
+    """_require_visible + the audience gate: an id the caller may not SEE 404s
+    identically to an unknown id (no existence probing). Mute is deliberately
+    NOT applied here — acting on an id the client already has stays allowed."""
+    match = _require_visible(notif_id, identity.username)
+    req = match.get("required_permission")
+    if req and not identity.allows(req):
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return match
+
+
 def _public_view(n: Dict[str, Any]) -> Dict[str, Any]:
     """Strip the internal ``user_id`` from a notification for the API response."""
     return {
@@ -206,7 +232,7 @@ def _public_view(n: Dict[str, Any]) -> Dict[str, Any]:
 
 @notifications_router.get("", summary="List the current user's notifications")
 async def list_notifications(identity: ApiIdentity = Depends(require_api_auth)):
-    visible = _visible_for(identity.username)
+    visible = _visible_for(identity)
     return {
         "notifications": [_public_view(n) for n in visible],
         "unread": sum(1 for n in visible if not n.get("read", False)),
@@ -218,14 +244,14 @@ async def read_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
-    _require_visible(notif_id, identity.username)
+    _require_visible_for_identity(notif_id, identity)
     notification_service.mark_read(identity.username, notif_id)
     return {"status": "ok"}
 
 
 @notifications_router.post("/read-all", summary="Mark all visible notifications as read")
 async def read_all_notifications(identity: ApiIdentity = Depends(require_api_auth)):
-    for n in _visible_for(identity.username):
+    for n in _visible_for(identity):
         notification_service.mark_read(identity.username, n["id"])
     return {"status": "ok"}
 
@@ -235,7 +261,7 @@ async def dismiss_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
-    _require_visible(notif_id, identity.username)
+    _require_visible_for_identity(notif_id, identity)
     # Per-user dismiss: broadcasts stay visible for other users.
     notification_service.dismiss(identity.username, notif_id)
     return {"status": "ok"}

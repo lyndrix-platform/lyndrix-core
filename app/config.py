@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     LYNDRIX_PLUGIN_COLLECTION_URL: str = (
         "https://github.com/lyndrix-platform/lyndrix-plugin-collection.git"
     )
+    # Interval for the background plugin-update check (seconds; min 300).
+    LYNDRIX_PLUGIN_UPDATE_CHECK_INTERVAL_S: int = 21600
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
@@ -512,6 +514,10 @@ EDITABLE_SETTINGS: List[EditableSetting] = [
     EditableSetting("LYNDRIX_PLUGIN_COLLECTION_URL", "Plugin Collection URL",
                     "Git URL of the plugin collection/registry used by the marketplace.",
                     category="Plugins"),
+    EditableSetting("LYNDRIX_PLUGIN_UPDATE_CHECK_INTERVAL_S", "Update Check Interval (s)",
+                    "How often the background job checks installed plugins for newer "
+                    "release tags (seconds, minimum 300).",
+                    kind="int", category="Plugins"),
 ]
 
 EDITABLE_SETTING_CATEGORIES: List[str] = ["Application", "Localization", "Theming", "Plugins"]

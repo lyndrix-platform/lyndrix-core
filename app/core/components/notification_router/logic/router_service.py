@@ -104,7 +104,8 @@ class NotificationRouterService:
                         row.plugin_id,
                         row.endpoint_name,
                         is_active=row.is_active,
-                        provider_binding=row.provider_binding,
+                        provider_bindings=row.provider_bindings,
+                        required_permission_override=row.required_permission_override,
                     )
                 return len(rows)
 
@@ -165,7 +166,8 @@ class NotificationRouterService:
                             plugin_id=plugin_id,
                             endpoint_name=endpoint_name,
                             is_active=None,
-                            provider_binding=None,
+                            provider_bindings=None,
+                            required_permission_override=None,
                             declared_defaults=defaults_blob,
                             discovered_at=now,
                             updated_at=now,
@@ -178,7 +180,8 @@ class NotificationRouterService:
                         plugin_id,
                         endpoint_name,
                         is_active=row.is_active,
-                        provider_binding=row.provider_binding,
+                        provider_bindings=row.provider_bindings,
+                        required_permission_override=row.required_permission_override,
                     )
 
                 # Anything left in ``existing`` is stale → delete.
@@ -204,13 +207,16 @@ class NotificationRouterService:
         endpoint_name: str,
         *,
         active: bool | None = None,
-        provider: Any = _UNSET,
+        providers: Any = _UNSET,
+        required_permission: Any = _UNSET,
     ) -> ResolvedState:
         """Persist a binding change and refresh the precedence cache.
 
-        Pass ``active=None`` to leave active untouched. Pass ``provider`` as
-        ``_UNSET`` (the default) to leave provider untouched, ``None`` to clear
-        the binding, or a string to set a specific provider id.
+        ``active=None`` leaves active untouched. ``providers``: ``_UNSET`` =
+        untouched, ``None``/``[]`` = clear (no external delivery), or a list of
+        provider ids (fan-out). ``required_permission``: ``_UNSET`` = untouched,
+        ``None`` = reset to the manifest default (row NULL), ``""`` = explicit
+        no-restriction, or a permission id.
         """
         if endpoint_registry.get(plugin_id, endpoint_name) is None:
             raise ValueError(f"Unknown endpoint: {plugin_id}/{endpoint_name}")
@@ -235,7 +241,8 @@ class NotificationRouterService:
                         plugin_id=plugin_id,
                         endpoint_name=endpoint_name,
                         is_active=None,
-                        provider_binding=None,
+                        provider_bindings=None,
+                        required_permission_override=None,
                         discovered_at=now,
                         updated_at=now,
                     )
@@ -243,8 +250,11 @@ class NotificationRouterService:
 
                 if active is not None:
                     row.is_active = bool(active)
-                if provider is not _UNSET:
-                    row.provider_binding = provider if provider else None
+                if providers is not _UNSET:
+                    row.provider_bindings = list(providers) if providers else None
+                if required_permission is not _UNSET:
+                    # Tri-state: None resets to manifest default (NULL row).
+                    row.required_permission_override = required_permission
                 row.updated_at = now
                 session.commit()
 
@@ -252,7 +262,8 @@ class NotificationRouterService:
                     plugin_id,
                     endpoint_name,
                     is_active=row.is_active,
-                    provider_binding=row.provider_binding,
+                    provider_bindings=row.provider_bindings,
+                    required_permission_override=row.required_permission_override,
                 )
 
         try:
@@ -292,13 +303,14 @@ class NotificationRouterService:
         if not state.active:
             return
 
-        await self._apply_internal(envelope, decl)
+        await self._apply_internal(envelope, decl, state)
         await self._apply_external(envelope, decl, state)
 
     async def _apply_internal(
         self,
         envelope: NotificationEnvelope,
         decl: NotificationEndpoint,
+        state: ResolvedState,
     ) -> None:
         # Clear semantics: remove a sticky notification by id and skip everything else.
         if envelope.clear and envelope.notification_id:
@@ -332,6 +344,10 @@ class NotificationRouterService:
                         "type": legacy_type,
                         "toast": False,
                         "persist": True,
+                        # Routing v2 metadata: audience gate + mute key.
+                        "required_permission": state.required_permission,
+                        "source_plugin_id": envelope.source_plugin_id,
+                        "endpoint_name": envelope.endpoint_name,
                     },
                     broadcast=False,
                     emit_outbound=False,
@@ -341,7 +357,10 @@ class NotificationRouterService:
 
         if decl.internal_toast:
             try:
-                notification_service.broadcast_toast(message, legacy_type)
+                notification_service.broadcast_toast(
+                    message, legacy_type,
+                    required_permission=state.required_permission,
+                )
             except Exception as exc:
                 log.error(f"ROUTER: toast broadcast failed: {exc}")
 
@@ -351,60 +370,67 @@ class NotificationRouterService:
         decl: NotificationEndpoint,
         state: ResolvedState,
     ) -> None:
-        if not state.provider:
+        if not state.providers:
             return
 
+        # Fan-out: one explicit OutboundMessage per configured provider —
+        # deliberately NOT the gateway broadcast path (target_provider=None),
+        # which would implicitly include every future adapter. asyncio.gather
+        # keeps a slow adapter from delaying the others (each is still bounded
+        # by its own send_timeout).
         registered = {adapter.provider_id for adapter in messaging_gateway.list_adapters()}
-        if state.provider not in registered:
+        targets = [p for p in state.providers if p in registered]
+        for missing in [p for p in state.providers if p not in registered]:
             log.warning(
-                "ROUTER: provider '%s' not registered (endpoint %s/%s) — skipping external dispatch.",
-                state.provider,
-                envelope.source_plugin_id,
-                envelope.endpoint_name,
+                "ROUTER: provider '%s' not registered (endpoint %s/%s) — skipping.",
+                missing, envelope.source_plugin_id, envelope.endpoint_name,
             )
+        if not targets:
             return
 
-        outbound = OutboundMessage(
-            title=_payload_title(envelope),
-            body=_payload_message(envelope),
-            severity=envelope.severity,
-            source_plugin_id=envelope.source_plugin_id,
-            target_provider=state.provider,
-            correlation_id=envelope.correlation_id,
-            metadata={
-                "endpoint_name":   envelope.endpoint_name,
-                "notification_id": envelope.notification_id,
-                "lyndrix_payload": envelope.payload,
-            },
-        )
-        try:
-            results = await messaging_gateway.dispatch(outbound)
-            for pid, result in results.items():
+        async def _send(pid: str):
+            outbound = OutboundMessage(
+                title=_payload_title(envelope),
+                body=_payload_message(envelope),
+                severity=envelope.severity,
+                source_plugin_id=envelope.source_plugin_id,
+                target_provider=pid,
+                correlation_id=envelope.correlation_id,
+                metadata={
+                    "endpoint_name":   envelope.endpoint_name,
+                    "notification_id": envelope.notification_id,
+                    "lyndrix_payload": envelope.payload,
+                },
+            )
+            return pid, await messaging_gateway.dispatch(outbound)
+
+        gathered = await asyncio.gather(*(_send(p) for p in targets), return_exceptions=True)
+        for item in gathered:
+            if isinstance(item, BaseException):
+                log.error(
+                    "ROUTER: external dispatch error for %s/%s: %s",
+                    envelope.source_plugin_id, envelope.endpoint_name, item,
+                )
+                continue
+            pid, results = item
+            for rpid, result in results.items():
                 if result.success:
                     log.debug(
                         "ROUTER: %s/%s → %s delivered (msg_id=%s).",
                         envelope.source_plugin_id, envelope.endpoint_name,
-                        pid, result.message_id,
+                        rpid, result.message_id,
                     )
                 elif result.queued_for_retry:
                     log.info(
                         "ROUTER: %s/%s → %s queued for retry.",
-                        envelope.source_plugin_id, envelope.endpoint_name, pid,
+                        envelope.source_plugin_id, envelope.endpoint_name, rpid,
                     )
                 else:
                     log.error(
                         "ROUTER: %s/%s → %s delivery failed: %s",
                         envelope.source_plugin_id, envelope.endpoint_name,
-                        pid, result.error,
+                        rpid, result.error,
                     )
-        except Exception as exc:
-            log.error(
-                "ROUTER: external dispatch error for %s/%s → %s: %s",
-                envelope.source_plugin_id,
-                envelope.endpoint_name,
-                state.provider,
-                exc,
-            )
 
 
 notification_router = NotificationRouterService()

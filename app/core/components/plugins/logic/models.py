@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 
 # --- NEW IMPORTS FOR DATABASE MODEL ---
-from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, JSON
 from core.components.database.logic.db_service import Base
 
 _ENDPOINT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -49,6 +49,13 @@ class NotificationEndpoint(BaseModel):
     external_default: bool = Field(
         default=False,
         description="When no explicit provider binding exists, route to the global default provider.",
+    )
+    required_permission: Optional[str] = Field(
+        default=None,
+        description=(
+            "Permission id gating who SEES this notification internally "
+            "(e.g. 'feature:plugins.manage'). None = visible to all users."
+        ),
     )
 
     @field_validator("name")
@@ -232,7 +239,11 @@ class PluginNotificationEndpoint(Base):
     plugin_id = Column(String(100), primary_key=True)
     endpoint_name = Column(String(64), primary_key=True)
     is_active = Column(Boolean, nullable=True)
-    provider_binding = Column(String(200), nullable=True)
+    # Routing v2: LIST of provider ids (fan-out) — None = nothing configured.
+    provider_bindings = Column(JSON, nullable=True)
+    # Tri-state visibility override: NULL = manifest default; "" = explicitly
+    # unrestricted; non-empty = required permission id.
+    required_permission_override = Column(String(200), nullable=True)
     declared_defaults = Column(Text, nullable=True)
     discovered_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

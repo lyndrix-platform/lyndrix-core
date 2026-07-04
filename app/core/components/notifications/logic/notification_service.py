@@ -184,6 +184,10 @@ class NotificationService:
             "message": message,
             "type": type_,
             "user_id": user_id,
+            # Routing v2: audience gate (permission id or None) + mute key.
+            "required_permission": payload.get("required_permission"),
+            "source_plugin_id": payload.get("source_plugin_id"),
+            "endpoint_name": payload.get("endpoint_name"),
         }
 
         if do_persist:
@@ -235,12 +239,38 @@ class NotificationService:
                 },
             )
 
-    def broadcast_toast(self, message: str, type_: str) -> None:
+    @staticmethod
+    def _client_allows(required_permission: str) -> bool:
+        """Inside a `with client:` block: does THIS session hold the permission?
+
+        Mirrors the API convention (superadmin flag bypasses, otherwise the
+        access_service resolution keyed by the session username).
+        """
+        try:
+            from nicegui import app as _app
+
+            roles = list(_app.storage.user.get("roles", []) or [])
+            if "superadmin" in roles:
+                return True
+            username = str(_app.storage.user.get("username", "") or "")
+            if not username:
+                return False
+            from core.components.auth.logic import access_service
+
+            return access_service.username_has_permission(username, required_permission)
+        except Exception:
+            return False
+
+    def broadcast_toast(
+        self, message: str, type_: str, *, required_permission: str | None = None
+    ) -> None:
         toast_type = type_ if type_ in ["positive", "negative", "warning", "info"] else "info"
         for client in list(Client.instances.values()):
             try:
                 if client.has_socket_connection:
                     with client:
+                        if required_permission and not self._client_allows(required_permission):
+                            continue
                         ui.notify(
                             message,
                             type=toast_type,
@@ -287,8 +317,21 @@ class NotificationService:
     # Per-user read views
     # ------------------------------------------------------------------
 
-    def visible_for(self, user_id: str) -> list[dict[str, Any]]:
+    def visible_for(
+        self,
+        user_id: str,
+        *,
+        permission_check=None,
+        muted_endpoints: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Notifications visible to *user_id*: own + broadcast, minus dismissed.
+
+        Routing v2 layers two ORTHOGONAL predicates over the existing
+        targeting check (broadcast semantics unchanged):
+        - audience gate: entries carrying ``required_permission`` are dropped
+          unless ``permission_check(perm)`` passes (pass ``identity.allows``);
+        - personal mute: entries whose ``source_plugin_id/endpoint_name`` key
+          is in ``muted_endpoints`` are dropped (display preference).
 
         Each returned dict carries a per-user ``read`` flag. ``history`` is
         newest-first, so the result keeps that order.
@@ -301,6 +344,12 @@ class NotificationService:
                 continue
             if n["id"] in dismissed:
                 continue
+            req = n.get("required_permission")
+            if req and not (permission_check and permission_check(req)):
+                continue
+            if muted_endpoints and n.get("source_plugin_id") and n.get("endpoint_name"):
+                if f"{n['source_plugin_id']}/{n['endpoint_name']}" in muted_endpoints:
+                    continue
             item = dict(n)
             item["read"] = n["id"] in read
             result.append(item)

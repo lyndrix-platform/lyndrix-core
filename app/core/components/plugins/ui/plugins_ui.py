@@ -3,7 +3,7 @@ import os
 from nicegui import ui
 
 from core.i18n import t
-from core.logger import get_logger, log_capture_buffer
+from core.logger import get_logger, log_ring
 from ui.theme import UIStyles
 
 from ..logic.manager import module_manager
@@ -172,7 +172,7 @@ def render_plugins_page():
 
             log_container = ui.scroll_area().classes('w-full flex-grow bg-black/50 rounded-xl p-4 font-mono text-xs')
             target_logger = f"Plugin:{manifest.name}" if manifest.type == 'PLUGIN' else f"Core:{manifest.name}"
-            found_logs = [entry for entry in log_capture_buffer if entry[0] == target_logger]
+            found_logs = log_ring.snapshot(source=target_logger, limit=500)
 
             with log_container:
                 if not found_logs:

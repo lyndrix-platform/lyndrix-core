@@ -29,6 +29,11 @@ class PluginOut(BaseModel):
     settings_schema: List[dict] = []
     settings_ui_route: Optional[str] = None
     i18n_namespace: Optional[str] = None
+    # WS-2.B: in-memory update-check result (no network cost per request).
+    latest_version: Optional[str] = None
+    update_available: bool = False
+    # Precomputed logger name for GET /api/logs (convention stays server-side).
+    log_source: str = ""
 
 
 class PluginSettingsUpdate(BaseModel):
@@ -68,6 +73,9 @@ def _custom_repo_service():
 
 def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
     manifest = entry["manifest"]
+    latest, update_available = _plugin_service().latest_version_info(
+        module_id, manifest.version
+    )
     return PluginOut(
         id=module_id,
         name=manifest.name,
@@ -85,6 +93,9 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         settings_schema=[f.model_dump() for f in getattr(manifest, "settings_schema", [])],
         settings_ui_route=getattr(manifest, "settings_ui_route", None),
         i18n_namespace=getattr(manifest, "i18n_namespace", None),
+        latest_version=latest,
+        update_available=update_available,
+        log_source=f"{'Core' if manifest.type == 'CORE' else 'Plugin'}:{manifest.name}",
     )
 
 
