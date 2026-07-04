@@ -189,7 +189,9 @@
     "revoke_key": "Schlüssel widerrufen",
     "key_label_placeholder": "Bezeichnung (optional)",
     "key_default_label": "Manuell erstellt",
-    "create_key": "Erstellen"
+    "create_key": "Erstellen",
+    "mutes_title": "Stummgeschaltete Benachrichtigungen",
+    "mutes_hint": "Ausgewählte Benachrichtigungs-Kategorien aus dem eigenen Feed ausblenden. Reine Anzeige-Präferenz."
   },
   "info_section": {
     "versions_title": "Versionen",
@@ -220,9 +222,18 @@
     "assign_label": "Provider zuweisen",
     "active_label": "aktiv",
     "assign_failed": "Zuweisung fehlgeschlagen",
-    "no_endpoints": "Keine Endpunkte registriert.",
+    "no_endpoints": "Keine Benachrichtigungs-Endpoints deklariert.",
     "no_config": "Keine Konfiguration.",
-    "saved": "Gespeichert."
+    "saved": "Gespeichert.",
+    "providers_title": "Provider",
+    "providers_hint": "Jeden registrierten Zustell-Provider konfigurieren. Zugangsdaten liegen im Vault.",
+    "no_providers": "Keine Provider registriert.",
+    "routing_title": "Endpoint-Routing",
+    "routing_hint": "Pro Benachrichtigungs-Endpoint: Aktiv-Status, welche Provider ihn erhalten (mehrere = Fan-out) und wer ihn intern sieht.",
+    "active": "Aktiv",
+    "providers_label": "Zustellen an:",
+    "visibility_label": "Sichtbar für:",
+    "visibility_all": "Alle"
   },
   "users_page": {
     "page_title": "Benutzerverwaltung",

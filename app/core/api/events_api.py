@@ -70,6 +70,22 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + padding)
 
 
+def _connection_allows(username: str | None, permission: str) -> bool:
+    """Audience gate for the SSE stream (superadmin flag included)."""
+    if not username:
+        return False
+    try:
+        from core.components.auth.logic import access_service
+        from core.components.auth.logic.user_service import user_service
+
+        user = user_service.get_by_username(username)
+        if user is not None and "superadmin" in (user.roles or []):
+            return True
+        return access_service.username_has_permission(username, permission)
+    except Exception:
+        return False
+
+
 def _mint_stream_ticket(username: str) -> str:
     payload = _b64url_encode(
         json.dumps({"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}).encode("utf-8")
@@ -191,8 +207,16 @@ async def sse_stream(
                     target = payload.get("user_id")
                     if target is not None and target != username:
                         continue
-                    if "user_id" in payload:
-                        sanitized = {k: v for k, v in payload.items() if k != "user_id"}
+                    # Routing v2 audience gate: permission-restricted entries
+                    # only reach connections whose user holds the permission
+                    # (resolved per message via the cached access_service —
+                    # 5s TTL keeps this cheap; notification volume is low).
+                    req = payload.get("required_permission")
+                    if req and not _connection_allows(username, req):
+                        continue
+                    internal = {"user_id", "required_permission", "source_plugin_id", "endpoint_name"}
+                    if any(k in payload for k in internal):
+                        sanitized = {k: v for k, v in payload.items() if k not in internal}
                         msg = json.dumps({"topic": topic, "payload": sanitized})
 
                 yield f"data: {msg}\n\n"

@@ -29,21 +29,25 @@ manifest = ModuleManifest(
             name="plugin_installed",
             description="A plugin was installed or upgraded successfully.",
             internal_toast=False, internal_persist=True, external_default=False,
+            required_permission="feature:plugins.manage",
         ),
         NotificationEndpoint(
             name="plugin_install_failed",
             description="A plugin install or upgrade failed.",
             internal_toast=False, internal_persist=True, external_default=True,
+            required_permission="feature:plugins.manage",
         ),
         NotificationEndpoint(
             name="plugin_rolled_back",
             description="A plugin upgrade was reverted to the previous version.",
             internal_toast=False, internal_persist=True, external_default=True,
+            required_permission="feature:plugins.manage",
         ),
         NotificationEndpoint(
             name="plugin_update_available",
             description="A newer release tag exists for an installed plugin.",
             internal_toast=False, internal_persist=True, external_default=False,
+            required_permission="feature:plugins.manage",
         ),
     ],
 )

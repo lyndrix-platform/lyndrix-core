@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from core.api.security import ApiIdentity, require_permission
+from core.api.security import ApiIdentity, require_api_auth, require_permission
 from core.components.messaging.logic.adapter import GatewayCapability
 from core.components.messaging.logic.gateway import messaging_gateway
 
@@ -16,7 +16,9 @@ from .logic.precedence import (
     GLOBAL_DEFAULT_PROVIDER_ENV,
     env_active_var,
     env_is_locked_active,
+    env_is_locked_permission,
     env_is_locked_provider,
+    env_permission_var,
     env_provider_var,
     resolve_endpoint_state,
 )
@@ -45,14 +47,18 @@ def _serialize_endpoint(plugin_id: str, endpoint) -> dict[str, Any]:
         "endpoint_name": endpoint.name,
         "description": endpoint.description,
         "active": state.active,
-        "provider": state.provider,
+        "providers": state.providers,
         "active_source": state.active_source,
         "provider_source": state.provider_source,
+        "required_permission": state.required_permission,
+        "required_permission_source": state.required_permission_source,
         "active_is_env_locked": env_is_locked_active(plugin_id, endpoint.name),
         "provider_is_env_locked": env_is_locked_provider(plugin_id, endpoint.name),
+        "permission_is_env_locked": env_is_locked_permission(plugin_id, endpoint.name),
         "declared_defaults": endpoint.model_dump(),
         "env_var_active": env_active_var(plugin_id, endpoint.name),
         "env_var_provider": env_provider_var(plugin_id, endpoint.name),
+        "env_var_permission": env_permission_var(plugin_id, endpoint.name),
     }
 
 
@@ -201,7 +207,11 @@ async def patch_provider_config(
 
 class _PatchBody(BaseModel):
     active: bool | None = None
-    provider: str | None | Literal["__unset__"] = "__unset__"
+    # Routing v2: list of provider ids (fan-out). "__unset__" = untouched.
+    providers: list[str] | None | Literal["__unset__"] = "__unset__"
+    # Tri-state: "__unset__" untouched; None reset-to-manifest-default;
+    # "" explicitly unrestricted; value = required permission id.
+    required_permission: str | None | Literal["__unset__"] = "__unset__"
 
 
 @notification_router_api.patch(
@@ -220,25 +230,56 @@ async def patch_endpoint(
     locked: dict[str, str] = {}
     if body.active is not None and env_is_locked_active(plugin_id, endpoint_name):
         locked["active"] = env_active_var(plugin_id, endpoint_name)
-    if body.provider != "__unset__" and env_is_locked_provider(plugin_id, endpoint_name):
+    if body.providers != "__unset__" and env_is_locked_provider(plugin_id, endpoint_name):
         locked["provider"] = env_provider_var(plugin_id, endpoint_name)
+    if body.required_permission != "__unset__" and env_is_locked_permission(plugin_id, endpoint_name):
+        locked["permission"] = env_permission_var(plugin_id, endpoint_name)
     if locked:
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": locked},
         )
 
-    provider_arg: Any
-    if body.provider == "__unset__":
-        from .logic.router_service import _UNSET as _UNSET_SENTINEL  # noqa: WPS437
-        provider_arg = _UNSET_SENTINEL
-    else:
-        provider_arg = body.provider
+    from .logic.router_service import _UNSET as _UNSET_SENTINEL  # noqa: WPS437
+
+    providers_arg: Any = _UNSET_SENTINEL if body.providers == "__unset__" else body.providers
+    permission_arg: Any = (
+        _UNSET_SENTINEL if body.required_permission == "__unset__" else body.required_permission
+    )
 
     state = await notification_router.update_binding(
         plugin_id,
         endpoint_name,
         active=body.active,
-        provider=provider_arg,
+        providers=providers_arg,
+        required_permission=permission_arg,
     )
     return {"status": "ok", "state": state.model_dump()}
+
+
+@notification_router_api.get(
+    "/subscribable",
+    summary="Endpoints the caller may personally mute",
+)
+async def list_subscribable(identity: ApiIdentity = Depends(require_api_auth)):
+    """Low-privilege catalog for the personal mute list (no api:read needed).
+
+    Filtered to active endpoints the caller is allowed to SEE — a user is never
+    shown a mute toggle for a category the audience gate hides from them anyway.
+    """
+    items = []
+    for pid, ep in endpoint_registry.iter_all():
+        state = resolve_endpoint_state(pid, ep.name)
+        if not state.active:
+            continue
+        if state.required_permission and not identity.allows(state.required_permission):
+            continue
+        items.append({
+            "plugin_id": pid,
+            "plugin_name": _plugin_name(pid),
+            "endpoint_name": ep.name,
+            "description": ep.description,
+            "key": f"{pid}/{ep.name}",
+        })
+    items.sort(key=lambda i: (i["plugin_name"].lower(), i["endpoint_name"]))
+    return {"status": "ok", "endpoints": items}

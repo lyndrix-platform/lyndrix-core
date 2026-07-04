@@ -189,7 +189,9 @@
     "revoke_key": "Revoke key",
     "key_label_placeholder": "Label (optional)",
     "key_default_label": "Manually created",
-    "create_key": "Create"
+    "create_key": "Create",
+    "mutes_title": "Muted notifications",
+    "mutes_hint": "Hide selected notification categories from your feed. This is a personal display preference."
   },
   "info_section": {
     "versions_title": "Versions",
@@ -220,9 +222,18 @@
     "assign_label": "Assign provider",
     "active_label": "active",
     "assign_failed": "Assignment failed",
-    "no_endpoints": "No endpoints registered.",
+    "no_endpoints": "No notification endpoints declared.",
     "no_config": "No configuration.",
-    "saved": "Saved."
+    "saved": "Saved.",
+    "providers_title": "Providers",
+    "providers_hint": "Configure each registered delivery provider. Credentials are stored in Vault.",
+    "no_providers": "No providers registered.",
+    "routing_title": "Endpoint routing",
+    "routing_hint": "Per notification endpoint: active state, which providers receive it (multiple = fan-out), and who may see it internally.",
+    "active": "Active",
+    "providers_label": "Deliver to:",
+    "visibility_label": "Visible to:",
+    "visibility_all": "Everyone"
   },
   "users_page": {
     "page_title": "User Management",

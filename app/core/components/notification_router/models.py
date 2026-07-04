@@ -43,6 +43,10 @@ class ResolvedState(BaseModel):
     """Effective state of an endpoint after applying env > DB > default precedence."""
 
     active: bool
-    provider: str | None = None
+    # Routing v2: list of external provider ids (fan-out). [] = internal only.
+    providers: list[str] = Field(default_factory=list)
     active_source: Literal["env", "db", "default"] = "default"
     provider_source: Literal["env", "db", "default", "global_default", "none"] = "none"
+    # Visibility gate for the INTERNAL feed/toast/SSE (None = everyone).
+    required_permission: str | None = None
+    required_permission_source: Literal["env", "db", "default", "none"] = "none"
