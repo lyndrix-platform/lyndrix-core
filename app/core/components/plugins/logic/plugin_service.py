@@ -77,6 +77,11 @@ class PluginService:
         # Tracks the last known remote HEAD commit to avoid unnecessary git pulls.
         self._last_known_head: str | None = None
         self._watcher_task: asyncio.Task | None = None
+        # Background update-checker state: module_id -> newest release tag
+        # seen. Deliberately in-memory (cheap to recompute shortly after every
+        # boot; same convention as _tag_cache) — no PluginState column.
+        self._latest_known: dict[str, str] = {}
+        self._update_checker_task: asyncio.Task | None = None
 
     def _extract_repo_info(self, github_url: str):
         parts = github_url.rstrip("/").split("/")
@@ -326,6 +331,108 @@ class PluginService:
         """Trigger the initial git sync once all plugins (including git-manager) are active."""
         log.info("COLLECTION: Boot complete — requesting initial collection sync.")
         self._request_git_sync()
+        # One immediate update check so the badge appears without waiting a
+        # full interval (delayed a little to let the collection sync land).
+        bus.create_tracked_task(self._initial_update_check(), name="plugin_update_check_initial")
+
+    # ------------------------------------------------------------------
+    # Background update checker (WS-2.B)
+    # ------------------------------------------------------------------
+
+    def start_update_checker(self):
+        """Start the periodic latest-version check. Call once from setup()."""
+        if self._update_checker_task and not self._update_checker_task.done():
+            return
+        self._update_checker_task = bus.create_tracked_task(
+            self._update_checker_loop(), name="plugin_update_checker"
+        )
+        log.info("UPDATES: Background update checker started.")
+
+    async def _initial_update_check(self):
+        await asyncio.sleep(30)
+        await self._check_all_updates()
+
+    async def _update_checker_loop(self):
+        while True:
+            try:
+                from config import settings
+
+                interval = max(300, int(getattr(settings, "LYNDRIX_PLUGIN_UPDATE_CHECK_INTERVAL_S", 21600)))
+            except Exception:
+                interval = 21600
+            await asyncio.sleep(interval)
+            try:
+                await self._check_all_updates()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(f"UPDATES: Check iteration failed: {exc}")
+
+    async def _check_all_updates(self):
+        """Compare every installed plugin against its newest release tag.
+
+        Reuses get_plugin_versions (900s tag cache) — at most one tags-API
+        call per repo per cache window. Transitions to 'newer available' emit
+        plugin:update_available (SSE → React badge) and a persisted bell entry.
+        """
+        from packaging.version import InvalidVersion, Version
+
+        from .manager import module_manager
+
+        for module_id, entry in list(module_manager.registry.items()):
+            manifest = entry.get("manifest")
+            if manifest is None or getattr(manifest, "type", "PLUGIN") != "PLUGIN":
+                continue
+            repo_url = getattr(manifest, "repo_url", None)
+            if not repo_url:
+                continue
+            try:
+                versions = await self.get_plugin_versions(repo_url)
+            except Exception as exc:
+                log.debug(f"UPDATES: version fetch failed for {module_id}: {exc}")
+                continue
+            parsed: list[tuple] = []
+            for tag in versions or []:
+                if tag == "latest":
+                    continue
+                try:
+                    parsed.append((Version(str(tag).lstrip("v")), str(tag)))
+                except InvalidVersion:
+                    continue
+            if not parsed:
+                continue
+            latest_v, latest_tag = max(parsed, key=lambda p: p[0])
+            previous = self._latest_known.get(module_id)
+            self._latest_known[module_id] = latest_tag
+            try:
+                current_v = Version(str(manifest.version).lstrip("v"))
+            except InvalidVersion:
+                continue
+            if latest_v > current_v and previous != latest_tag:
+                log.info(
+                    f"UPDATES: {module_id} has an update: {manifest.version} -> {latest_tag}"
+                )
+                bus.emit("plugin:update_available", {
+                    "plugin_id": module_id,
+                    "current_version": str(manifest.version),
+                    "latest_version": latest_tag,
+                })
+
+    def latest_version_info(self, module_id: str, current_version: str) -> tuple[str | None, bool]:
+        """(latest_tag, update_available) from the in-memory check — no I/O.
+
+        Defensive on non-semver versions: any parse failure means
+        (None, False), never an exception on the /api/plugins hot path.
+        """
+        from packaging.version import InvalidVersion, Version
+
+        latest = self._latest_known.get(module_id)
+        if not latest:
+            return None, False
+        try:
+            return latest, Version(latest.lstrip("v")) > Version(str(current_version).lstrip("v"))
+        except InvalidVersion:
+            return latest, False
 
     def on_git_status_update(self, payload: dict):
         """Called when git-manager emits git:status_update.

@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import re
+import threading
 from logging.handlers import RotatingFileHandler
 from collections import deque
 
@@ -18,9 +19,57 @@ LOG_LEVEL = logging.DEBUG if IS_DEBUG else logging.INFO
 FORMAT_STR = "%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# In-memory store for the UI log viewer (the last 1000 entries).
-# Queried by the UI to filter logs per plugin.
-log_capture_buffer = deque(maxlen=1000)
+_LEVEL_RANK = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+
+
+class LogRingBuffer:
+    """Thread-safe in-memory log store with PER-SOURCE rings.
+
+    The old single global deque(1000) was shared by every logger in the
+    process — Core:EventBus alone (one INFO line per bus emit) evicted all
+    Plugin:*/Core:* entries within seconds, and iterating the live deque from
+    the UI raced concurrent appends from executor threads. Each source now
+    keeps its own bounded ring (sources = logger names, a small stable set),
+    plus a global ring for the unfiltered view; reads return copies.
+    """
+
+    def __init__(self, per_source_maxlen: int = 300, global_maxlen: int = 2000):
+        self._lock = threading.Lock()
+        self._by_source: dict[str, deque] = {}
+        self._all: deque = deque(maxlen=global_maxlen)
+        self._per_source_maxlen = per_source_maxlen
+
+    def append(self, name: str, level: str, message: str) -> None:
+        entry = (name, level, message)
+        with self._lock:
+            self._all.append(entry)
+            bucket = self._by_source.get(name)
+            if bucket is None:
+                bucket = deque(maxlen=self._per_source_maxlen)
+                self._by_source[name] = bucket
+            bucket.append(entry)
+
+    def snapshot(self, source: str | None = None, limit: int = 200, min_level: str | None = None):
+        """Copy of the newest entries (optionally per source / min severity)."""
+        with self._lock:
+            entries = list(self._by_source.get(source, ())) if source else list(self._all)
+        if min_level:
+            rank = _LEVEL_RANK.get(min_level.upper(), 0)
+            entries = [e for e in entries if _LEVEL_RANK.get(e[1], 0) >= rank]
+        return entries[-max(1, limit):]
+
+    def sources(self) -> list[str]:
+        with self._lock:
+            return sorted(self._by_source.keys())
+
+
+# Singleton ring queried by the NiceGUI log dialog and GET /api/logs.
+log_ring = LogRingBuffer()
+
+# Backwards-compat alias: legacy callers iterated this global deque directly.
+# It now points at the ring's global buffer — treat as read-only and prefer
+# log_ring.snapshot() (copy-on-read, race-free).
+log_capture_buffer = log_ring._all
 
 # Keys we NEVER want to see in plaintext in logs or UI.
 SENSITIVE_KEYS = {'token', 'password', 'secret', 'secret_value', 'private_key', 'key', 'auth'}
@@ -65,10 +114,10 @@ class EnterpriseFormatter(logging.Formatter):
         return super().format(record)
 
 class RingBufferHandler(logging.Handler):
-    """Keeps logs in RAM for the UI log viewer."""
+    """Keeps logs in RAM for the UI log viewer / GET /api/logs."""
     def emit(self, record):
         log_entry = self.format(record)
-        log_capture_buffer.append((record.name, record.levelname, log_entry))
+        log_ring.append(record.name, record.levelname, log_entry)
 
 def setup_logging():
     # Resolve the log directory from settings (config hierarchy) and create it

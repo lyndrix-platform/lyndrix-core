@@ -345,7 +345,10 @@
     "health_state_ok": "Healthy",
     "health_state_degraded": "Degraded",
     "health_state_error": "Unhealthy",
-    "health_state_unknown": "Unknown"
+    "health_state_unknown": "Unknown",
+    "logs_btn": "View logs",
+    "update_available": "Update: {{version}}",
+    "update_available_tip": "A newer release ({{version}}) is available — use the upgrade action."
   },
   "dashboard": {
     "greeting_morning": "Good morning",
@@ -623,5 +626,17 @@
     "sso_failed": "SSO sign-in failed.",
     "sso_completing": "Completing sign-in…",
     "back_to_login": "Back to login"
+  },
+  "logs": {
+    "title": "Logs",
+    "pause": "Pause",
+    "resume": "Live",
+    "empty": "No log lines captured for this source yet."
+  },
+  "plugins_config": {
+    "picker_title": "Desired plugins",
+    "picker_hint": "Pick from the plugin collection which plugins the core reconciles on boot — this edits the same list as the raw field below.",
+    "picker_saved": "Saved.",
+    "picker_locked": "Locked by environment variable."
   }
 }

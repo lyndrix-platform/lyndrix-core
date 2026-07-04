@@ -15,6 +15,7 @@ manifest = ModuleManifest(
         "subscribe": [
             "git:status_update", "system:boot_complete",
             "plugin:installed", "plugin:install_failed", "plugin:rolled_back",
+            "plugin:update_available",
         ],
         "emit": ["git:sync", "notification:routed"],
     },
@@ -38,6 +39,11 @@ manifest = ModuleManifest(
             name="plugin_rolled_back",
             description="A plugin upgrade was reverted to the previous version.",
             internal_toast=False, internal_persist=True, external_default=True,
+        ),
+        NotificationEndpoint(
+            name="plugin_update_available",
+            description="A newer release tag exists for an installed plugin.",
+            internal_toast=False, internal_persist=True, external_default=False,
         ),
     ],
 )
@@ -86,9 +92,24 @@ def _register_lifecycle_notifications(ctx):
             severity="warning",
         )
 
+    def _on_update_available(payload):
+        pid = (payload or {}).get("plugin_id", "plugin")
+        latest = (payload or {}).get("latest_version", "?")
+        current = (payload or {}).get("current_version", "?")
+        ctx.notify(
+            "plugin_update_available",
+            payload=payload or {},
+            # Stable id per plugin: a newer tag replaces the old bell entry.
+            notification_id=f"plugin_update_{pid}",
+            title="Plugin update available",
+            body=f"'{pid}': {current} → {latest}",
+            severity="info",
+        )
+
     ctx.subscribe("plugin:installed")(_on_installed)
     ctx.subscribe("plugin:install_failed")(_on_failed)
     ctx.subscribe("plugin:rolled_back")(_on_rolled_back)
+    ctx.subscribe("plugin:update_available")(_on_update_available)
 
 
 def setup(ctx):
@@ -100,6 +121,7 @@ def setup(ctx):
     # Delay the initial sync until all plugins (incl. git-manager) are active.
     ctx.subscribe("system:boot_complete")(plugin_service.on_boot_complete)
     plugin_service.start_collection_watcher()
+    plugin_service.start_update_checker()
 
     # Durable, gateway-routed lifecycle notifications.
     _register_lifecycle_notifications(ctx)

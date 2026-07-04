@@ -345,7 +345,10 @@
     "health_state_ok": "Fehlerfrei",
     "health_state_degraded": "Eingeschränkt",
     "health_state_error": "Fehler",
-    "health_state_unknown": "Unbekannt"
+    "health_state_unknown": "Unbekannt",
+    "logs_btn": "Logs ansehen",
+    "update_available": "Update: {{version}}",
+    "update_available_tip": "Eine neuere Version ({{version}}) ist verfügbar — über die Upgrade-Aktion aktualisieren."
   },
   "dashboard": {
     "greeting_morning": "Guten Morgen",
@@ -623,5 +626,17 @@
     "sso_failed": "SSO-Anmeldung fehlgeschlagen.",
     "sso_completing": "Anmeldung wird abgeschlossen…",
     "back_to_login": "Zurück zum Login"
+  },
+  "logs": {
+    "title": "Logs",
+    "pause": "Pause",
+    "resume": "Live",
+    "empty": "Noch keine Logzeilen für diese Quelle erfasst."
+  },
+  "plugins_config": {
+    "picker_title": "Gewünschte Plugins",
+    "picker_hint": "Aus der Plugin-Collection wählen, welche Plugins der Core beim Boot abgleicht — bearbeitet dieselbe Liste wie das Rohfeld darunter.",
+    "picker_saved": "Gespeichert.",
+    "picker_locked": "Durch Umgebungsvariable gesperrt."
   }
 }

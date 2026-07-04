@@ -42,6 +42,7 @@ from core.api import (
 from core.api.permissions_api import permissions_router
 from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
+from core.api.logs_api import logs_router
 from core.api.i18n_api import i18n_router
 from core.components.auth.api.users_api import users_router
 from core.components.plugins.api.plugins_api import plugins_router
@@ -371,6 +372,9 @@ app.include_router(me_router)
 
 # Server-Sent Events stream for real-time updates.
 app.include_router(events_router)
+
+# Log tail API (in-memory ring buffer, React LogModal)
+app.include_router(logs_router)
 
 # User and API key management.
 app.include_router(users_router)
