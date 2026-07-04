@@ -125,19 +125,17 @@ def _describe_client(request: Request) -> str:
 @auth_router.post("/login", response_model=LoginResponse, summary="Obtain a session token")
 async def login(payload: LoginRequest, request: Request):
     """
-    Authenticates against the local user database (Argon2). On success creates a
-    named UserApiKey row and returns the raw key once; the React frontend stores it
-    as a bearer token. Credential verification runs off the event loop (Argon2 is
-    CPU-bound) so concurrent requests are not stalled.
+    Authenticates through the FULL provider chain (local, LDAP, … in
+    LYNDRIX_AUTH_PROVIDERS order) including Identity-2.0 linking — external
+    accounts resolve to their linked local profile. On success creates a named
+    UserApiKey row and returns the raw key once; the React frontend stores it
+    as a bearer token. Providers run credential checks off the event loop.
     """
-    from core.components.auth.logic.auth_service import auth_service
+    from core.components.auth.logic.providers.registry import provider_registry
     from core.components.auth.logic.api_key_service import api_key_service
 
-    # Argon2 verify + the sync DB session are blocking; keep them off the event loop.
-    user = await asyncio.to_thread(
-        auth_service.authenticate_user, payload.username, payload.password
-    )
-    if user is None:
+    result = await provider_registry.authenticate(payload.username, payload.password)
+    if result is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -151,15 +149,115 @@ async def login(payload: LoginRequest, request: Request):
     label = f"web-session · {_describe_client(request)} · {stamp} UTC"
     # The key insert is a sync DB write — keep it off the event loop.
     raw_token, _ = await asyncio.to_thread(
-        api_key_service.create, str(user.username), label=label, scopes=[]
+        api_key_service.create, result.username, label=label, scopes=[]
     )
 
-    log.info(f"AUTH API: Login succeeded for '{user.username}'.")
+    log.info(f"AUTH API: Login succeeded for '{result.username}' (provider={result.provider}).")
     return LoginResponse(
         token=raw_token,
-        username=str(user.username),
-        roles=list(user.roles or []),
-        display_name=str(user.full_name or "") or None,
+        username=result.username,
+        roles=list(result.roles or []),
+        display_name=str(result.full_name or "") or None,
+    )
+
+
+# ==========================================
+# Provider discovery + SSO flow for the React SPA (Identity 2.0)
+# ==========================================
+
+# One-time SSO exchange codes: the OIDC callback mints a session token
+# server-side and hands the SPA a short-lived single-use code instead of
+# putting the token itself in a redirect URL (referrer/history leak).
+_SSO_EXCHANGE_TTL = 60.0
+_sso_exchange: Dict[str, dict] = {}
+
+
+def create_sso_exchange_code(payload: dict) -> str:
+    """Store a login payload under a fresh one-time code (60s TTL)."""
+    import secrets as _secrets
+    import time as _time
+
+    # opportunistic cleanup
+    now = _time.monotonic()
+    for k in [k for k, v in _sso_exchange.items() if v["expires"] < now]:
+        _sso_exchange.pop(k, None)
+
+    code = _secrets.token_urlsafe(32)
+    _sso_exchange[code] = {"payload": payload, "expires": now + _SSO_EXCHANGE_TTL}
+    return code
+
+
+@auth_router.get("/providers", summary="Login-page provider discovery")
+async def list_auth_providers():
+    """UNAUTHENTICATED: metadata the login page needs BEFORE any login.
+
+    Only provider ids/kinds/labels — no secrets, no config. ``credentials``
+    providers share the username/password form; ``redirect`` providers render
+    an SSO button pointing at /api/auth/oidc/start.
+    """
+    from core.components.auth.logic.providers.registry import provider_registry
+
+    providers = []
+    for p in provider_registry.get_form_providers():
+        providers.append({"id": p.provider_id, "kind": "credentials", "label": p.display_name})
+    for p in provider_registry.get_sso_providers():
+        providers.append({"id": p.provider_id, "kind": "redirect", "label": p.display_name})
+    if not providers:
+        # Registry not initialized yet (early boot) — the local form always works.
+        providers = [{"id": "local", "kind": "credentials", "label": "Local"}]
+    return {"status": "ok", "providers": providers}
+
+
+@auth_router.get("/oidc/start", summary="Begin the OIDC flow for the React SPA")
+async def oidc_start_react(redirect_uri: str, next: str = "/"):
+    """Redirect the browser to the IdP (PKCE + state bound to this flow).
+
+    ``redirect_uri`` is the SPA's absolute /auth/callback URL; its origin MUST
+    be in CORS_ALLOWED_ORIGINS (open-redirect protection). ``next`` is the
+    in-app path to land on after the exchange.
+    """
+    from urllib.parse import urlparse
+    from fastapi.responses import RedirectResponse
+    from config import settings
+    from core.components.auth.logic.providers.registry import provider_registry
+
+    parsed = urlparse(redirect_uri)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if origin not in set(settings.CORS_ALLOWED_ORIGINS):
+        raise HTTPException(status_code=400, detail="redirect_uri origin not allowed")
+    if not next.startswith("/"):
+        next = "/"
+
+    provider = provider_registry.get("oidc")
+    if provider is None or not provider.is_configured():
+        raise HTTPException(status_code=404, detail="No OIDC provider configured")
+
+    url = await provider.build_login_url(
+        flow="react", redirect=f"{redirect_uri}|{next}"
+    )
+    if not url:
+        raise HTTPException(status_code=503, detail="OIDC provider unavailable")
+    return RedirectResponse(url, status_code=302)
+
+
+class TokenExchangeRequest(BaseModel):
+    code: str
+
+
+@auth_router.post("/token-exchange", response_model=LoginResponse, summary="Redeem a one-time SSO code")
+async def sso_token_exchange(payload: TokenExchangeRequest):
+    """Swap the single-use code from the SSO callback for the session token."""
+    import time as _time
+
+    entry = _sso_exchange.pop(payload.code, None)
+    if entry is None or entry["expires"] < _time.monotonic():
+        raise HTTPException(status_code=401, detail="Invalid or expired exchange code")
+    data = entry["payload"]
+    return LoginResponse(
+        token=data["token"],
+        username=data["username"],
+        roles=list(data.get("roles") or []),
+        display_name=data.get("display_name"),
     )
 
 
@@ -319,6 +417,67 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
         "extra_permissions": list(user.extra_permissions or []),
         "method": identity.method,
         "is_system": identity.is_system,
+    }
+
+
+@me_router.get("/me/access", summary="Effective access view for the caller")
+def my_access(identity: ApiIdentity = Depends(require_api_auth)):
+    """Server-derived effective-permissions view (Identity & Permissions 2.0).
+
+    The React shell consumes this to gate the sidebar, routes and dashboard
+    sections — it never re-implements permission matching client-side. The
+    ``plugins`` map is derived from the registry + loaded manifests:
+    ``visible``/``can_read``/``can_write`` honour the per-plugin fallback
+    (global api:read/write) and ``routes`` lists the react_routes the caller
+    may open. Sync ``def`` (threadpool): blocking DB reads.
+    """
+    from core.components.auth.logic import access_service
+    from core.components.auth.logic.user_service import user_service
+
+    is_superadmin = identity.is_system or ("superadmin" in identity.roles)
+    effective = access_service.get_effective_permissions(identity.username)
+
+    user = user_service.get_by_username(identity.username)
+    groups = list(getattr(user, "groups", None) or []) if user else []
+
+    def _allowed(perm: str) -> bool:
+        return is_superadmin or access_service.has_permission(effective, perm)
+
+    plugins: Dict[str, dict] = {}
+    try:
+        from core.components.plugins.logic.manager import module_manager
+
+        for manifest in module_manager.get_manifests():
+            if getattr(manifest, "type", "PLUGIN") != "PLUGIN":
+                continue
+            pid = manifest.id
+            visible = _allowed(f"plugin:{pid}")
+            routes = []
+            for rr in getattr(manifest, "react_routes", None) or []:
+                path = (rr or {}).get("path")
+                if not path:
+                    continue
+                # plugin:<id> is the umbrella grant (all routes); a single
+                # plugin:<id>:route:<path> grant opens one route without
+                # whole-plugin visibility.
+                if is_superadmin or visible or _allowed(f"plugin:{pid}:route:{path}"):
+                    routes.append(path)
+            plugins[pid] = {
+                "visible": visible,
+                "can_read": _allowed(f"plugin:{pid}:api:read"),
+                "can_write": _allowed(f"plugin:{pid}:api:write"),
+                "routes": routes,
+            }
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"AUTH API: /me/access plugin derivation failed: {exc}")
+
+    return {
+        "status": "ok",
+        "username": identity.username,
+        "groups": groups,
+        "is_superadmin": is_superadmin,
+        "permissions": sorted(effective),
+        "plugins": plugins,
     }
 
 

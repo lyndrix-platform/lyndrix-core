@@ -100,6 +100,10 @@ class GroupService:
             s.commit()
             s.refresh(grp)
             log.info(f"GROUP: Updated '{grp.name}' (id={grp.id})")
+            # Group permissions feed every member's effective set — drop the
+            # short-TTL authz cache so edits apply on the next request.
+            from . import access_service
+            access_service.invalidate_cache()
             return grp
 
     def delete(self, group_id: int) -> bool:
@@ -145,8 +149,11 @@ class GroupService:
 
     def get_permissions_for_roles(self, roles: List[str]) -> List[str]:
         """
-        Collect all permissions granted by the given role names
-        (roles must match group names 1:1).
+        Collect all permissions granted by the given GROUP names.
+
+        Identity 2.0 note: despite the legacy parameter name, callers must pass
+        group names (``User.groups``) — ``User.roles`` are system flags and are
+        never resolved here. Prefer ``access_service`` for authorization.
         """
         perms: set = set()
         with db_instance.SessionLocal() as s:
@@ -216,6 +223,8 @@ class GroupService:
                 user.groups = sorted(groups)
                 s.commit()
                 log.info(f"GROUP: Added '{username}' to group '{grp.name}'.")
+                from . import access_service
+                access_service.invalidate_cache(username)
         return True
 
     def remove_user_from_group(self, group_id: int, username: str) -> bool:
@@ -232,6 +241,8 @@ class GroupService:
                 user.groups = groups
                 s.commit()
                 log.info(f"GROUP: Removed '{username}' from group '{grp.name}'.")
+                from . import access_service
+                access_service.invalidate_cache(username)
         return True
 
     def resolve_ldap_groups(self, ldap_group_dns: List[str]) -> List[str]:

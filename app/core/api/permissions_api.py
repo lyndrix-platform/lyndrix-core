@@ -47,6 +47,7 @@ class PermissionDefOut(BaseModel):
     category: str
     description: str = ""
     icon: str = "lock"
+    plugin_id: Optional[str] = None  # owning plugin for per-plugin catalog grouping
 
 
 class GroupOut(BaseModel):
@@ -154,6 +155,7 @@ async def list_permission_catalog(
             category=p.category,
             description=p.description,
             icon=p.icon,
+            plugin_id=getattr(p, "plugin_id", None),
         ).model_dump()
         for p in reg.get_all()
     ]
@@ -163,6 +165,34 @@ async def list_permission_catalog(
         "categories": reg.categories(),
         "permissions": perms,
     }
+
+
+# ── Roles (manifest-declared bundles — read-only reference) ─────────────────
+@permissions_router.get("/roles", summary="List manifest-declared roles")
+async def list_roles(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    """Read-only: roles are registry metadata, not assignable entities.
+
+    Their effect (permissions attached to auto_map groups) is applied once via
+    the RoleGrantLedger; this endpoint feeds the informational Roles panel.
+    """
+    from core.components.auth.logic.role_registry import role_registry
+
+    try:
+        role_registry.scan_from_manifests()
+    except Exception:
+        pass
+    roles = [
+        {
+            "id": r.id,
+            "label": r.label,
+            "plugin_id": r.plugin_id,
+            "permissions": r.permissions,
+            "auto_map_groups": r.auto_map_groups,
+            "description": r.description,
+        }
+        for r in role_registry.get_all()
+    ]
+    return {"status": "ok", "count": len(roles), "roles": roles}
 
 
 # ── Groups ───────────────────────────────────────────────────────────────────
@@ -273,8 +303,10 @@ async def get_user_permissions(
     groups = list(user.groups or [])
     extra = list(user.extra_permissions or [])
 
+    # Identity 2.0: roles are system flags only — permissions come from group
+    # membership + direct grants (same resolution the API hot path uses).
     gsvc = _group_service()
-    from_groups = gsvc.get_permissions_for_roles(roles + groups)
+    from_groups = gsvc.get_permissions_for_roles(groups)
     effective = sorted(set(from_groups) | set(extra))
 
     return {

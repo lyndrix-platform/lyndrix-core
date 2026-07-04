@@ -87,7 +87,7 @@ class AuthProviderRegistry:
             try:
                 result = await provider.authenticate(username, password)
                 if result:
-                    return self._enrich_with_local_data(result)
+                    return await self.link_identity(result)
             except Exception as e:
                 log.error(
                     f"AUTH: Provider '{provider.provider_id}' raised an exception: {e}",
@@ -105,42 +105,31 @@ class AuthProviderRegistry:
                         f"AUTH: All configured providers failed; local fallback succeeded "
                         f"for '{username}'. Consider adding 'local' to LYNDRIX_AUTH_PROVIDERS."
                     )
-                    return self._enrich_with_local_data(result)
+                    return await self.link_identity(result)
             except Exception as e:
                 log.error(f"AUTH: Local fallback raised an exception: {e}", exc_info=True)
 
         return None
 
-    def _enrich_with_local_data(self, result: AuthResult) -> AuthResult:
+    async def link_identity(self, result: AuthResult) -> AuthResult:
+        """Resolve the provider result to the linked LOCAL profile.
+
+        Identity 2.0 replacement for the old ``_enrich_with_local_data``: every
+        successful login (any provider, incl. SSO callbacks) flows through
+        ``identity_link_service.resolve`` — creating/linking the local User +
+        UserIdentity rows and rewriting the AuthResult onto the local username,
+        system-flag roles and extra_permissions. Sync DB work → worker thread.
         """
-        After successful authentication (any provider), merge in the user's
-        explicit local group memberships and extra_permissions from the DB.
-        This ensures that roles assigned via the Groups UI take effect for
-        LDAP and OIDC users too.
-        """
+        import asyncio
+
         try:
-            from core.components.database.logic.db_service import db_instance
-            from core.components.auth.logic.models import User
-            if not db_instance.SessionLocal:
-                return result
-            with db_instance.SessionLocal() as s:
-                user = s.query(User).filter(User.username == result.username).first()
-                if user:
-                    extra_groups = list(user.groups or [])
-                    extra_perms  = list(user.extra_permissions or [])
-                    merged_roles = sorted(set(result.roles) | set(extra_groups))
-                    return AuthResult(
-                        username=result.username,
-                        full_name=result.full_name,
-                        email=result.email,
-                        roles=merged_roles,
-                        provider=result.provider,
-                        provider_user_id=result.provider_user_id,
-                        extra_permissions=extra_perms,
-                    )
-        except Exception as e:
-            log.warning(f"AUTH: Could not enrich result with local data: {e}")
-        return result
+            from core.components.auth.logic import identity_link_service
+
+            linked = await asyncio.to_thread(identity_link_service.resolve, result)
+            return linked or result
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(f"AUTH: identity linking failed: {e}")
+            return result
 
 
 # Singleton — imported by auth_service and login_ui

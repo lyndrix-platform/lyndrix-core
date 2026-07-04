@@ -71,47 +71,69 @@ def invalidate_system_api_key_cache() -> None:
 
 @dataclass
 class ApiIdentity:
-    """Resolved identity for an authenticated API request."""
+    """Resolved identity for an authenticated API request.
+
+    ``permissions`` is the owner's precomputed effective set (groups-union ∪
+    extra_permissions, resolved via ``access_service`` by the ``_try_*``
+    builders). This is the Identity 2.0 fix for the long-standing bug where the
+    API path only ever read ``User.roles`` and group membership did nothing.
+    """
 
     method: str                       # "api_key" | "user_api_key" | "basic" | "session"
     username: str = "system"
     roles: List[str] = field(default_factory=list)
     extra_permissions: List[str] = field(default_factory=list)
     is_system: bool = False           # True for the master system API key
+    # Precomputed effective permission set. None = resolve lazily by username
+    # (safety net for manually constructed identities).
+    permissions: Optional[frozenset] = None
     # When set (non-None), the credential restricts access to this subset of
     # permissions (used by per-user API keys with explicit scopes).
     key_scopes: Optional[List[str]] = None
+
+    def effective_permissions(self) -> frozenset:
+        """The owner's effective permission set (resolving lazily if needed)."""
+        if self.permissions is not None:
+            return self.permissions
+        try:
+            from core.components.auth.logic import access_service
+
+            return access_service.get_effective_permissions(self.username)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(f"API authz resolution failed for '{self.username}': {exc}")
+            return frozenset()
 
     def allows(self, permission: str) -> bool:
         """
         Return True if this identity is authorized for ``permission``.
 
         - The master system key bypasses all permission checks.
-        - The ``superadmin`` role bypasses permission checks (matches UI convention).
-        - Otherwise the owner's effective permissions are resolved via the
-          group/permission system (Permissions tab).
-        - A scoped per-user key additionally requires the permission to be within
-          its ``key_scopes``.
+        - The ``superadmin`` system flag bypasses permission checks (break-glass).
+        - Otherwise the precomputed effective set decides, including the
+          per-plugin fallback (global api:read/write satisfies plugin:*:api:*).
+        - A scoped per-user key additionally requires the permission to be
+          within its ``key_scopes`` (same fallback semantics).
         """
         if self.is_system:
             return True
 
         if "superadmin" in self.roles:
-            base_allowed = True
-        else:
-            try:
-                from core.components.auth.logic.group_service import group_service
+            return True
 
-                base_allowed = group_service.user_has_permission(
-                    self.roles, permission, self.extra_permissions
+        try:
+            from core.components.auth.logic import access_service
+
+            base_allowed = access_service.has_permission(
+                self.effective_permissions(), permission
+            )
+            if self.key_scopes is not None:
+                return base_allowed and access_service.has_permission(
+                    frozenset(self.key_scopes), permission
                 )
-            except Exception as exc:  # pragma: no cover - defensive
-                log.warning(f"API authz check failed for '{permission}': {exc}")
-                base_allowed = False
-
-        if self.key_scopes is not None:
-            return base_allowed and (permission in self.key_scopes)
-        return base_allowed
+            return base_allowed
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(f"API authz check failed for '{permission}': {exc}")
+            return False
 
 
 def resolve_system_api_key() -> Optional[str]:
@@ -157,6 +179,21 @@ def resolve_system_api_key() -> Optional[str]:
 def system_api_key_configured() -> bool:
     """True when a non-empty system API key is available from env or Vault."""
     return resolve_system_api_key() is not None
+
+
+def _resolve_effective(username: str) -> Optional[frozenset]:
+    """Precompute the effective permission set for an identity builder.
+
+    Returns ``None`` on failure so ``ApiIdentity.effective_permissions()`` can
+    retry lazily instead of freezing an empty set into the identity.
+    """
+    try:
+        from core.components.auth.logic import access_service
+
+        return access_service.get_effective_permissions(username)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"API effective-permission precompute failed for '{username}': {exc}")
+        return None
 
 
 def _extract_bearer(request: Request) -> Optional[str]:
@@ -223,6 +260,7 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
         username=resolved.username,
         roles=roles,
         extra_permissions=extra,
+        permissions=_resolve_effective(resolved.username),
         key_scopes=resolved.scopes or None,
     )
 
@@ -260,6 +298,7 @@ def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
         username=str(user.username),
         roles=roles,
         extra_permissions=extra,
+        permissions=_resolve_effective(str(user.username)),
     )
 
 
@@ -277,6 +316,7 @@ def _try_session(request: Request) -> Optional[ApiIdentity]:
                 username=username,
                 roles=roles,
                 extra_permissions=extra,
+                permissions=_resolve_effective(username),
             )
     except Exception:
         # No NiceGUI storage context for this request (typical for pure HTTP

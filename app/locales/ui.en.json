@@ -271,7 +271,10 @@
     "select_group": "Select a group",
     "members": "Members",
     "search_member": "Search member…",
-    "no_users_found": "No users found."
+    "no_users_found": "No users found.",
+    "discard_changes": "Discard changes",
+    "roles_label": "Plugin roles",
+    "roles_hint": "Declared by plugin manifests; their permissions attach to the mapped groups once."
   },
   "plugins_page": {
     "page_title": "Plugin Management",
@@ -615,5 +618,10 @@
       "kind_engine": "engine-composed",
       "kind_mixed": "mixed"
     }
+  },
+  "login": {
+    "sso_failed": "SSO sign-in failed.",
+    "sso_completing": "Completing sign-in…",
+    "back_to_login": "Back to login"
   }
 }

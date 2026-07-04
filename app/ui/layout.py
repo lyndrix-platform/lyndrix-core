@@ -30,18 +30,21 @@ def _safe_user_value(key: str, default=None):
 def _session_has_permission(permission: str) -> bool:
     """Check whether the current NiceGUI session may use ``permission``.
 
-    Mirrors the API authz convention: the ``superadmin`` role bypasses checks;
-    otherwise the permission is resolved through the group/permission system
-    (including the user's directly-granted extra_permissions).
+    Mirrors the API authz convention: the ``superadmin`` system flag bypasses
+    checks; otherwise the permission resolves through ``access_service``
+    (groups-union ∪ extra_permissions), keyed by the session's username — so
+    group/permission edits apply immediately, not only after re-login.
     """
     roles = list(_safe_user_value("roles", []) or [])
     if "superadmin" in roles:
         return True
-    extra = list(_safe_user_value("extra_permissions", []) or [])
+    username = str(_safe_user_value("username", "") or "")
+    if not username:
+        return False
     try:
-        from core.components.auth.logic.group_service import group_service
+        from core.components.auth.logic import access_service
 
-        return group_service.user_has_permission(roles, permission, extra)
+        return access_service.username_has_permission(username, permission)
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"Permission check failed for '{permission}': {exc}")
         return False

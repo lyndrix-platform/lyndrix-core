@@ -271,7 +271,10 @@
     "select_group": "Gruppe auswählen",
     "members": "Mitglieder",
     "search_member": "Mitglied suchen…",
-    "no_users_found": "Keine Benutzer gefunden."
+    "no_users_found": "Keine Benutzer gefunden.",
+    "discard_changes": "Änderungen verwerfen",
+    "roles_label": "Plugin-Rollen",
+    "roles_hint": "Von Plugin-Manifesten deklariert; ihre Berechtigungen werden den gemappten Gruppen einmalig zugewiesen."
   },
   "plugins_page": {
     "page_title": "Plugin-Verwaltung",
@@ -615,5 +618,10 @@
       "kind_engine": "engine-komponiert",
       "kind_mixed": "gemischt"
     }
+  },
+  "login": {
+    "sso_failed": "SSO-Anmeldung fehlgeschlagen.",
+    "sso_completing": "Anmeldung wird abgeschlossen…",
+    "back_to_login": "Zurück zum Login"
   }
 }
