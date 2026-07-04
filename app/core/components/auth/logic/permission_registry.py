@@ -55,7 +55,6 @@ _BUILTIN: List[PermissionDef] = [
                   description="Sichtbarkeit der Core- und Services-Sektionen im Dashboard (Viewer sehen nur Apps & Tools)"),
     PermissionDef("api:read",                 "API lesen",                     "api",     icon="api"),
     PermissionDef("api:write",                "API schreiben",                 "api",     icon="api"),
-    PermissionDef("iac:infra_apply",          "IaC Infrastruktur anwenden",    "api",     icon="bolt", description="Trigger IaC infrastructure apply (terraform/ansible apply)"),
 ]
 
 _CATEGORY_ORDER = ["route", "plugin", "feature", "api"]
