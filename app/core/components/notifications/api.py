@@ -91,12 +91,21 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
             "webhook_endpoint": "/api/notifications/webhook/gitlab",
         }
 
-    @fastapi_app.post("/api/notifications/webhook/gitlab")
+    @fastapi_app.post("/api/notifications/webhook/gitlab", deprecated=True)
     async def receive_gitlab_notification(
         request: Request,
         x_gitlab_event: str = Header(default="", alias="X-Gitlab-Event"),
         x_gitlab_token: str = Header(default="", alias="X-Gitlab-Token"),
     ):
+        # DEPRECATED: GitLab pipeline ingress lives in the IaC Orchestrator
+        # plugin (/api/iac/webhook/gitlab), which owns the status→severity
+        # mapping. This legacy endpoint stays functional for old hooks but
+        # logs each hit so remaining callers can be repointed, then removed.
+        log.warning(
+            "DEPRECATED: /api/notifications/webhook/gitlab was called (event=%s). "
+            "Point this GitLab webhook at the IaC Orchestrator ingress instead.",
+            x_gitlab_event or "?",
+        )
         ctx = notification_service.ctx
         if not ctx:
             raise HTTPException(status_code=503, detail="Notification service not initialized")
