@@ -24,6 +24,7 @@ REQUIRED_TOKEN_KEYS: frozenset[str] = frozenset({
 # pin. Not required (themes need none); used only to warn on likely typos.
 KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
     "--lx-bg", "--lx-surface", "--lx-surface-glass", "--lx-elevated",
+    "--lx-elevated-glass", "--lx-glass-border",
     "--lx-accent", "--lx-accent-2", "--lx-accent-3",
     "--lx-text", "--lx-text-muted",
     "--lx-border", "--lx-border-soft", "--lx-glow",

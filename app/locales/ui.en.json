@@ -448,6 +448,7 @@
       "surfaces": "Surfaces",
       "text": "Text",
       "states": "States",
+      "glass": "Glass & borders",
       "semantic": "Semantic extras",
       "semantic_note": "Saved as raw css_variables overrides (no colour token drives these)."
     },
@@ -468,7 +469,12 @@
       "info_note": "No live preview — feeds the server (NiceGUI) palette only.",
       "state_success": "Success",
       "state_marked": "Marked / selected",
-      "on_accent": "Text on accent"
+      "on_accent": "Text on accent",
+      "surface_glass": "Card glass surface",
+      "elevated_glass": "Elevated glass surface",
+      "glass_border": "Glass border",
+      "border_accent": "Accent border",
+      "border_soft": "Soft border"
     },
     "density": {
       "spacing": "Spacing unit",
