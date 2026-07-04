@@ -68,6 +68,10 @@ class PluginService:
         # to populate version pickers without hitting GitHub on every click.
         self._collection_versions = {}
         self._cache_ttl = 900  # 15 Minuten Cache-Dauer
+        # Negative cache: after a failed collection fetch, skip ALL remote
+        # retries until this deadline. Without it every /plugins open paid the
+        # full HTTP-fallback timeout again while no collection clone exists.
+        self._negative_cache_until = 0.0
         self._repo_cache = {}
         self._repo_cache_timestamp = {}
         # Tracks the last known remote HEAD commit to avoid unnecessary git pulls.
@@ -333,6 +337,9 @@ class PluginService:
             log.info("COLLECTION: git-manager sync complete — invalidating marketplace cache.")
             self._marketplace_cache = []
             self._cache_timestamp = 0
+            # A fresh clone just arrived — drop any armed negative cache so the
+            # next fetch reads it immediately instead of waiting out the window.
+            self._negative_cache_until = 0.0
 
     def get_marketplace_source_map(self) -> dict:
         """Returns a sync map of normalized repo name -> url.
@@ -802,6 +809,14 @@ class PluginService:
             log.debug("MARKETPLACE: Loading from cache")
             return [dict(p) for p in self._marketplace_cache]
 
+        # Negative cache: a recent fetch failed and nothing has invalidated it
+        # (git sync / force refresh) — answer from whatever we have with zero I/O.
+        if not force_refresh and time.time() < self._negative_cache_until:
+            log.debug("MARKETPLACE: Negative cache active, skipping remote fetch")
+            if self._marketplace_cache:
+                return [dict(p) for p in self._marketplace_cache]
+            return [dict(p) for p in self._fetch_custom_marketplace_entries()]
+
         data = None
 
         # 1. Prefer the local git clone — fast, no network, no tokens.
@@ -818,11 +833,14 @@ class PluginService:
             try:
                 # Public raw.githubusercontent.com URL — no auth headers needed.
                 async with httpx.AsyncClient(headers=self._get_headers(include_auth=False), follow_redirects=True) as client:
-                    resp = await client.get(COLLECTION_FALLBACK_URL, timeout=10.0)
+                    resp = await client.get(COLLECTION_FALLBACK_URL, timeout=5.0)
                     resp.raise_for_status()
                     data = resp.json()
             except Exception as exc:
                 log.warning(f"MARKETPLACE: HTTP fallback also failed: {exc}")
+                # Arm the negative cache so the next page opens don't pay the
+                # network timeout again; a git sync or force refresh clears it.
+                self._negative_cache_until = time.time() + 60.0
                 # Collection unavailable — still surface custom repos. Prefer a
                 # previously cached collection list if we have one.
                 if self._marketplace_cache:

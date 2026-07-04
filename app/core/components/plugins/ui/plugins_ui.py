@@ -268,6 +268,13 @@ def render_plugins_page():
                 ui.label(t('plugins.subtitle')).classes(UIStyles.TEXT_MUTED)
             ui.button(t('plugins.check_updates'), icon='update', on_click=check_all_updates).props('outline color=slate').classes('w-full sm:w-auto').tooltip(t('plugins.notify.checking'))
 
+        # Lazy-load guard: the marketplace fetch (potentially a slow remote
+        # HTTP fallback) must only run when the user actually opens the shop
+        # tab — NiceGUI executes both tab_panel bodies eagerly on every page
+        # render, so an unconditional timer here stalled /plugins for up to
+        # 10s per open when no collection clone exists.
+        _shop_state = {'loaded': False}
+
         with ui.tabs().classes(UIStyles.TAB_BAR) as tabs:
             tab_installed = ui.tab(t('plugins.tabs.installed'), icon='extension')
             tab_shop = ui.tab(t('plugins.tabs.marketplace'), icon='shopping_bag')
@@ -385,6 +392,7 @@ def render_plugins_page():
                     ui.spinner('dots', size='lg').classes('col-span-full mx-auto')
 
                 async def load_shop(force_refresh=False):
+                    _shop_state['loaded'] = True
                     shop_container.clear()
                     with shop_container:
                         ui.spinner('dots', size='lg').classes('col-span-full mx-auto')
@@ -599,7 +607,16 @@ def render_plugins_page():
                     dialog.open()
 
                 search.on('update:model-value', lambda _: ui.timer(0.05, load_shop, once=True))
-                ui.timer(0.1, load_shop, once=True)
+
+                def _load_shop_on_tab(e) -> None:
+                    # e.value is the Tab element or its name string depending on
+                    # the NiceGUI version — accept both representations.
+                    if _shop_state['loaded']:
+                        return
+                    if e.value is tab_shop or str(e.value) == t('plugins.tabs.marketplace'):
+                        ui.timer(0.05, load_shop, once=True)
+
+                tabs.on_value_change(_load_shop_on_tab)
 
 
 def render_plugin_manager():
