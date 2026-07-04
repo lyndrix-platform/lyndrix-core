@@ -47,7 +47,7 @@ KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
     "--lx-icon-xs", "--lx-icon-sm", "--lx-icon-md", "--lx-icon-lg",
     "--lx-z-dropdown", "--lx-z-modal", "--lx-z-toast", "--lx-scrim",
     "--lx-text-2xs", "--lx-text-3xs",
-    "--lx-glass-saturate", "--lx-on-accent-text",
+    "--lx-glass-saturate", "--lx-on-accent-text", "--lx-on-accent-text-light",
     "--lx-badge-bg-opacity", "--lx-badge-border-opacity",
 })
 

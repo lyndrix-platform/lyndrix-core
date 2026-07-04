@@ -318,6 +318,8 @@ class ThemeEngine:
         # scrim + on-accent-text are stable overlay/foreground helpers.
         css["--lx-scrim"] = "rgb(0 0 0 / 0.55)"
         css["--lx-on-accent-text"] = "#0a0e1a"
+        # Light counterpart: legible on saturated/coloured surfaces.
+        css["--lx-on-accent-text-light"] = "#ffffff"
         css["--lx-terminal-bg"] = "#050807"
         css["--lx-terminal-fg"] = "#4ade80"
         css["--lx-terminal-accent"] = "#22d3ee"

@@ -279,6 +279,7 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_t
             '--lx-text-3xs': 'calc(0.625rem * var(--lx-text-scale))',
             '--lx-glass-saturate': '160%',
             '--lx-on-accent-text': '#0a0e1a',
+            '--lx-on-accent-text-light': '#ffffff',
             '--lx-badge-bg-opacity': '0.15',
             '--lx-badge-border-opacity': '0.30',
         }
