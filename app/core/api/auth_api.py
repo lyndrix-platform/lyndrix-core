@@ -80,8 +80,50 @@ class LoginResponse(BaseModel):
     display_name: Optional[str]
 
 
+def _describe_client(request: Request) -> str:
+    """Best-effort 'Browser on OS' string from request headers.
+
+    Substring checks over the User-Agent, most-specific first (Edge and Opera
+    also contain 'Chrome/'). Brave deliberately sends a plain Chrome UA, so we
+    additionally inspect the Sec-CH-UA client-hint brand list where it does
+    identify itself. Unknowns degrade to 'Unknown client' — never an error.
+    """
+    ua = request.headers.get("user-agent", "")
+    ch_brands = request.headers.get("sec-ch-ua", "").lower()
+
+    if "brave" in ch_brands:
+        browser = "Brave"
+    elif "Edg/" in ua or "EdgA/" in ua:
+        browser = "Edge"
+    elif "OPR/" in ua or "Opera" in ua:
+        browser = "Opera"
+    elif "Firefox/" in ua:
+        browser = "Firefox"
+    elif "Chrome/" in ua or "CriOS/" in ua:
+        browser = "Chrome"
+    elif "Safari/" in ua:
+        browser = "Safari"
+    else:
+        browser = "Unknown client"
+
+    if "Windows NT" in ua:
+        os_name = "Windows"
+    elif "iPhone" in ua or "iPad" in ua:
+        os_name = "iOS"
+    elif "Mac OS X" in ua or "Macintosh" in ua:
+        os_name = "macOS"
+    elif "Android" in ua:
+        os_name = "Android"
+    elif "Linux" in ua:
+        os_name = "Linux"
+    else:
+        os_name = ""
+
+    return f"{browser} on {os_name}" if os_name else browser
+
+
 @auth_router.post("/login", response_model=LoginResponse, summary="Obtain a session token")
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
     """
     Authenticates against the local user database (Argon2). On success creates a
     named UserApiKey row and returns the raw key once; the React frontend stores it
@@ -102,7 +144,11 @@ async def login(payload: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    label = f"web-session-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    # Keep the 'web-session' prefix — the sessions UI distinguishes session
+    # tokens from real API keys by exactly this marker. Label column is
+    # String(100); this stays well under it.
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    label = f"web-session · {_describe_client(request)} · {stamp} UTC"
     # The key insert is a sync DB write — keep it off the event loop.
     raw_token, _ = await asyncio.to_thread(
         api_key_service.create, str(user.username), label=label, scopes=[]

@@ -259,10 +259,15 @@ class ThemeEngine:
                 "--lx-chart-6": "#6366f1",
                 "--lx-chart-7": "#06b6d4",
                 "--lx-chart-8": "#14b8a6",
-                # --- canonical literals (no clean semantic source) ---
-                "--lx-surface-glass": "rgba(15, 22, 41, 0.58)",
-                "--lx-border": "rgba(0, 212, 255, 0.2)",
-                "--lx-border-soft": "rgba(255, 255, 255, 0.08)",
+                # --- glass & border surfaces (semantic, themeable) ---
+                # Optional colour tokens with the previous canonical literals
+                # as fallback, so colour-only packs render unchanged while a
+                # theme can now tone glass down/off (solid value = no glass).
+                "--lx-surface-glass": c("surface_glass", "rgba(15, 22, 41, 0.58)"),
+                "--lx-elevated-glass": c("elevated_glass", "rgba(22, 32, 64, 0.55)"),
+                "--lx-glass-border": c("glass_border", "rgba(255, 255, 255, 0.12)"),
+                "--lx-border": c("border_accent", "rgba(0, 212, 255, 0.2)"),
+                "--lx-border-soft": c("border_soft", "rgba(255, 255, 255, 0.08)"),
             }
         else:
             css = {
@@ -289,9 +294,11 @@ class ThemeEngine:
                 "--lx-chart-6": "#4f46e5",
                 "--lx-chart-7": "#0891b2",
                 "--lx-chart-8": "#0d9488",
-                "--lx-surface-glass": "rgba(255, 255, 255, 0.72)",
-                "--lx-border": "rgba(8, 145, 178, 0.3)",
-                "--lx-border-soft": "rgba(0, 0, 0, 0.09)",
+                "--lx-surface-glass": c("surface_glass", "rgba(255, 255, 255, 0.72)"),
+                "--lx-elevated-glass": c("elevated_glass", "rgba(255, 255, 255, 0.6)"),
+                "--lx-glass-border": c("glass_border", "rgba(0, 0, 0, 0.12)"),
+                "--lx-border": c("border_accent", "rgba(8, 145, 178, 0.3)"),
+                "--lx-border-soft": c("border_soft", "rgba(0, 0, 0, 0.09)"),
             }
 
         # Theming v2 Phase-1 categories: same value in both colour modes,

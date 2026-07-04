@@ -176,6 +176,13 @@
     "pw_mismatch": "Passwords do not match.",
     "pw_too_short": "At least 8 characters required.",
     "pw_changed": "Password changed.",
+    "sessions_title": "Active sessions",
+    "no_sessions": "No active sessions.",
+    "session_generic": "Web session",
+    "session_current": "This session",
+    "session_last_used": "last active",
+    "session_revoke": "End session",
+    "sessions_revoke_others": "Sign out all other sessions",
     "keys_title": "API keys",
     "key_once_visible": "Key is shown only once — copy it now!",
     "no_keys": "No API keys yet.",
@@ -441,6 +448,7 @@
       "surfaces": "Surfaces",
       "text": "Text",
       "states": "States",
+      "glass": "Glass & borders",
       "semantic": "Semantic extras",
       "semantic_note": "Saved as raw css_variables overrides (no colour token drives these)."
     },
@@ -461,7 +469,12 @@
       "info_note": "No live preview — feeds the server (NiceGUI) palette only.",
       "state_success": "Success",
       "state_marked": "Marked / selected",
-      "on_accent": "Text on accent"
+      "on_accent": "Text on accent",
+      "surface_glass": "Card glass surface",
+      "elevated_glass": "Elevated glass surface",
+      "glass_border": "Glass border",
+      "border_accent": "Accent border",
+      "border_soft": "Soft border"
     },
     "density": {
       "spacing": "Spacing unit",

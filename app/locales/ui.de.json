@@ -176,6 +176,13 @@
     "pw_mismatch": "Passwörter stimmen nicht überein.",
     "pw_too_short": "Mindestens 8 Zeichen.",
     "pw_changed": "Passwort geändert.",
+    "sessions_title": "Aktive Sitzungen",
+    "no_sessions": "Keine aktiven Sitzungen.",
+    "session_generic": "Web-Sitzung",
+    "session_current": "Diese Sitzung",
+    "session_last_used": "zuletzt aktiv",
+    "session_revoke": "Sitzung beenden",
+    "sessions_revoke_others": "Alle anderen Sitzungen abmelden",
     "keys_title": "API-Schlüssel",
     "key_once_visible": "Schlüssel einmalig sichtbar — jetzt kopieren!",
     "no_keys": "Keine API-Schlüssel vorhanden.",
@@ -441,6 +448,7 @@
       "surfaces": "Flächen",
       "text": "Text",
       "states": "Zustände",
+      "glass": "Glas & Ränder",
       "semantic": "Semantische Zusätze",
       "semantic_note": "Wird als Rohwert-Override in css_variables gespeichert (kein Farb-Token steuert dies)."
     },
@@ -461,7 +469,12 @@
       "info_note": "Keine Live-Vorschau — wirkt nur auf die Server-Palette (NiceGUI).",
       "state_success": "Erfolg",
       "state_marked": "Markiert / ausgewählt",
-      "on_accent": "Text auf Akzent"
+      "on_accent": "Text auf Akzent",
+      "surface_glass": "Karten-Glasfläche",
+      "elevated_glass": "Erhöhte Glasfläche",
+      "glass_border": "Glas-Rand",
+      "border_accent": "Akzent-Rand",
+      "border_soft": "Weicher Rand"
     },
     "density": {
       "spacing": "Abstandseinheit",
