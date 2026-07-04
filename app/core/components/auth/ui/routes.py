@@ -1,6 +1,7 @@
 import secrets
 import threading
 import time
+from urllib.parse import quote
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
@@ -78,6 +79,10 @@ def register_auth_routes():
             ui.navigate.to("/login")
             return
 
+        # Identity 2.0: resolve the provider identity to the linked LOCAL
+        # profile (creates/links User + UserIdentity; rewrites username/roles).
+        result = await provider_registry.link_identity(result)
+
         update_user_session(
             {
                 "authenticated": True,
@@ -114,7 +119,6 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
         (e.g. Authentik → Application → Redirect URIs):
           https://<lyndrix-host>/auth/callback/oidc
         """
-        # TODO: keep the callback and discovery flow tied to a session-bound nonce / PKCE verifier.
         from core.components.auth.logic.providers.registry import provider_registry
 
         if error:
@@ -134,11 +138,46 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             )
             return RedirectResponse("/login?error=no_oidc_provider")
 
+        # PKCE verifier + flow metadata were bound to the state at start time.
+        flow_meta = {}
+        if hasattr(oidc_provider, "state_meta"):
+            flow_meta = oidc_provider.state_meta(state)
+
         result = await oidc_provider.exchange_code(code, state)
         if not result:
             return RedirectResponse("/login?error=auth_failed")
 
-        # Hand off to the NiceGUI /auth/complete page without echoing user-provided state.
+        if flow_meta.get("flow") == "react":
+            # React SPA flow: resolve the linked local profile, mint the web
+            # session token server-side and hand the SPA a one-time exchange
+            # code (never the token itself — no referrer/history leak).
+            import asyncio as _asyncio
+            from datetime import datetime, timezone
+
+            from core.api.auth_api import create_sso_exchange_code
+            from core.components.auth.logic.api_key_service import api_key_service
+
+            linked = await provider_registry.link_identity(result)
+            oidc_provider.consume_result(state)  # burn the pending result
+
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            label = f"web-session · SSO ({linked.provider}) · {stamp} UTC"
+            raw_token, _ = await _asyncio.to_thread(
+                api_key_service.create, linked.username, label=label, scopes=[]
+            )
+            xc = create_sso_exchange_code({
+                "token": raw_token,
+                "username": linked.username,
+                "roles": list(linked.roles or []),
+                "display_name": str(linked.full_name or "") or None,
+            })
+            redirect_uri, _, next_path = (flow_meta.get("redirect") or "|/").partition("|")
+            log.info(f"AUTH:OIDC: React SSO session established for '{linked.username}'.")
+            return RedirectResponse(
+                f"{redirect_uri}?code={xc}&next={quote(next_path or '/', safe='/')}"
+            )
+
+        # NiceGUI flow: hand off to /auth/complete without echoing user-provided state.
         _cleanup_handoffs()
         handoff = secrets.token_urlsafe(24)
         with _OIDC_HANDOFFS_LOCK:

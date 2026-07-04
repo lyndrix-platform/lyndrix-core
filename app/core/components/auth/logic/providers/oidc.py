@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import secrets
 import time
 from typing import Optional, List
@@ -67,6 +69,11 @@ class OIDCProvider(AuthProvider):
         # TODO: bind OIDC state/result storage to a browser session nonce and PKCE verifier.
         self._pending_states: dict[str, float] = {}
         self._pending_results: dict[str, AuthResult] = {}
+        # PKCE code_verifier per state + per-flow metadata (Identity 2.0:
+        # the React SPA and the NiceGUI shell share this provider; the
+        # callback needs to know which frontend started the flow).
+        self._state_verifiers: dict[str, str] = {}
+        self._state_meta: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # AuthProvider interface
@@ -134,9 +141,21 @@ class OIDCProvider(AuthProvider):
         for k in expired:
             self._pending_states.pop(k, None)
             self._pending_results.pop(k, None)
+            self._state_verifiers.pop(k, None)
+            self._state_meta.pop(k, None)
 
-    async def build_login_url(self) -> Optional[str]:
-        """Ensure discovery is loaded, then return a fresh authorization URL."""
+    def state_meta(self, state: str) -> dict:
+        """Flow metadata recorded when the authorization URL was built."""
+        return dict(self._state_meta.get(state) or {})
+
+    async def build_login_url(self, flow: str = "nicegui", redirect: str = "/") -> Optional[str]:
+        """Ensure discovery is loaded, then return a fresh authorization URL.
+
+        Includes PKCE (S256 code challenge) — the verifier is bound to the
+        state and sent with the token exchange. ``flow``/``redirect`` are
+        remembered per state so the shared callback can hand the user back to
+        the frontend that started the flow.
+        """
         if not self.is_configured():
             return None
         try:
@@ -151,12 +170,24 @@ class OIDCProvider(AuthProvider):
             return None
 
         state = self._new_state()
+        # PKCE: verifier bound to this state; S256 challenge in the URL.
+        verifier = secrets.token_urlsafe(48)
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+            .rstrip(b"=")
+            .decode("ascii")
+        )
+        self._state_verifiers[state] = verifier
+        self._state_meta[state] = {"flow": flow, "redirect": redirect or "/"}
+
         params = {
             "response_type": "code",
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "scope": self.scopes,
             "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
         }
         return f"{auth_endpoint}?{urlencode(params)}"
 
@@ -191,16 +222,18 @@ class OIDCProvider(AuthProvider):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 # Exchange code → tokens
-                token_resp = await client.post(
-                    token_endpoint,
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "redirect_uri": self.redirect_uri,
-                        "client_id": self.client_id,
-                        "client_secret": self.client_secret,
-                    },
-                )
+                token_data = {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": self.redirect_uri,
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                }
+                # PKCE: prove possession of the verifier bound to this state.
+                verifier = self._state_verifiers.pop(state, None)
+                if verifier:
+                    token_data["code_verifier"] = verifier
+                token_resp = await client.post(token_endpoint, data=token_data)
                 token_resp.raise_for_status()
                 tokens = token_resp.json()
 
@@ -243,6 +276,9 @@ class OIDCProvider(AuthProvider):
             roles=roles,
             provider=self.provider_id,
             provider_user_id=userinfo.get("sub"),
+            # Only an explicitly verified claim gates trusted-email
+            # auto-linking — a missing/false claim never merges accounts.
+            email_verified=bool(userinfo.get("email_verified") is True),
         )
 
         # Invalidate the state and store the result for /auth/complete to consume

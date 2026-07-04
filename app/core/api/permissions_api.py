@@ -273,8 +273,10 @@ async def get_user_permissions(
     groups = list(user.groups or [])
     extra = list(user.extra_permissions or [])
 
+    # Identity 2.0: roles are system flags only — permissions come from group
+    # membership + direct grants (same resolution the API hot path uses).
     gsvc = _group_service()
-    from_groups = gsvc.get_permissions_for_roles(roles + groups)
+    from_groups = gsvc.get_permissions_for_roles(groups)
     effective = sorted(set(from_groups) | set(extra))
 
     return {

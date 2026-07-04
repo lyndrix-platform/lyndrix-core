@@ -30,11 +30,14 @@ log = get_logger("Core:PermissionRegistry")
 
 @dataclass
 class PermissionDef:
-    id: str           # e.g. "route:/iac-orchestrator"
+    id: str           # e.g. "route:/iac-orchestrator" or "plugin:<id>:api:read"
     label: str        # "IAC Orchestrator"
     category: str     # "route" | "plugin" | "feature" | "api"
     description: str = ""
     icon: str = "lock"
+    # Owning plugin/module id for namespaced permissions — lets the UI group
+    # the catalog per plugin. None for core/builtin ids.
+    plugin_id: Optional[str] = None
 
 
 # ── Built-in feature / api permissions ────────────────────────────────────────
@@ -48,6 +51,8 @@ _BUILTIN: List[PermissionDef] = [
     PermissionDef("feature:groups.edit",      "Gruppen verwalten",             "feature", icon="group"),
     PermissionDef("feature:auth.configure",   "Auth-Provider konfigurieren",   "feature", icon="security"),
     PermissionDef("feature:plugins.manage",   "Plugins verwalten",             "feature", icon="extension"),
+    PermissionDef("feature:dashboard.admin_sections", "Dashboard: Core/Services-Bereiche", "feature", icon="dashboard_customize",
+                  description="Sichtbarkeit der Core- und Services-Sektionen im Dashboard (Viewer sehen nur Apps & Tools)"),
     PermissionDef("api:read",                 "API lesen",                     "api",     icon="api"),
     PermissionDef("api:write",                "API schreiben",                 "api",     icon="api"),
     PermissionDef("iac:infra_apply",          "IaC Infrastruktur anwenden",    "api",     icon="bolt", description="Trigger IaC infrastructure apply (terraform/ansible apply)"),
@@ -116,6 +121,16 @@ class PermissionRegistry:
         Register route + plugin permissions for every active module manifest.
         Safe to call multiple times — existing entries are overwritten.
         Called lazily when the Permissions tab is first rendered.
+
+        Identity & Permissions 2.0 additions per manifest:
+          - ``plugin:<id>:route:<path>`` for every ``react_routes`` entry
+            (previously only ``ui_route`` was scanned — granting a React-only
+            route like ``route:/bingo`` 422'd as unknown)
+          - ``plugin:<id>:api:read`` / ``plugin:<id>:api:write`` unconditionally
+            (per-plugin API granularity, no author action required; global
+            api:read/write remain a compat fallback in access_service)
+          - ``plugin:<id>:<suffix>`` for each ``custom_permissions`` entry
+          - manifest ``roles`` are forwarded to the role_registry
         """
         try:
             from core.components.plugins.logic.manager import module_manager
@@ -124,6 +139,7 @@ class PermissionRegistry:
             return
 
         for manifest in module_manager.get_manifests():
+            icon = getattr(manifest, "icon", None) or "extension"
             route = getattr(manifest, "ui_route", None)
             if route:
                 self.register(PermissionDef(
@@ -132,14 +148,60 @@ class PermissionRegistry:
                     category="route",
                     description=f"Zugriff auf Route {route}",
                     icon=getattr(manifest, "icon", None) or "route",
+                    plugin_id=manifest.id,
                 ))
             self.register(PermissionDef(
                 id=f"plugin:{manifest.id}",
                 label=f"{manifest.name} (Plugin)",
                 category="plugin",
                 description=f"Plugin {manifest.id} ist nutzbar",
-                icon=getattr(manifest, "icon", None) or "extension",
+                icon=icon,
+                plugin_id=manifest.id,
             ))
+
+            # React routes → per-plugin route permissions.
+            for rr in getattr(manifest, "react_routes", None) or []:
+                path = (rr or {}).get("path")
+                if not path:
+                    continue
+                self.register(PermissionDef(
+                    id=f"plugin:{manifest.id}:route:{path}",
+                    label=f"{manifest.name}: {rr.get('label') or path}",
+                    category="route",
+                    description=f"Zugriff auf React-Route {path}",
+                    icon=rr.get("icon") or icon,
+                    plugin_id=manifest.id,
+                ))
+
+            # Per-plugin API read/write — free granularity for every module.
+            for verb, de_label in (("read", "lesen"), ("write", "schreiben")):
+                self.register(PermissionDef(
+                    id=f"plugin:{manifest.id}:api:{verb}",
+                    label=f"{manifest.name}: API {de_label}",
+                    category="api",
+                    description=f"API-{verb}-Zugriff auf Plugin {manifest.id}",
+                    icon="api",
+                    plugin_id=manifest.id,
+                ))
+
+            # Plugin-declared fine-grained permissions.
+            for cp in getattr(manifest, "custom_permissions", None) or []:
+                self.register(PermissionDef(
+                    id=f"plugin:{manifest.id}:{cp.id}",
+                    label=f"{manifest.name}: {cp.label}",
+                    category="api",
+                    description=cp.description,
+                    icon=cp.icon or icon,
+                    plugin_id=manifest.id,
+                ))
+
+        # Manifest roles live in their own registry (bundles, not checkable ids).
+        try:
+            from .role_registry import role_registry
+
+            role_registry.scan_from_manifests()
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(f"PERMS: role registry scan failed: {e}")
 
 
 # Singleton

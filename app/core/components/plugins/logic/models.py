@@ -61,6 +61,39 @@ class NotificationEndpoint(BaseModel):
         return value
 
 
+class ManifestPermission(BaseModel):
+    """A plugin-declared fine-grained permission (Identity & Permissions 2.0).
+
+    ``id`` is a LOCAL suffix — the registry namespaces it to
+    ``plugin:<manifest.id>:<id>`` (e.g. ``api:infra_apply`` →
+    ``plugin:lyndrix.plugin.iac_orchestrator:api:infra_apply``).
+    """
+
+    id: str = Field(..., description="Local permission suffix, e.g. 'api:infra_apply'")
+    label: str = Field(..., description="Human-readable label for the permissions UI")
+    description: str = Field(default="")
+    icon: str = Field(default="lock")
+
+
+class ManifestRole(BaseModel):
+    """A plugin-declared role: a named bundle of permissions plus optional
+    auto-mapping onto groups (Identity & Permissions 2.0).
+
+    Roles are NOT database entities — they are registry metadata. ``permissions``
+    entries are either local suffixes (namespaced like ManifestPermission) or
+    already-qualified ids (``api:read``, ``feature:...``, ``plugin:...``)
+    passed through verbatim. ``auto_map_groups`` names groups (e.g.
+    ``INT_ADMIN``) whose permission list receives this bundle ONCE, guarded by
+    the RoleGrantLedger so later admin revocations are never re-applied.
+    """
+
+    id: str = Field(..., description="Local role suffix, e.g. 'admin' -> role:<plugin>:admin")
+    label: str = Field(..., description="Human-readable label")
+    permissions: List[str] = Field(default_factory=list)
+    auto_map_groups: List[str] = Field(default_factory=list)
+    description: str = Field(default="")
+
+
 class PluginSettingField(BaseModel):
     """Declares one user-configurable setting for a plugin.
 
@@ -106,6 +139,10 @@ class ModuleManifest(BaseModel):
 
     # --- Notification routing endpoints (declared, persisted, routed by core) ---
     notification_endpoints: List[NotificationEndpoint] = Field(default_factory=list)
+
+    # --- Identity & Permissions 2.0: declared fine-grained permissions + roles ---
+    custom_permissions: List[ManifestPermission] = Field(default_factory=list)
+    roles: List[ManifestRole] = Field(default_factory=list)
 
     # --- React UI federation ---
     react_ui: bool = Field(default=False, description="Whether this plugin ships a React UI bundle")

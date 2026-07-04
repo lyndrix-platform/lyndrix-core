@@ -112,6 +112,10 @@ class LDAPProvider(AuthProvider):
                     "mail",
                     "sAMAccountName",
                     "uid",
+                    # Stable AD account id — preferred provider_user_id for
+                    # identity linking (survives renames/DN moves). ldap3's AD
+                    # formatter yields the canonical S-1-5-… string.
+                    "objectSid",
                 ],
             )
             if not svc_conn.entries:
@@ -151,11 +155,17 @@ class LDAPProvider(AuthProvider):
             if self.group_attr in entry.entry_attributes
             else []
         )
+        sid_val = entry["objectSid"].value if "objectSid" in entry.entry_attributes else None
         return {
             "user_dn": user_dn,
             "full_name": full_name,
             "email": email,
+            # True only when the directory actually carried a mail attribute —
+            # the synthetic "<user>@ldap.local" fallback must never count as a
+            # verified email for identity auto-linking.
+            "email_is_real": bool(email_val),
             "groups": [str(g) for g in raw_groups],
+            "object_sid": str(sid_val) if sid_val else None,
         }
 
     async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
@@ -203,7 +213,12 @@ class LDAPProvider(AuthProvider):
             email=email,
             roles=roles,
             provider=self.provider_id,
-            provider_user_id=user_dn,
+            # objectSid preferred (rename/move-proof); DN fallback for non-AD.
+            provider_user_id=resolved.get("object_sid") or user_dn,
+            # Directory attributes are admin-controlled — trust the email for
+            # identity auto-linking, but only when it really came from the
+            # directory (not the synthetic @ldap.local fallback).
+            email_verified=bool(resolved.get("email_is_real")),
         )
 
     def _test_connection_blocking(self) -> tuple[bool, str]:
