@@ -277,6 +277,58 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
 
 
 # ==========================================
+# Per-user preferences ("My account" scope — Theming v2 Phase 2)
+# ==========================================
+class PreferencesUpdate(BaseModel):
+    """Partial, namespaced preferences patch. Deep-merged into the stored document."""
+    preferences: Dict[str, object]
+
+
+@me_router.get("/me/preferences", summary="Get the caller's account preferences")
+def get_my_preferences(identity: ApiIdentity = Depends(require_api_auth)):
+    """Return the authenticated user's namespaced preferences document.
+
+    Sync ``def`` (threadpool): the read is a blocking DB query, so it runs in
+    FastAPI's threadpool rather than on the shared event loop. Keyed strictly by
+    ``identity.username`` — a user only ever sees their own preferences.
+    """
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    return {"preferences": preferences_service.get(identity.username)}
+
+
+@me_router.put("/me/preferences", summary="Deep-merge a patch into the caller's preferences")
+def update_my_preferences(
+    payload: PreferencesUpdate,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """Deep-merge ``payload.preferences`` into the caller's stored document.
+
+    Nested objects merge recursively; scalars/lists replace. Returns the full
+    merged document. Sync ``def`` (threadpool) — the merge is a blocking DB
+    read-modify-write. Keyed by ``identity.username`` only.
+    """
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    merged = preferences_service.merge(identity.username, payload.preferences)
+    log.info(f"AUTH API: preferences updated for '{identity.username}'.")
+    return {"preferences": merged}
+
+
+@me_router.delete("/me/preferences/{dotted_key}", summary="Remove one preference path")
+def delete_my_preference(
+    dotted_key: str,
+    identity: ApiIdentity = Depends(require_api_auth),
+):
+    """Remove a single dotted path (e.g. ``theme.selection.react``) from the caller's
+    document and return the remaining preferences. Sync ``def`` (threadpool)."""
+    from core.components.auth.logic.preferences_service import preferences_service
+
+    remaining = preferences_service.delete_path(identity.username, dotted_key)
+    return {"preferences": remaining}
+
+
+# ==========================================
 # Per-user background images (filesystem; no DB change)
 # ==========================================
 def _bg_url(username: str, mode: str, path: Path) -> str:
