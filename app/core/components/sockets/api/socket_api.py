@@ -64,7 +64,7 @@ class RepairRequest(BaseModel):
 @socket_router.get("/health")
 async def socket_health(
     required_dirs: Optional[str] = Query(None),
-    auth=Depends(require_permission("api:read")),
+    auth=Depends(require_permission("admin:read")),
 ):
     """
     Check socket health and mount points (read-only inspection).
@@ -94,7 +94,7 @@ async def socket_health(
 
 @socket_router.get("/providers")
 async def list_providers(
-    auth=Depends(require_permission("api:read")),
+    auth=Depends(require_permission("admin:read")),
 ):
     """List all registered socket providers (available and unavailable)."""
     registry = get_registry()
@@ -109,7 +109,7 @@ async def list_providers(
 
 
 @socket_router.get("/docker/health")
-async def docker_health(auth=Depends(require_permission("api:read"))):
+async def docker_health(auth=Depends(require_permission("admin:read"))):
     """Check Docker daemon health."""
     try:
         provider = get_docker_provider()
@@ -121,7 +121,7 @@ async def docker_health(auth=Depends(require_permission("api:read"))):
 
 
 @socket_router.get("/docker/mounts")
-async def docker_mounts(auth=Depends(require_permission("api:read"))):
+async def docker_mounts(auth=Depends(require_permission("admin:read"))):
     """Get Docker container mount mappings."""
     try:
         provider = get_docker_provider()
@@ -133,7 +133,7 @@ async def docker_mounts(auth=Depends(require_permission("api:read"))):
 
 
 @socket_router.get("/docker/storage-root")
-async def docker_storage_root(auth=Depends(require_permission("api:read"))):
+async def docker_storage_root(auth=Depends(require_permission("admin:read"))):
     """Detect where storage is mounted inside Docker containers."""
     try:
         provider = get_docker_provider()

@@ -600,13 +600,36 @@ class PluginService:
         return self._global_token(provider)
 
     def _auth_headers_for(self, url: str, provider: str) -> dict:
-        """Provider-appropriate request headers, including auth when available."""
+        """Provider-appropriate request headers, including auth when available.
+
+        Only ever called after :meth:`validate_repo_url` has passed for ``url``
+        (see ``get_plugin_versions``/``install_plugin``), so a token is never
+        attached to a request going to a host outside the configured allowlist
+        — trust comes from that allowlist, never from the URL alone.
+        """
         headers = {"User-Agent": "Lyndrix-Core/1.0"}
         headers.update(git_providers.accept_header(provider))
         token = self._resolve_token(url, provider)
         if token:
             headers.update(git_providers.auth_header(provider, token))
         return headers
+
+    def _allowed_repo_hosts(self) -> list[str]:
+        """Configured git host allowlist (``LYNDRIX_PLUGIN_REPO_HOSTS``)."""
+        raw = getattr(settings, "LYNDRIX_PLUGIN_REPO_HOSTS", "") or ""
+        return [h.strip() for h in raw.split(",") if h.strip()]
+
+    def validate_repo_url(self, url: str) -> "git_providers.RepoRef":
+        """Parse ``url`` and enforce the SSRF host allowlist in one call.
+
+        Central entry point for every caller-supplied repo URL — install,
+        upgrade and version-fetch all go through this before issuing any HTTP
+        request. Raises ``ValueError`` with a message safe to surface as an
+        API 400/422.
+        """
+        ref = git_providers.parse_repo(url)
+        git_providers.validate_repo_host(ref, self._allowed_repo_hosts())
+        return ref
 
     def get_known_versions(self, url: str) -> list:
         """Synchronously return cached versions for a repo URL — no network.
@@ -631,14 +654,17 @@ class PluginService:
                 return [v for v in collection if v != "latest"]
 
         try:
-            ref = git_providers.parse_repo(github_url)
-        except ValueError:
-            return []
+            ref = self.validate_repo_url(github_url)
+        except ValueError as exc:
+            log.warning(f"VERSIONS: rejected repo URL '{github_url}': {exc}")
+            raise
 
         api_url = git_providers.tags_url(ref)
         try:
             headers = self._auth_headers_for(github_url, ref.provider)
-            async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+            # No redirects here: this is a pure provider-API (tags) call, so a
+            # 3xx would only ever mean something unexpected is happening.
+            async with httpx.AsyncClient(headers=headers, follow_redirects=False) as client:
                 resp = await client.get(api_url)
                 if resp.status_code == 200:
                     raw_tags = git_providers.tag_names(ref.provider, resp.json())
@@ -659,7 +685,15 @@ class PluginService:
 
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False):
         """Downloads, extracts and registers a new plugin from GitHub or GitLab."""
-        ref = git_providers.parse_repo(github_url)
+        try:
+            ref = self.validate_repo_url(github_url)
+        except ValueError as exc:
+            # SSRF host allowlist rejection (or an unparseable URL) — every
+            # caller (API background task, reconcile-on-boot, NiceGUI) treats
+            # a False return the same way an install failure always has.
+            log.error(f"INSTALL: rejected repo URL '{github_url}': {exc}")
+            bus.emit("plugin:install_failed", {"repo": github_url, "error": str(exc)})
+            return False
         repo = ref.repo
         provider = ref.provider
 
@@ -683,7 +717,12 @@ class PluginService:
 
         try:
             headers = self._auth_headers_for(github_url, provider)
-            async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
+            # Default to no redirects: the auth header (possibly a PAT) must
+            # never silently follow a 3xx to a host outside the allowlist.
+            # GitHub's archive URLs are a known, deliberate exception — they
+            # redirect to codeload.github.com — so those two GETs opt back in
+            # explicitly below.
+            async with httpx.AsyncClient(follow_redirects=False, headers=headers) as client:
                 # 1. Fetch Repository Metadata (to discover the default branch)
                 api_url = git_providers.metadata_url(ref)
                 resp = await client.get(api_url)
@@ -702,7 +741,7 @@ class PluginService:
                 zip_url = git_providers.archive_url(ref, ref_name, is_tag=not is_latest)
 
                 log.info(f"DOWNLOAD: Fetching source from {zip_url}")
-                response = await client.get(zip_url)
+                response = await client.get(zip_url, follow_redirects=True)
 
                 # GitHub fallback: many repos default to 'master' instead of 'main'.
                 if (
@@ -713,7 +752,7 @@ class PluginService:
                 ):
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
                     zip_url = git_providers.archive_url(ref, "master", is_tag=False)
-                    response = await client.get(zip_url)
+                    response = await client.get(zip_url, follow_redirects=True)
 
                 response.raise_for_status()
 

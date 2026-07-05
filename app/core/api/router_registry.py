@@ -8,10 +8,16 @@ The registry mounts each router under ``/api/plugins/<plugin-id>/`` and
 tears it down cleanly when a plugin is deactivated.
 
 Authentication is enforced **at the registry level**: every mounted plugin route
-carries ``require_api_auth``, so a plugin route can never be served anonymously —
-even if the plugin author forgets a guard. Plugins still add
+carries ``require_api_auth`` by default, so a plugin route can never be served
+anonymously — even if the plugin author forgets a guard. Plugins still add
 ``Depends(require_permission("api:write"))`` on individual routes when they need
 finer authorization than "any authenticated caller".
+
+A plugin that genuinely needs an unauthenticated route (e.g. a webhook that
+verifies its own signature, like a Discord/GitLab inbound hook) opts in with
+``register(router, module_id, public=True)`` / ``ctx.register_routes(router,
+public=True)``. This mounts the router WITHOUT ``require_api_auth`` — the
+handler itself is then solely responsible for authenticating the request.
 
 Usage (from a plugin entrypoint)::
 
@@ -47,6 +53,8 @@ class PluginRouterRegistry:
         self._lock = threading.Lock()
         # module_id → APIRouter
         self._routers: Dict[str, APIRouter] = {}
+        # module_id → whether it was registered as public (no require_api_auth)
+        self._public: Dict[str, bool] = {}
         # Keep a reference to the FastAPI app once it's available.
         self._app: Optional[FastAPI] = None
 
@@ -70,22 +78,27 @@ class PluginRouterRegistry:
     # Plugin-facing API
     # ------------------------------------------------------------------
 
-    def register(self, module_id: str, router: APIRouter) -> None:
+    def register(self, module_id: str, router: APIRouter, public: bool = False) -> None:
         """
         Register an ``APIRouter`` for *module_id*.
 
         If the FastAPI app is already available the router is mounted
         immediately; otherwise it is queued for mounting when
         ``bind_app()`` is called.
+
+        ``public=True`` mounts the router WITHOUT the default
+        ``require_api_auth`` dependency — only for routes whose handler
+        performs its own authentication (e.g. a webhook signature check).
         """
         with self._lock:
             if module_id in self._routers:
                 log.warning("RouterRegistry: '%s' already has a registered router — replacing.", module_id)
             self._routers[module_id] = router
+            self._public[module_id] = public
             app = self._app
 
         if app is not None:
-            self._mount_router(app, module_id, router)
+            self._mount_router(app, module_id, router, public=public)
         else:
             log.debug("RouterRegistry: queued router for '%s' (app not yet bound)", module_id)
 
@@ -96,6 +109,7 @@ class PluginRouterRegistry:
         """
         with self._lock:
             router = self._routers.pop(module_id, None)
+            self._public.pop(module_id, None)
             app = self._app
 
         if router is None or app is None:
@@ -131,21 +145,29 @@ class PluginRouterRegistry:
         # Convert e.g. "lyndrix.plugin.discord_notifier" → "/api/plugins/lyndrix.plugin.discord_notifier"
         return f"/api/plugins/{module_id}"
 
-    def _mount_router(self, app: FastAPI, module_id: str, router: APIRouter) -> None:
+    def _mount_router(self, app: FastAPI, module_id: str, router: APIRouter, public: bool = False) -> None:
         prefix = self._prefix_for(module_id)
         # Lazy import keeps the registry free of import-order coupling at boot.
         from core.api.security import require_api_auth
 
         try:
-            # Authentication is enforced at the registry level: every plugin route
-            # gets require_api_auth, so a route can never be anonymous even if the
-            # plugin author forgets. Plugins add Depends(require_permission(...)) on
-            # their own routes for finer authorization (e.g. api:write on mutations).
+            # Authentication is enforced at the registry level by default: every
+            # plugin route gets require_api_auth, so a route can never be
+            # anonymous even if the plugin author forgets. Plugins add
+            # Depends(require_permission(...)) on their own routes for finer
+            # authorization (e.g. api:write on mutations). public=True opts a
+            # whole router out of this — the handler must self-authenticate.
+            dependencies = [] if public else [Depends(require_api_auth)]
+            if public:
+                log.warning(
+                    "RouterRegistry: mounting PUBLIC routes for '%s' at '%s' — "
+                    "handler must self-authenticate.", module_id, prefix,
+                )
             app.include_router(
                 router,
                 prefix=prefix,
                 tags=[module_id],
-                dependencies=[Depends(require_api_auth)],
+                dependencies=dependencies,
             )
             # include_router() appends routes after NiceGUI's root catch-all (path "").
             # Move the newly added routes to before that catch-all so they match first.
@@ -159,14 +181,14 @@ class PluginRouterRegistry:
     def _mount_pending(self) -> None:
         """Mount all routers in the registry onto the bound app."""
         with self._lock:
-            items = list(self._routers.items())
+            items = [(mid, r, self._public.get(mid, False)) for mid, r in self._routers.items()]
             app = self._app
 
         if app is None:
             return
 
-        for module_id, router in items:
-            self._mount_router(app, module_id, router)
+        for module_id, router, public in items:
+            self._mount_router(app, module_id, router, public=public)
 
 
 # Module-level singleton — import this everywhere.

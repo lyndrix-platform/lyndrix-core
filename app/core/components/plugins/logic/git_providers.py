@@ -21,6 +21,7 @@ also allows nested groups, so the project is addressed by the URL-encoded
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 from urllib.parse import quote, urlsplit
 
 GITHUB = "github"
@@ -102,6 +103,33 @@ def parse_repo(url: str) -> RepoRef:
 
     # Normalise host (drop port for display only when default); keep as-is otherwise.
     return RepoRef(host=host, scheme=scheme, namespace=namespace, repo=repo, provider=provider)
+
+
+def validate_repo_host(ref: RepoRef, allowed_hosts: Iterable[str]) -> None:
+    """Enforce the SSRF host allowlist for a parsed repo reference.
+
+    ``detect_provider`` treats ANY non-github.com host as a trusted GitLab, so
+    without this guard a caller-supplied repo URL (install/upgrade/version
+    picker) could point the installer's authenticated HTTP client at an
+    arbitrary host. Call this immediately after :func:`parse_repo`, before any
+    HTTP request is made for the reference.
+
+    A plain hostname allowlist is sufficient here — resolving the hostname or
+    special-casing IP literals adds nothing: neither would ever match an entry
+    in an operator-curated allowlist of real git hostnames, so they are
+    rejected implicitly. Raises ``ValueError`` (safe to surface as an API
+    400/422) when the scheme isn't http/https or the host isn't allowed.
+    """
+    if ref.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Unsupported URL scheme '{ref.scheme}' — only http/https are allowed"
+        )
+    allowed = {h.strip().lower() for h in allowed_hosts if h and h.strip()}
+    if ref.host.lower() not in allowed:
+        raise ValueError(
+            f"Repository host '{ref.host}' is not in the allowed plugin repo "
+            f"hosts ({', '.join(sorted(allowed)) or 'none configured'})"
+        )
 
 
 def _gitlab_project_id(ref: RepoRef) -> str:

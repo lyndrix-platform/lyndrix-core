@@ -8,9 +8,11 @@ direct grants can be inspected and configured programmatically.
 Authentication & authorization
 -------------------------------
 All endpoints require a valid API identity (system key, per-user API key, HTTP
-Basic or dashboard session). Reads require the ``api:read`` permission; any
-mutation requires ``api:write``. The master system key and ``superadmin`` role
-bypass these checks, consistent with the rest of the API surface.
+Basic or dashboard session). Reads require the ``admin:read`` permission; any
+mutation requires ``admin:write`` (this API manages other users' access, so it
+sits in the admin tier rather than the general ``api:read``/``api:write``
+pair). The master system key and ``superadmin`` role bypass these checks,
+consistent with the rest of the API surface.
 
 Routes (mounted under ``/api/permissions``)::
 
@@ -140,7 +142,7 @@ def _user_service():
     response_model=Dict[str, object],
 )
 async def list_permission_catalog(
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     """Return every permission id the system knows about (route/plugin/feature/api)."""
     reg = _registry()
@@ -169,7 +171,7 @@ async def list_permission_catalog(
 
 # ── Roles (manifest-declared bundles — read-only reference) ─────────────────
 @permissions_router.get("/roles", summary="List manifest-declared roles")
-async def list_roles(identity: ApiIdentity = Depends(require_permission("api:read"))):
+async def list_roles(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     """Read-only: roles are registry metadata, not assignable entities.
 
     Their effect (permissions attached to auto_map groups) is applied once via
@@ -197,7 +199,7 @@ async def list_roles(identity: ApiIdentity = Depends(require_permission("api:rea
 
 # ── Groups ───────────────────────────────────────────────────────────────────
 @permissions_router.get("/groups", summary="List groups and their permissions")
-async def list_groups(identity: ApiIdentity = Depends(require_permission("api:read"))):
+async def list_groups(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     groups = [_group_to_out(g).model_dump() for g in _group_service().get_all()]
     return {"status": "ok", "count": len(groups), "groups": groups}
 
@@ -205,7 +207,7 @@ async def list_groups(identity: ApiIdentity = Depends(require_permission("api:re
 @permissions_router.post("/groups", summary="Create a group")
 async def create_group(
     payload: GroupCreateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     name = payload.name.strip()
     if not name:
@@ -229,7 +231,7 @@ async def create_group(
 @permissions_router.get("/groups/{group_id}", summary="Read a single group")
 async def get_group(
     group_id: int,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     grp = _group_service().get_by_id(group_id)
     if not grp:
@@ -241,7 +243,7 @@ async def get_group(
 async def update_group(
     group_id: int,
     payload: GroupUpdateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _group_service()
     grp = svc.get_by_id(group_id)
@@ -273,7 +275,7 @@ async def update_group(
 @permissions_router.delete("/groups/{group_id}", summary="Delete a group")
 async def delete_group(
     group_id: int,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _group_service()
     grp = svc.get_by_id(group_id)
@@ -293,7 +295,7 @@ async def delete_group(
 )
 async def get_user_permissions(
     username: str,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     user = _user_service().get_by_username(username)
     if not user:
@@ -328,7 +330,7 @@ async def get_user_permissions(
 async def set_user_extra_permissions(
     username: str,
     payload: ExtraPermissionsRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _user_service()
     if not svc.get_by_username(username):
@@ -355,7 +357,7 @@ async def add_user_extra_permission(
     username: str,
     permission: str,
     allow_unknown: bool = False,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _user_service()
     if not svc.get_by_username(username):
@@ -381,7 +383,7 @@ async def add_user_extra_permission(
 async def remove_user_extra_permission(
     username: str,
     permission: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _user_service()
     if not svc.get_by_username(username):

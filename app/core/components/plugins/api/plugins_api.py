@@ -112,7 +112,7 @@ async def list_plugins(identity: ApiIdentity = Depends(require_permission("api:r
 @plugins_router.post("/{plugin_id}/enable", summary="Enable a plugin")
 async def enable_plugin(
     plugin_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     mgr = _manager()
     if plugin_id not in mgr.registry:
@@ -128,7 +128,7 @@ async def enable_plugin(
 @plugins_router.post("/{plugin_id}/disable", summary="Disable a plugin")
 async def disable_plugin(
     plugin_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     mgr = _manager()
     if plugin_id not in mgr.registry:
@@ -144,7 +144,7 @@ async def disable_plugin(
 @plugins_router.post("/{plugin_id}/reload", summary="Reload a plugin in-place")
 async def reload_plugin(
     plugin_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     mgr = _manager()
     if plugin_id not in mgr.registry:
@@ -164,9 +164,16 @@ async def reload_plugin(
 async def install_plugin(
     payload: InstallRequest,
     background_tasks: BackgroundTasks,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     svc = _plugin_service()
+    # Validate the repo host against the configured allowlist synchronously so
+    # a rejected URL surfaces as 422 to the caller — install runs as a
+    # background task afterwards, where a raised error would only be logged.
+    try:
+        svc.validate_repo_url(payload.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Install queued for '{payload.url}' v{payload.version} by '{identity.username}'.")
     background_tasks.add_task(svc.install_plugin, payload.url, payload.version, False)
     return {"status": "ok", "action": "install_queued", "url": payload.url, "version": payload.version}
@@ -177,7 +184,7 @@ async def upgrade_plugin(
     plugin_id: str,
     payload: UpgradeRequest,
     background_tasks: BackgroundTasks,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     mgr = _manager()
     if plugin_id not in mgr.registry:
@@ -187,6 +194,10 @@ async def upgrade_plugin(
     if not repo_url:
         raise HTTPException(status_code=400, detail=f"Plugin '{plugin_id}' has no repo_url")
     svc = _plugin_service()
+    try:
+        svc.validate_repo_url(repo_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Upgrade queued for '{plugin_id}' v{payload.version} by '{identity.username}'.")
     background_tasks.add_task(svc.install_plugin, repo_url, payload.version, True)
     return {"status": "ok", "action": "upgrade_queued", "plugin_id": plugin_id, "version": payload.version}
@@ -196,7 +207,7 @@ async def upgrade_plugin(
 async def uninstall_plugin(
     plugin_id: str,
     background_tasks: BackgroundTasks,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     import pathlib
 
@@ -224,7 +235,7 @@ async def uninstall_plugin(
 @plugins_router.get("/marketplace", summary="Fetch the plugin marketplace listing")
 async def get_marketplace(
     force_refresh: bool = False,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     svc = _plugin_service()
     plugins = await svc.fetch_marketplace_data(force_refresh=force_refresh)
@@ -235,17 +246,20 @@ async def get_marketplace(
 async def get_plugin_versions(
     url: str,
     force_refresh: bool = False,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     svc = _plugin_service()
-    versions = await svc.get_plugin_versions(url, force_refresh=force_refresh)
+    try:
+        versions = await svc.get_plugin_versions(url, force_refresh=force_refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return {"status": "ok", "url": url, "versions": versions}
 
 
 # ── Custom repositories ──────────────────────────────────────────────────────
 
 @plugins_router.get("/custom-repos", summary="List custom plugin repositories")
-async def list_custom_repos(identity: ApiIdentity = Depends(require_permission("api:read"))):
+async def list_custom_repos(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     repos = _custom_repo_service().list_all()
     return {
         "status": "ok",
@@ -268,7 +282,7 @@ async def list_custom_repos(identity: ApiIdentity = Depends(require_permission("
 @plugins_router.post("/custom-repos", summary="Add a custom plugin repository", status_code=201)
 async def add_custom_repo(
     payload: CustomRepoRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     try:
         row = _custom_repo_service().create(
@@ -298,7 +312,7 @@ async def add_custom_repo(
 @plugins_router.delete("/custom-repos/{repo_id}", summary="Remove a custom plugin repository")
 async def delete_custom_repo(
     repo_id: int,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     ok = _custom_repo_service().delete(repo_id)
     if not ok:
@@ -310,7 +324,7 @@ async def delete_custom_repo(
 @plugins_router.get("/{plugin_id}/settings", summary="Get plugin settings schema and current values")
 async def get_plugin_settings(
     plugin_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     from core.components.vault.logic.kv_helper import read_secret_dict
 
@@ -354,7 +368,7 @@ async def get_plugin_settings(
 async def update_plugin_settings(
     plugin_id: str,
     payload: PluginSettingsUpdate,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
 
@@ -409,7 +423,7 @@ async def update_plugin_settings(
 @plugins_router.post("/{plugin_id}/rollback", summary="Roll a plugin back to its previous version")
 async def rollback_plugin(
     plugin_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     import pathlib
 

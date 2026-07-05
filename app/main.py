@@ -497,7 +497,7 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_permission(
 @app.post("/api/system/config", tags=["System"], summary="Update runtime config")
 async def set_runtime_config(
     payload: ConfigUpdateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     """
     Update config keys via API.
@@ -546,7 +546,7 @@ async def set_runtime_config(
 
 
 @app.post("/api/system/restart", tags=["System"], summary="Restart the core container")
-async def system_restart(identity: ApiIdentity = Depends(require_permission("api:write"))):
+async def system_restart(identity: ApiIdentity = Depends(require_permission("admin:write"))):
     """Restart THIS core's own Docker container — e.g. to make a plugin upgrade take
     effect without an external ``docker restart`` (a recurring gotcha).
 

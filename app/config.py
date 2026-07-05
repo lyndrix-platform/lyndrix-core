@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     )
     # Interval for the background plugin-update check (seconds; min 300).
     LYNDRIX_PLUGIN_UPDATE_CHECK_INTERVAL_S: int = 21600
+    # Comma-separated allowlist of git hostnames the plugin installer may talk
+    # to (install/upgrade/version-fetch). Caller-supplied repo URLs (and any
+    # PAT configured for a non-GitHub host) are rejected outside this list —
+    # the SSRF guard in core.components.plugins.logic.git_providers. Add your
+    # self-hosted GitLab's hostname here to install plugins from it.
+    LYNDRIX_PLUGIN_REPO_HOSTS: str = "github.com"
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
@@ -518,6 +524,11 @@ EDITABLE_SETTINGS: List[EditableSetting] = [
                     "How often the background job checks installed plugins for newer "
                     "release tags (seconds, minimum 300).",
                     kind="int", category="Plugins"),
+    EditableSetting("LYNDRIX_PLUGIN_REPO_HOSTS", "Allowed Plugin Repo Hosts",
+                    "Comma-separated git hostnames the plugin installer may fetch "
+                    "from (install/upgrade/version-fetch). Add a self-hosted GitLab "
+                    "hostname here to install plugins from it.",
+                    category="Plugins"),
 ]
 
 EDITABLE_SETTING_CATEGORIES: List[str] = ["Application", "Localization", "Theming", "Plugins"]

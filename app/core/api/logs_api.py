@@ -22,7 +22,7 @@ def tail_logs(
     source: str | None = Query(default=None, description="Exact logger name, e.g. 'Plugin:Docker Manager'"),
     limit: int = Query(default=200, ge=1, le=1000),
     level: str | None = Query(default=None, description="Minimum severity (DEBUG/INFO/WARNING/ERROR)"),
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     entries = log_ring.snapshot(source=source, limit=limit, min_level=level)
     return {
@@ -37,5 +37,5 @@ def tail_logs(
 
 
 @logs_router.get("/sources", summary="List log sources seen so far")
-def list_log_sources(identity: ApiIdentity = Depends(require_permission("api:read"))):
+def list_log_sources(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     return {"status": "ok", "sources": log_ring.sources()}

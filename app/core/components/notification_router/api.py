@@ -67,7 +67,7 @@ def _serialize_endpoint(plugin_id: str, endpoint) -> dict[str, Any]:
     summary="List all discovered notification endpoints",
 )
 async def list_endpoints(
-    _identity: ApiIdentity = Depends(require_permission("api:read")),
+    _identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     items = [_serialize_endpoint(pid, ep) for pid, ep in endpoint_registry.iter_all()]
     items.sort(key=lambda item: (item["plugin_name"].lower(), item["endpoint_name"]))
@@ -79,7 +79,7 @@ async def list_endpoints(
     summary="List registered messaging gateway providers",
 )
 async def list_providers(
-    _identity: ApiIdentity = Depends(require_permission("api:read")),
+    _identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     providers = []
     for adapter in messaging_gateway.list_adapters():
@@ -102,7 +102,7 @@ async def list_providers(
 )
 async def provider_health(
     provider_id: str,
-    _identity: ApiIdentity = Depends(require_permission("api:read")),
+    _identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     status = await messaging_gateway.provider_health(provider_id)
     if status is None:
@@ -136,7 +136,7 @@ def _serialize_config_field(cf) -> dict[str, Any]:
 )
 async def get_provider_config(
     provider_id: str,
-    _identity: ApiIdentity = Depends(require_permission("api:read")),
+    _identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     adapter = messaging_gateway.get_adapter(provider_id)
     if adapter is None:
@@ -159,7 +159,7 @@ class _ProviderConfigBody(BaseModel):
 async def patch_provider_config(
     provider_id: str,
     body: _ProviderConfigBody,
-    _identity: ApiIdentity = Depends(require_permission("api:write")),
+    _identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     adapter = messaging_gateway.get_adapter(provider_id)
     if adapter is None:
@@ -222,7 +222,7 @@ async def patch_endpoint(
     plugin_id: str,
     endpoint_name: str,
     body: _PatchBody,
-    _identity: ApiIdentity = Depends(require_permission("api:write")),
+    _identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     if endpoint_registry.get(plugin_id, endpoint_name) is None:
         raise HTTPException(status_code=404, detail="Unknown endpoint")

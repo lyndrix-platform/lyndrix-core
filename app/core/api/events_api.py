@@ -9,8 +9,10 @@ auth alone would leave every React client on the public topic subset. To grant
 browsers the authenticated stream without leaking the long-lived session bearer
 into URLs, an authenticated client first mints a short-TTL HMAC ticket via
 ``POST /api/events/ticket`` and passes it as ``GET /api/events?ticket=…``.
-The signing secret is process-random: tickets only need to outlive the few
-seconds between mint and connect, and a restart invalidating them is fine.
+The signing secret is derived deterministically from ``STORAGE_SECRET`` (see
+``_derive_ticket_secret``) so tickets stay valid across a restart or across
+replicas sharing the same secret; it only falls back to a process-random
+value when ``STORAGE_SECRET`` is unset.
 """
 import asyncio
 import base64
@@ -57,7 +59,30 @@ _PUBLIC_TOPICS = frozenset({
 
 # ─── Stream tickets ──────────────────────────────────────────────────────────
 
-_TICKET_SECRET = secrets.token_bytes(32)
+_TICKET_CONTEXT = b"lyndrix-sse-ticket-v1"
+
+
+def _derive_ticket_secret() -> bytes:
+    """Derive the SSE ticket HMAC key from ``STORAGE_SECRET``.
+
+    Deterministic across restarts/replicas (unlike a fresh random secret per
+    process) since it's keyed off the same secret every instance already
+    shares. Falls back to a process-random secret when ``STORAGE_SECRET`` is
+    unset/empty — tickets then only work within this single process, exactly
+    the previous behavior.
+    """
+    try:
+        from config import settings
+
+        storage_secret = (settings.STORAGE_SECRET or "").strip()
+    except Exception:  # pragma: no cover - defensive, e.g. import-order edge case
+        storage_secret = ""
+    if not storage_secret:
+        return secrets.token_bytes(32)
+    return hmac.new(storage_secret.encode("utf-8"), _TICKET_CONTEXT, hashlib.sha256).digest()
+
+
+_TICKET_SECRET = _derive_ticket_secret()
 _TICKET_TTL_SECONDS = 60
 
 

@@ -129,7 +129,13 @@ def render_plugins_page():
         if not source_url:
             return
 
-        tags = await plugin_service.get_plugin_versions(source_url, force_refresh=force_refresh)
+        try:
+            tags = await plugin_service.get_plugin_versions(source_url, force_refresh=force_refresh)
+        except ValueError as exc:
+            # Repo host rejected by the SSRF allowlist (or an unparseable URL) —
+            # degrade to just 'latest' rather than breaking the dialog.
+            log.warning(f"Version fetch rejected for '{source_url}': {exc}")
+            tags = []
         options = ['latest'] + [tag for tag in tags if tag != 'latest']
         if current_version and current_version not in options:
             bare_version = current_version.lstrip('v')

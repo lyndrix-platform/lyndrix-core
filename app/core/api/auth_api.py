@@ -10,11 +10,25 @@ from pydantic import BaseModel
 
 from config import settings
 from core.api.security import ApiIdentity, require_api_auth, require_permission
+from core.components.vault.logic.rate_limit import SlidingWindowRateLimiter
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
 
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+# Per-(username, client IP) throttle for failed login attempts. Argon2's cost
+# makes an unthrottled login endpoint a CPU-exhaustion amplifier — 5 failures
+# within 60s locks that key out, independent of the vault unseal limiter.
+# Only FAILED attempts are recorded; a successful login never counts against
+# the budget.
+_login_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60)
+
+
+def _login_rate_limit_key(username: str, request: Request) -> str:
+    ip = request.client.host if request.client else "unknown"
+    return f"{username.strip().lower()}|{ip}"
+
 
 # Per-user background images live on the filesystem (no DB change). Existence on
 # disk is the source of truth. Served unauthenticated by username-in-path so the
@@ -130,12 +144,26 @@ async def login(payload: LoginRequest, request: Request):
     accounts resolve to their linked local profile. On success creates a named
     UserApiKey row and returns the raw key once; the React frontend stores it
     as a bearer token. Providers run credential checks off the event loop.
+
+    Rate-limited per (username, client IP): more than 5 FAILED attempts within
+    60s reject with 429 before the provider chain (and its Argon2 cost) ever
+    runs — an unthrottled login is a CPU-exhaustion amplifier.
     """
     from core.components.auth.logic.providers.registry import provider_registry
     from core.components.auth.logic.api_key_service import api_key_service
 
+    rl_key = _login_rate_limit_key(payload.username, request)
+    retry = _login_limiter.retry_after(rl_key)
+    if retry > 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Try again later.",
+            headers={"Retry-After": str(retry)},
+        )
+
     result = await provider_registry.authenticate(payload.username, payload.password)
     if result is None:
+        _login_limiter.record(rl_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -310,7 +338,7 @@ def _serialize_auth_field(spec, value: str, source: str) -> Dict[str, object]:
 
 
 @auth_router.get("/config", summary="Get auth provider configuration (secrets masked)")
-def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read"))):
+def get_auth_config(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     """Return the auth provider configuration as a metadata-rich ``fields`` array.
 
     Each field reports its label/hint/env-var, the effective value + its source
@@ -336,7 +364,7 @@ def get_auth_config(identity: ApiIdentity = Depends(require_permission("api:read
 @auth_router.patch("/config", summary="Update auth provider configuration")
 def update_auth_config(
     payload: AuthConfigUpdate,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     """Persist auth provider config to Vault (core/auth) and reinitialize the
     provider chain so changes take effect immediately.
@@ -382,7 +410,7 @@ def update_auth_config(
 
 
 @auth_router.post("/reload", summary="Reinitialize the auth provider chain")
-def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("api:write"))):
+def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("admin:write"))):
     """Re-read provider configuration and rebuild the auth chain (local/LDAP/OIDC)."""
     from core.components.auth.logic.auth_service import auth_service
 

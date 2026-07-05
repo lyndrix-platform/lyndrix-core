@@ -146,7 +146,7 @@ def _key_to_out(k) -> ApiKeyOut:
 # ── User CRUD ────────────────────────────────────────────────────────────────
 
 @users_router.get("", summary="List all users")
-def list_users(identity: ApiIdentity = Depends(require_permission("api:read"))):
+def list_users(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     # Sync (threadpool): get_all() is a blocking DB read.
     users = [_to_user_out(u).model_dump() for u in _user_service().get_all()]
     return {"status": "ok", "count": len(users), "users": users}
@@ -209,8 +209,12 @@ async def create_user(
 @users_router.get("/{username}", summary="Get a user")
 def get_user(
     username: str,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_api_auth),
 ):
+    """Self-read needs no special permission; reading another user's profile
+    requires ``admin:read``."""
+    if username != identity.username and not identity.allows("admin:read"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:read")
     # Sync (threadpool): get_by_username() is a blocking DB read.
     user = _user_service().get_by_username(username)
     if not user:
@@ -337,8 +341,13 @@ def delete_user(
 @users_router.get("/{username}/api-keys", summary="List API keys for a user")
 def list_api_keys(
     username: str,
-    identity: ApiIdentity = Depends(require_permission("api:read")),
+    identity: ApiIdentity = Depends(require_api_auth),
 ):
+    """Self-service: any authenticated user may list their own keys (they are
+    bounded by the owner's effective permissions anyway, same as password
+    self-service). Listing another user's keys requires ``admin:read``."""
+    if username != identity.username and not identity.allows("admin:read"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:read")
     # Sync (threadpool): the lookups are blocking DB reads.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
@@ -350,8 +359,12 @@ def list_api_keys(
 def create_api_key(
     username: str,
     payload: ApiKeyCreateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_api_auth),
 ):
+    """Self-service: any authenticated user may mint their own keys. Creating
+    a key for another user requires ``admin:write``."""
+    if username != identity.username and not identity.allows("admin:write"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + key insert are blocking DB calls.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
@@ -370,8 +383,12 @@ def create_api_key(
 def revoke_api_key(
     username: str,
     key_id: int,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_api_auth),
 ):
+    """Self-service: any authenticated user may revoke their own keys. Revoking
+    another user's key requires ``admin:write``."""
+    if username != identity.username and not identity.allows("admin:write"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + revoke are blocking DB calls.
     if not _user_service().get_by_username(username):
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")

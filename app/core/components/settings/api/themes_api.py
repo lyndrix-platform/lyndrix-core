@@ -55,7 +55,7 @@ async def get_active_theme(identity: ApiIdentity = Depends(require_permission("a
 @themes_router.put("/active", summary="Set the active theme")
 async def set_active_theme(
     payload: ActiveThemeRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     from core.components.settings.logic import themes_service
 
@@ -141,7 +141,7 @@ async def get_theme_detail(
 @themes_router.post("", summary="Upload a theme ZIP", status_code=201)
 async def upload_theme(
     file: UploadFile = File(...),
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     if not file.filename:
         raise HTTPException(status_code=422, detail="No file provided")
@@ -208,7 +208,7 @@ async def upload_theme(
 @themes_router.delete("/{theme_id}", summary="Delete a theme")
 async def delete_theme(
     theme_id: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     if theme_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete the default theme")

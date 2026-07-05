@@ -174,12 +174,19 @@ class ModuleContext:
         get_theme_engine().register_plugin_overrides(self.manifest.id, overrides)
         self.log.debug("THEME: Registered %d style override(s).", len(overrides))
 
-    def register_routes(self, router: APIRouter) -> None:
+    def register_routes(self, router: APIRouter, public: bool = False) -> None:
         """
         Mount a FastAPI ``APIRouter`` for this plugin.
 
         Routes are prefixed at ``/api/plugins/<module-id>/`` and appear in
         the OpenAPI schema automatically.  Call this inside ``setup(ctx)``.
+
+        By default every route requires authentication (``require_api_auth``)
+        at the registry level. Pass ``public=True`` to mount the router
+        WITHOUT that dependency — only for routes whose handler performs its
+        own authentication, e.g. a webhook that verifies a provider signature
+        (Discord/GitLab-style inbound hooks, which must respond before any
+        session/API-key check would even apply).
 
         Example::
 
@@ -197,8 +204,9 @@ class ModuleContext:
         # Import here to avoid a circular import at module load time.
         from core.api.router_registry import router_registry
 
-        router_registry.register(self.manifest.id, router)
-        self.log.info("ROUTES: Registered HTTP router at /api/plugins/%s/", self.manifest.id)
+        router_registry.register(self.manifest.id, router, public=public)
+        kind = "PUBLIC" if public else "authenticated"
+        self.log.info("ROUTES: Registered %s HTTP router at /api/plugins/%s/", kind, self.manifest.id)
 
     # --- VAULT PROXY (Hier war der Einrückungsfehler) ---
 
