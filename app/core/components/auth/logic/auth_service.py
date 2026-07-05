@@ -45,7 +45,7 @@ _DEFAULT_GROUPS: list[tuple[str, str, list]] = [
             "feature:users.view", "feature:users.edit",
             "feature:groups.view", "feature:groups.edit",
             "feature:auth.configure", "feature:plugins.manage",
-            "api:read", "api:write",
+            "api:read", "api:write", "admin:read", "admin:write",
         ],
     ),
 ]
@@ -92,6 +92,7 @@ class AuthService:
         log.debug("DB: IAM tables checked/created.")
         self._migrate_schema()
         self._seed_default_groups()
+        self._ensure_admin_permissions()
         self._seed_users()
         self._initialize_providers()
 
@@ -116,6 +117,29 @@ class AuthService:
                     ))
                     log.info(f"SEED: Created default group '{name}'.")
             session.commit()
+
+    def _ensure_admin_permissions(self) -> None:
+        """One-time additive migration: guarantee INT_ADMIN carries admin:read/admin:write.
+
+        ``_seed_default_groups`` is create-if-missing only, so a pre-existing
+        INT_ADMIN row (seeded before the admin:* tier existed) never picks up
+        the new permissions on its own. This ADDS only the missing admin:*
+        entries to that single row and leaves everything else — including any
+        permission an operator removed on purpose — untouched. Safe to run on
+        every boot; a no-op once the entries are present.
+        """
+        if not db_instance.SessionLocal:
+            return
+        with db_instance.SessionLocal() as session:
+            grp = session.query(Group).filter(Group.name == "INT_ADMIN").first()
+            if grp is None:
+                return  # not seeded yet this pass — the next boot picks it up
+            current = list(grp.permissions or [])
+            missing = [p for p in ("admin:read", "admin:write") if p not in current]
+            if missing:
+                grp.permissions = sorted(current + missing)
+                session.commit()
+                log.info(f"MIGRATE: Added {missing} to 'INT_ADMIN' group permissions.")
 
     def _migrate_schema(self):
         """

@@ -55,6 +55,10 @@ _BUILTIN: List[PermissionDef] = [
                   description="Sichtbarkeit der Core- und Services-Sektionen im Dashboard (Viewer sehen nur Apps & Tools)"),
     PermissionDef("api:read",                 "API lesen",                     "api",     icon="api"),
     PermissionDef("api:write",                "API schreiben",                 "api",     icon="api"),
+    PermissionDef("admin:read",               "Administration ansehen",        "api",     icon="admin_panel_settings",
+                  description="Lesender Zugriff auf administrative Endpunkte (Benutzer, Gruppen, Logs, Plugin- und Systemverwaltung)"),
+    PermissionDef("admin:write",              "Administration verwalten",      "api",     icon="admin_panel_settings",
+                  description="Schreibender Zugriff auf administrative Endpunkte (Benutzer-, Gruppen- und Systemverwaltung)"),
 ]
 
 _CATEGORY_ORDER = ["route", "plugin", "feature", "api"]

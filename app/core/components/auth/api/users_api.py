@@ -11,6 +11,27 @@ log = get_logger("Core:UsersAPI")
 
 users_router = APIRouter(prefix="/api/users", tags=["Users"])
 
+# System role flags assignable through the user API. These are NEVER resolved
+# to permissions directly (see access_service) — "superadmin" is the
+# break-glass bypass in ApiIdentity.allows(), "bot" is informational. Only a
+# caller who is already superadmin may grant either, and only these two
+# values are accepted — this is the privilege-escalation guard for
+# create/update (a client can never hand itself e.g. "roles": ["anything"]).
+_ASSIGNABLE_ROLES = {"superadmin", "bot"}
+
+
+def _is_superadmin(identity: ApiIdentity) -> bool:
+    return identity.is_system or "superadmin" in identity.roles
+
+
+def _list_changed(new_values: Optional[List[str]], current_values: Optional[List[str]]) -> bool:
+    """True if `new_values` is present in the payload AND differs from the
+    persisted value (compared as sets, so re-sending the same membership in a
+    different order — e.g. an echoed field — is never treated as a change)."""
+    if new_values is None:
+        return False
+    return sorted(set(new_values)) != sorted(set(current_values or []))
+
 
 class UserOut(BaseModel):
     username: str
@@ -73,9 +94,9 @@ def change_password(
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     """Self-service for your own account; changing another user's password
-    requires the ``api:write`` permission. The current password is always
+    requires the ``admin:write`` permission. The current password is always
     verified by the service before the change is applied."""
-    if username != identity.username and not identity.allows("api:write"):
+    if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Cannot change another user's password")
 
     ok, msg = _user_service().change_password(
@@ -134,7 +155,7 @@ def list_users(identity: ApiIdentity = Depends(require_permission("api:read"))):
 @users_router.post("", summary="Create a user", status_code=201)
 async def create_user(
     payload: UserCreateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
@@ -148,6 +169,16 @@ async def create_user(
     if len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
+    # System role flags are the break-glass bypass — only a superadmin may hand
+    # them out, and only the two known values are accepted at all.
+    requested_roles = sorted(set(payload.roles or []))
+    if requested_roles:
+        unknown = [r for r in requested_roles if r not in _ASSIGNABLE_ROLES]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown role(s): {', '.join(unknown)}")
+        if not _is_superadmin(identity):
+            raise HTTPException(status_code=403, detail="Only a superadmin may assign roles at creation")
+
     # Argon2 is CPU/memory-heavy; run it off the event loop so a user create
     # never blocks every other client (same rule as change_password).
     hashed = await asyncio.to_thread(hash_password, payload.password)
@@ -159,7 +190,7 @@ async def create_user(
                 hashed_password=hashed,
                 full_name=(payload.full_name or "").strip() or None,
                 email=(payload.email or "").strip() or None,
-                roles=sorted(set(payload.roles)),
+                roles=requested_roles,
                 groups=sorted(set(payload.groups)),
                 extra_permissions=[],
             )
@@ -191,13 +222,46 @@ def get_user(
 async def update_user(
     username: str,
     payload: UserUpdateRequest,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_api_auth),
 ):
+    """Self-service for full_name/email/password (the React dashboard lets any
+    authenticated user edit their own profile); everything else needs
+    ``admin:write``, and role changes additionally require the caller to be
+    superadmin. "Changed" means the field is present in the payload AND
+    differs from the stored value — echoing back an unchanged value never
+    403s."""
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
 
-    if not await asyncio.to_thread(_user_service().get_by_username, username):
+    current = await asyncio.to_thread(_user_service().get_by_username, username)
+    if not current:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    is_self = username == identity.username
+    roles_changed = _list_changed(payload.roles, current.roles)
+    groups_changed = _list_changed(payload.groups, current.groups)
+
+    if is_self:
+        # Self-service never touches privileged fields, even for an admin
+        # editing their own account — group/role escalation must go through
+        # another admin acting on the target account.
+        if roles_changed or groups_changed:
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot change your own roles or group membership",
+            )
+    elif not identity.allows("admin:write"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
+
+    if roles_changed:
+        if not _is_superadmin(identity):
+            raise HTTPException(status_code=403, detail="Only a superadmin may change roles")
+        unknown = [r for r in payload.roles if r not in _ASSIGNABLE_ROLES]
+        if unknown:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown role(s): {', '.join(sorted(set(unknown)))}"
+            )
+
     if payload.password is not None and len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
@@ -233,6 +297,14 @@ async def update_user(
     if out is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
+    if groups_changed:
+        # Group membership feeds the cached effective-permission set — drop it
+        # so the change is visible on the very next request (mirrors
+        # group_service.add_user_to_group/remove_user_from_group).
+        from core.components.auth.logic import access_service
+
+        access_service.invalidate_cache(username)
+
     log.info(f"API: User '{username}' updated by '{identity.username}'.")
     return {"status": "ok", "user": out.model_dump()}
 
@@ -240,7 +312,7 @@ async def update_user(
 @users_router.delete("/{username}", summary="Delete a user")
 def delete_user(
     username: str,
-    identity: ApiIdentity = Depends(require_permission("api:write")),
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     # Sync (threadpool): the existence check + delete are blocking DB calls.
     if username == identity.username:
