@@ -122,17 +122,33 @@ def resolve(result: AuthResult) -> Optional[AuthResult]:
             if result.email and not (user.email or "").strip():
                 user.email = result.email
 
-            # LDAP group mappings: the provider resolves directory groups to
-            # local group NAMES (group_service.resolve_ldap_groups). Union them
-            # into persistent membership — additive only; removing a user from
-            # a directory group does not auto-remove local membership.
+            # Legacy LDAP role-mapping compatibility: historically the LDAP
+            # provider folded directory→role_mapping values into result.roles and
+            # those became group memberships. Kept as-is so existing
+            # LYNDRIX_LDAP_ROLE_MAPPING / default-roles setups don't regress.
             if provider == "ldap" and result.roles:
                 current = set(user.groups or [])
                 mapped = {r for r in result.roles if r}
                 added = sorted(mapped - current)
                 if added:
                     user.groups = sorted(current | mapped)
-                    log.info(f"IDENTITY: LDAP mapped groups for '{user.username}': +{added}")
+                    log.info(f"IDENTITY: LDAP role-mapping membership for '{user.username}': +{added}")
+
+            # Directory group → local group membership (the clean channel): any
+            # provider may resolve directory groups to local Lyndrix group NAMES
+            # in result.groups (LDAP: LYNDRIX_LDAP_GROUP_MAPPING + each group's
+            # ldap_mappings). Union additively — leaving a directory group does
+            # not auto-remove local membership.
+            if result.groups:
+                current = set(user.groups or [])
+                mapped = {g for g in result.groups if g}
+                added = sorted(mapped - current)
+                if added:
+                    user.groups = sorted(current | mapped)
+                    log.info(
+                        f"IDENTITY: directory-group membership for '{user.username}' "
+                        f"({provider}): +{added}"
+                    )
 
             s.commit()
 

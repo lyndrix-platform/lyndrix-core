@@ -60,6 +60,9 @@ LDAP_SPECS: List[FieldSpec] = [
               "memberOf (Active Directory) / memberof (OpenLDAP)"),
     FieldSpec("ldap_role_mapping",  "LYNDRIX_LDAP_ROLE_MAPPING",  "",                  "Role Mapping",
               'JSON map from group DN to Lyndrix roles, e.g. {"cn=admins,dc=example,dc=com": ["admin","superadmin"]}'),
+    FieldSpec("ldap_group_mapping", "LYNDRIX_LDAP_GROUP_MAPPING", "",                  "Group Mapping",
+              'JSON map from directory group DN to local Lyndrix GROUP names (the permission carriers), '
+              'e.g. {"cn=admins,dc=example,dc=com": ["INT_ADMIN"]}'),
     FieldSpec("ldap_default_roles", "LYNDRIX_LDAP_DEFAULT_ROLES", "user",              "Default Roles",
               "Roles assigned to every successfully authenticated LDAP user (comma-separated)"),
     FieldSpec("ldap_tls_verify",    "LYNDRIX_LDAP_TLS_VERIFY",    "true",              "TLS Verify",
@@ -184,6 +187,14 @@ class AuthConfigService:
             except Exception:
                 log.warning("AUTH: ldap_role_mapping is not valid JSON — ignored.")
 
+        group_mapping: dict = {}
+        raw_gm = eff("ldap_group_mapping")
+        if raw_gm:
+            try:
+                group_mapping = json.loads(raw_gm)
+            except Exception:
+                log.warning("AUTH: ldap_group_mapping is not valid JSON — ignored.")
+
         default_roles = [r.strip() for r in eff("ldap_default_roles").split(",") if r.strip()] or ["user"]
         tls_verify = eff("ldap_tls_verify").lower() not in ("false", "0", "no")
 
@@ -195,6 +206,7 @@ class AuthConfigService:
             user_filter=eff("ldap_user_filter") or "(uid={username})",
             group_attr=eff("ldap_group_attr") or "memberOf",
             role_mapping=role_mapping,
+            group_mapping=group_mapping,
             default_roles=default_roles,
             tls_verify=tls_verify,
         )

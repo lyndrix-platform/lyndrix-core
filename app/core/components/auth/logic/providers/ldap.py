@@ -46,6 +46,7 @@ class LDAPProvider(AuthProvider):
         user_filter: str = "(uid={username})",
         group_attr: str = "memberOf",
         role_mapping: Optional[Dict[str, List[str]]] = None,
+        group_mapping: Optional[Dict[str, List[str]]] = None,
         default_roles: Optional[List[str]] = None,
         tls_verify: bool = True,
     ):
@@ -56,6 +57,7 @@ class LDAPProvider(AuthProvider):
         self.user_filter = user_filter
         self.group_attr = group_attr
         self.role_mapping = role_mapping or {}
+        self.group_mapping = group_mapping or {}
         self.default_roles = default_roles or ["user"]
         self.tls_verify = tls_verify
 
@@ -68,6 +70,14 @@ class LDAPProvider(AuthProvider):
             mapped = self.role_mapping.get(group, [])
             roles.update(mapped)
         return sorted(roles)
+
+    def _map_groups_to_local_groups(self, groups: List[str]) -> List[str]:
+        """Resolve directory group DNs to local Lyndrix group names via the
+        admin-configured ``group_mapping`` (LYNDRIX_LDAP_GROUP_MAPPING)."""
+        local: set = set()
+        for group in groups:
+            local.update(self.group_mapping.get(group, []))
+        return sorted(local)
 
     def _authenticate_blocking(self, username: str, password: str) -> Optional[dict]:
         """Run the synchronous ldap3 bind/search and return resolved attributes.
@@ -193,25 +203,27 @@ class LDAPProvider(AuthProvider):
         groups = resolved["groups"]
         roles = self._map_groups_to_roles(groups)
 
-        # Also resolve local group names from LDAP DNs so permissions defined
-        # in the Groups UI are automatically applied on LDAP login.
+        # Resolve directory groups to local Lyndrix GROUP names — groups are the
+        # permission carriers, so this is what actually grants access on login.
+        # Two sources, unioned: (1) the admin's LYNDRIX_LDAP_GROUP_MAPPING config,
+        # (2) each local group's own ldap_mappings (edited in the Groups UI).
+        local_groups: set = set(self._map_groups_to_local_groups(groups))
         try:
             from core.components.auth.logic.group_service import group_service
-            local_group_names = group_service.resolve_ldap_groups(groups)
-            if local_group_names:
-                roles = sorted(set(roles) | set(local_group_names))
+            local_groups |= set(group_service.resolve_ldap_groups(groups))
         except Exception as exc:
             log.warning(f"AUTH:LDAP: local group resolution failed: {exc}")
 
         log.info(
             f"AUTH:LDAP: Login successful for '{username}' "
-            f"(dn={user_dn}, groups={len(groups)})."
+            f"(dn={user_dn}, groups={len(groups)}, local_groups={sorted(local_groups)})."
         )
         return AuthResult(
             username=username,
             full_name=full_name,
             email=email,
             roles=roles,
+            groups=sorted(local_groups),
             provider=self.provider_id,
             # objectSid preferred (rename/move-proof); DN fallback for non-AD.
             provider_user_id=resolved.get("object_sid") or user_dn,

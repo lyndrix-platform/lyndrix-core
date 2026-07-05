@@ -13,6 +13,11 @@ class AuthResult:
     provider: str
     provider_user_id: Optional[str] = None
     extra_permissions: List[str] = field(default_factory=list)
+    # Local group NAMES the provider resolved for this login (e.g. from an LDAP
+    # directory-group → Lyndrix-group mapping). Applied additively to
+    # User.groups by the identity link service — groups are the real permission
+    # carriers, so this is how external directory membership grants access.
+    groups: List[str] = field(default_factory=list)
     # Whether the PROVIDER vouches for the email (directory-controlled attr /
     # OIDC email_verified claim). Gates trusted-email auto-linking — an
     # unverified email never merges accounts (spoofing protection).
