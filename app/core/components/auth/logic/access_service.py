@@ -45,8 +45,13 @@ def invalidate_cache(username: Optional[str] = None) -> None:
 def get_effective_permissions(username: str) -> FrozenSet[str]:
     """Resolve the caller's effective permission set from the database.
 
-    groups-union ∪ extra_permissions. Unknown users resolve to an empty set —
-    never raises, an authorization path must not 500 on a missing row.
+    groups-union ∪ role-expansion ∪ extra_permissions. A group's permissions
+    come from two places: its static ``Group.permissions`` list, and every
+    role assigned to it (``Group.roles``) expanded live via
+    ``role_registry.expand_roles`` — so a plugin upgrade that changes what an
+    assigned role grants is visible without re-running any migration. Unknown
+    users resolve to an empty set — never raises, an authorization path must
+    not 500 on a missing row.
     """
     now = time.monotonic()
     hit = _cache.get(username)
@@ -55,6 +60,8 @@ def get_effective_permissions(username: str) -> FrozenSet[str]:
 
     perms: set[str] = set()
     try:
+        from .role_registry import role_registry
+
         with db_instance.SessionLocal() as s:
             user = s.query(User).filter(User.username == username).first()
             if user is not None:
@@ -62,6 +69,7 @@ def get_effective_permissions(username: str) -> FrozenSet[str]:
                 if group_names:
                     for grp in s.query(Group).filter(Group.name.in_(group_names)).all():
                         perms.update(grp.permissions or [])
+                        perms.update(role_registry.expand_roles(grp.roles or []))
                 perms.update(user.extra_permissions or [])
     except Exception as exc:  # pragma: no cover — defensive: authz must not 500
         log.warning(f"ACCESS: failed to resolve permissions for '{username}': {exc}")

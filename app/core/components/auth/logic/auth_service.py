@@ -152,6 +152,7 @@ class AuthService:
             ("users", "groups",             "JSON NULL"),
             ("users", "extra_permissions",  "JSON NULL"),
             ("groups", "ldap_mappings",     "JSON NULL"),
+            ("groups", "roles",             "JSON NULL"),
         ]
         with db_instance.engine.connect() as conn:
             for table, column, col_def in migrations:

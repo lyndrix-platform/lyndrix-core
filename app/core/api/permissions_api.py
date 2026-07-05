@@ -16,16 +16,21 @@ consistent with the rest of the API surface.
 
 Routes (mounted under ``/api/permissions``)::
 
-    GET    /catalog                       list all known permission definitions
-    GET    /groups                        list groups with their permissions
-    POST   /groups                        create a group
-    GET    /groups/{group_id}             read a single group
-    PATCH  /groups/{group_id}             update a group (name/desc/perms/ldap)
-    DELETE /groups/{group_id}             delete a group
-    GET    /users/{username}              effective permissions for a user
-    PUT    /users/{username}/extra        replace a user's direct grants
-    POST   /users/{username}/extra/{perm} add one direct grant
-    DELETE /users/{username}/extra/{perm} remove one direct grant
+    GET    /catalog                              list all known permission definitions
+    GET    /groups                               list groups with their permissions
+    POST   /groups                               create a group
+    GET    /groups/{group_id}                    read a single group
+    PATCH  /groups/{group_id}                    update a group (name/desc/perms/ldap)
+    DELETE /groups/{group_id}                    delete a group
+    GET    /groups/{group_id}/roles              list role ids assigned to a group
+    POST   /groups/{group_id}/roles/{role_id}    assign a registered role to a group
+    DELETE /groups/{group_id}/roles/{role_id}    unassign a role from a group
+    POST   /groups/{group_id}/members/{username} add a user to a group
+    DELETE /groups/{group_id}/members/{username} remove a user from a group
+    GET    /users/{username}                     effective permissions for a user
+    PUT    /users/{username}/extra               replace a user's direct grants
+    POST   /users/{username}/extra/{perm}        add one direct grant
+    DELETE /users/{username}/extra/{perm}        remove one direct grant
 """
 from __future__ import annotations
 
@@ -58,6 +63,7 @@ class GroupOut(BaseModel):
     description: str = ""
     permissions: List[str] = Field(default_factory=list)
     ldap_mappings: List[str] = Field(default_factory=list)
+    roles: List[str] = Field(default_factory=list)
 
 
 class GroupCreateRequest(BaseModel):
@@ -120,6 +126,7 @@ def _group_to_out(grp) -> GroupOut:
         description=str(grp.description or ""),
         permissions=list(grp.permissions or []),
         ldap_mappings=list(grp.ldap_mappings or []),
+        roles=list(grp.roles or []),
     )
 
 
@@ -133,6 +140,18 @@ def _user_service():
     from core.components.auth.logic.user_service import user_service
 
     return user_service
+
+
+def _role_registry():
+    from core.components.auth.logic.role_registry import role_registry
+
+    return role_registry
+
+
+def _invalidate_access_cache() -> None:
+    from core.components.auth.logic import access_service
+
+    access_service.invalidate_cache()
 
 
 # ── Catalog ──────────────────────────────────────────────────────────────────
@@ -287,6 +306,127 @@ async def delete_group(
         raise HTTPException(status_code=500, detail="Failed to delete group")
     log.info(f"API: Group '{name}' ({group_id}) deleted by '{identity.username}'.")
     return {"status": "ok", "deleted": {"id": group_id, "name": name}}
+
+
+# ── Group role assignment (Identity 2.0 — first-class assignable roles) ─────
+# Roles are stored on Group.roles (registered role ids) and expanded to
+# permissions live at resolution time (access_service.get_effective_permissions),
+# rather than melted once — assigning/removing a role here takes effect for
+# every member of the group after the 5s permission cache expires.
+
+@permissions_router.get(
+    "/groups/{group_id}/roles", summary="List role ids assigned to a group"
+)
+async def get_group_roles(
+    group_id: int,
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
+):
+    grp = _group_service().get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    return {"status": "ok", "group_id": group_id, "roles": list(grp.roles or [])}
+
+
+@permissions_router.post(
+    "/groups/{group_id}/roles/{role_id}", summary="Assign a registered role to a group"
+)
+async def assign_group_role(
+    group_id: int,
+    role_id: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+
+    reg = _role_registry()
+    try:
+        reg.scan_from_manifests()
+    except Exception:  # pragma: no cover - manifests optional at this point
+        pass
+    if reg.get(role_id) is None:
+        raise HTTPException(status_code=404, detail=f"Role '{role_id}' not found")
+
+    updated = reg.apply_role_to_group(group_id, role_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    _invalidate_access_cache()
+    log.info(f"API: Role '{role_id}' assigned to group {group_id} by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(updated).model_dump()}
+
+
+@permissions_router.delete(
+    "/groups/{group_id}/roles/{role_id}", summary="Unassign a role from a group"
+)
+async def unassign_group_role(
+    group_id: int,
+    role_id: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+
+    reg = _role_registry()
+    try:
+        reg.scan_from_manifests()
+    except Exception:  # pragma: no cover - manifests optional at this point
+        pass
+    if reg.get(role_id) is None:
+        raise HTTPException(status_code=404, detail=f"Role '{role_id}' not found")
+
+    updated = reg.remove_role_from_group(group_id, role_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    _invalidate_access_cache()
+    log.info(f"API: Role '{role_id}' unassigned from group {group_id} by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(updated).model_dump()}
+
+
+# ── Group membership ─────────────────────────────────────────────────────────
+
+@permissions_router.post(
+    "/groups/{group_id}/members/{username}", summary="Add a user to a group"
+)
+async def add_group_member(
+    group_id: int,
+    username: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    if not _user_service().get_by_username(username):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    # add_user_to_group() already invalidates the caller's cached permissions
+    # (group_service mirrors the same pattern as the other membership calls).
+    svc.add_user_to_group(group_id, username)
+    log.info(f"API: '{username}' added to group {group_id} by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(svc.get_by_id(group_id)).model_dump()}
+
+
+@permissions_router.delete(
+    "/groups/{group_id}/members/{username}", summary="Remove a user from a group"
+)
+async def remove_group_member(
+    group_id: int,
+    username: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    svc = _group_service()
+    grp = svc.get_by_id(group_id)
+    if not grp:
+        raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
+    if not _user_service().get_by_username(username):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    svc.remove_user_from_group(group_id, username)
+    log.info(f"API: '{username}' removed from group {group_id} by '{identity.username}'.")
+    return {"status": "ok", "group": _group_to_out(svc.get_by_id(group_id)).model_dump()}
 
 
 # ── User direct grants ───────────────────────────────────────────────────────

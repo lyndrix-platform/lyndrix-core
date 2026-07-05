@@ -1,18 +1,25 @@
 """Role registry — manifest-declared permission bundles (Identity 2.0).
 
-Roles are NOT database entities and NOT checkable permission ids. A
+Roles are NOT database entities and NOT checkable permission ids directly. A
 ``ManifestRole`` is declarative metadata: "this plugin's *admin* role means
 these permissions, and it should attach to these groups by default". The
-registry mirrors ``PermissionRegistry`` (in-memory, rebuilt from manifests),
-while the *effect* of a role — its permissions landing in a group's list — is
-applied exactly once per (role, group) pair, recorded in the
-``RoleGrantLedger`` table so an admin's later revocation is never silently
-re-applied on reboot or plugin re-activation.
+registry mirrors ``PermissionRegistry`` (in-memory, rebuilt from manifests).
+
+Roles are assignable and expanded at resolution time: a role id lives in
+``Group.roles`` (assigned via :meth:`apply_role_to_group` or the auto-mapping
+pass below) and its permissions are unioned in live by
+``access_service.get_effective_permissions`` via :meth:`expand_roles` — so a
+plugin upgrade that changes what a role grants takes effect immediately
+(after the 5s cache), unlike the old melt-once-into-Group.permissions model.
+Auto-mapping a role onto its declared default groups still happens AT MOST
+ONCE per (role, group) pair, recorded in the ``RoleGrantLedger`` table, so an
+admin who later removes the role from a group is never silently re-added on
+reboot or plugin re-activation.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from core.logger import get_logger
 
@@ -49,6 +56,67 @@ class RoleRegistry:
     def get_all(self) -> List[RoleDef]:
         return sorted(self._roles.values(), key=lambda r: r.id)
 
+    def expand_roles(self, role_ids: Iterable[str]) -> set[str]:
+        """Union of the permission lists of the given registered role ids.
+
+        Unknown ids (e.g. a role from a since-uninstalled/renamed plugin) are
+        skipped with a debug log — a stale entry in ``Group.roles`` must never
+        break authorization resolution.
+        """
+        result: set[str] = set()
+        for rid in role_ids or []:
+            role = self._roles.get(rid)
+            if role is None:
+                log.debug(f"ROLES: expand_roles() — unknown role id '{rid}', skipping.")
+                continue
+            result.update(role.permissions)
+        return result
+
+    # ------------------------------------------------------------------
+    # Assignment (Group.roles mutation — used by the permissions API)
+    # ------------------------------------------------------------------
+
+    def apply_role_to_group(self, group_id: int, role_id: str):
+        """Assign ``role_id`` to a group's ``Group.roles`` list (deduped,
+        sorted). Returns the updated ``Group`` row, or ``None`` if the group
+        doesn't exist. Callers validate ``role_id`` against the registry
+        themselves (the permissions API does, for a clean 404/400) — this
+        method stores whatever id it's given."""
+        from core.components.database.logic.db_service import db_instance
+        from .models import Group
+
+        with db_instance.SessionLocal() as s:
+            grp = s.query(Group).filter(Group.id == group_id).first()
+            if grp is None:
+                return None
+            roles = set(grp.roles or [])
+            if role_id not in roles:
+                roles.add(role_id)
+                grp.roles = sorted(roles)
+                s.commit()
+                s.refresh(grp)
+                log.info(f"ROLES: assigned '{role_id}' to group '{grp.name}'.")
+            return grp
+
+    def remove_role_from_group(self, group_id: int, role_id: str):
+        """Remove ``role_id`` from a group's ``Group.roles`` list. Returns the
+        updated ``Group`` row, or ``None`` if the group doesn't exist."""
+        from core.components.database.logic.db_service import db_instance
+        from .models import Group
+
+        with db_instance.SessionLocal() as s:
+            grp = s.query(Group).filter(Group.id == group_id).first()
+            if grp is None:
+                return None
+            roles = list(grp.roles or [])
+            if role_id in roles:
+                roles.remove(role_id)
+                grp.roles = sorted(roles)
+                s.commit()
+                s.refresh(grp)
+                log.info(f"ROLES: removed '{role_id}' from group '{grp.name}'.")
+            return grp
+
     def scan_from_manifests(self) -> None:
         """Rebuild role defs from every loaded manifest (idempotent)."""
         try:
@@ -73,11 +141,20 @@ class RoleRegistry:
     # ------------------------------------------------------------------
 
     def apply_auto_mappings(self) -> int:
-        """Attach each role's permissions to its auto_map groups — once.
+        """Assign each role's id to its auto_map groups — once.
+
+        Unlike the old melt-once model, this seeds the ROLE ID into
+        ``Group.roles`` rather than expanding its permissions into
+        ``Group.permissions`` — the permissions are unioned in live by
+        ``access_service`` via :meth:`expand_roles`, so a later plugin
+        upgrade changing what the role grants takes effect immediately.
 
         Returns the number of (role, group) pairs newly applied. Unknown
         groups are skipped with a warning (they may be seeded later; the next
-        pass picks them up because no ledger row was written). Never raises.
+        pass picks them up because no ledger row was written). Still applied
+        AT MOST ONCE per (role, group) pair via ``RoleGrantLedger`` — an admin
+        who later removes the role from ``Group.roles`` is never silently
+        re-added on reboot or plugin re-activation. Never raises.
         """
         applied = 0
         try:
@@ -105,16 +182,13 @@ class RoleRegistry:
                                 f"{role.id} does not exist yet — skipping."
                             )
                             continue
-                        perms = list(grp.permissions or [])
-                        added = [p for p in role.permissions if p not in perms]
-                        if added:
-                            grp.permissions = sorted(perms + added)
+                        roles = set(grp.roles or [])
+                        if role.id not in roles:
+                            roles.add(role.id)
+                            grp.roles = sorted(roles)
                         s.add(RoleGrantLedger(role_id=role.id, group_name=group_name))
                         applied += 1
-                        log.info(
-                            f"ROLES: applied {role.id} -> {group_name} "
-                            f"(+{len(added)} permission(s))"
-                        )
+                        log.info(f"ROLES: assigned {role.id} -> {group_name}")
                 if applied:
                     s.commit()
         except Exception as e:  # pragma: no cover - defensive

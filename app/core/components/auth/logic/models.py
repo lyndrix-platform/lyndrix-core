@@ -76,6 +76,12 @@ class Group(Base):
                   ["dashboard.view", "settings.edit", "api.read"]
     ldap_mappings — list of LDAP group DNs (or AD CN strings) whose members
                     inherit this group's permissions on login.
+    roles — list of registered role ids (``role_registry.RoleDef.id``)
+            assigned to this group. Stored and expanded at resolution time
+            (``access_service.get_effective_permissions``) rather than melted
+            into ``permissions`` once, so a role's permission set stays live
+            when a plugin upgrade changes what the role grants. Distinct from
+            ``User.roles``, which carries system flags only.
     """
     __tablename__ = "groups"
 
@@ -84,6 +90,7 @@ class Group(Base):
     description = Column(String(255), nullable=True, default="")
     permissions = Column(JSON, default=list)   # List[str]
     ldap_mappings = Column(JSON, default=list)  # List[str]  — LDAP group DNs
+    roles = Column(JSON, default=list)         # List[str]  — assigned role ids
 
 
 class UserPreference(Base):
