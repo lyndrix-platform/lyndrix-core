@@ -154,6 +154,16 @@ def _invalidate_access_cache() -> None:
     access_service.invalidate_cache()
 
 
+def _same_username(a: Optional[str], b: Optional[str]) -> bool:
+    """Case-insensitive username equality (usernames are looked up
+    case-insensitively, so a raw ``==`` would miss a differently-cased self)."""
+    return (a or "").casefold() == (b or "").casefold()
+
+
+def _is_superadmin(identity: ApiIdentity) -> bool:
+    return identity.is_system or "superadmin" in identity.roles
+
+
 # ── Catalog ──────────────────────────────────────────────────────────────────
 @permissions_router.get(
     "/catalog",
@@ -399,8 +409,19 @@ async def add_group_member(
     grp = svc.get_by_id(group_id)
     if not grp:
         raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    # Self group-membership guard (canonical, case-insensitive): a non-superadmin
+    # admin cannot add THEMSELVES to a group — that would be a trivial bypass of
+    # the same invariant users_api enforces (self group changes must go through
+    # another admin). Superadmins are exempt (break-glass).
+    if _same_username(target.username, identity.username) and not _is_superadmin(identity):
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot modify your own group membership; another admin must do this",
+        )
 
     # add_user_to_group() already invalidates the caller's cached permissions
     # (group_service mirrors the same pattern as the other membership calls).
@@ -421,8 +442,18 @@ async def remove_group_member(
     grp = svc.get_by_id(group_id)
     if not grp:
         raise HTTPException(status_code=404, detail=f"Group {group_id} not found")
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    # Same self group-membership guard as add_group_member: a non-superadmin
+    # admin cannot pull THEMSELVES out of a group either (self group changes go
+    # through another admin). Superadmins are exempt.
+    if _same_username(target.username, identity.username) and not _is_superadmin(identity):
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot modify your own group membership; another admin must do this",
+        )
 
     svc.remove_user_from_group(group_id, username)
     log.info(f"API: '{username}' removed from group {group_id} by '{identity.username}'.")
@@ -445,11 +476,18 @@ async def get_user_permissions(
     groups = list(user.groups or [])
     extra = list(user.extra_permissions or [])
 
-    # Identity 2.0: roles are system flags only — permissions come from group
-    # membership + direct grants (same resolution the API hot path uses).
-    gsvc = _group_service()
-    from_groups = gsvc.get_permissions_for_roles(groups)
-    effective = sorted(set(from_groups) | set(extra))
+    # Reuse the SAME resolver real authorization uses so this admin-facing
+    # "what can this user do" view matches reality — group.permissions PLUS
+    # assigned-role expansion (Group.roles) PLUS direct grants. Deriving it
+    # from group_service.get_permissions_for_roles() alone would silently
+    # under-report every permission held through an assigned group role.
+    from core.components.auth.logic import access_service
+
+    effective_set = access_service.get_effective_permissions(str(user.username))
+    effective = sorted(effective_set)
+    # Group-derived subset (perms + role expansion), i.e. everything not a
+    # direct grant — keeps the response field accurate for the same reason.
+    from_groups = sorted(effective_set - set(extra))
 
     return {
         "status": "ok",

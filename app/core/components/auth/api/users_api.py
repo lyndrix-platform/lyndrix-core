@@ -24,6 +24,19 @@ def _is_superadmin(identity: ApiIdentity) -> bool:
     return identity.is_system or "superadmin" in identity.roles
 
 
+def _same_username(a: Optional[str], b: Optional[str]) -> bool:
+    """Case-insensitive username equality.
+
+    Usernames are looked up case-insensitively (MariaDB default collation), so
+    a raw ``==`` on the path parameter would let ``PATCH /api/users/ADMIN`` by
+    caller ``admin`` read the caller's own row yet evaluate ``is_self`` False —
+    slipping into the admin branch and self-editing. Always compare the
+    CANONICAL stored username (``User.username``) casefolded, never the raw
+    path segment.
+    """
+    return (a or "").casefold() == (b or "").casefold()
+
+
 def _list_changed(new_values: Optional[List[str]], current_values: Optional[List[str]]) -> bool:
     """True if `new_values` is present in the payload AND differs from the
     persisted value (compared as sets, so re-sending the same membership in a
@@ -241,7 +254,10 @@ async def update_user(
     if not current:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    is_self = username == identity.username
+    # Compare the CANONICAL stored username, not the raw path segment — the
+    # lookup is case-insensitive, so a differently-cased path must still be
+    # recognised as self (else it slips into the admin branch).
+    is_self = _same_username(current.username, identity.username)
     roles_changed = _list_changed(payload.roles, current.roles)
     groups_changed = _list_changed(payload.groups, current.groups)
 
@@ -319,12 +335,16 @@ def delete_user(
     identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
     # Sync (threadpool): the existence check + delete are blocking DB calls.
-    if username == identity.username:
-        raise HTTPException(status_code=400, detail="Cannot delete your own account")
     from core.components.auth.logic.models import User
 
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    # Canonical compare: the lookup is case-insensitive, so a differently-cased
+    # path (e.g. DELETE /api/users/ADMIN by 'admin') must still be caught as
+    # self and blocked.
+    if _same_username(target.username, identity.username):
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     with _db().SessionLocal() as s:
         user = s.query(User).filter(User.username == username).first()
