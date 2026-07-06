@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import inspect as sqlalchemy_inspect
+from sqlalchemy import inspect as sqlalchemy_inspect, text
 
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
@@ -76,15 +76,37 @@ class NotificationRouterService:
     # ------------------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        """Create plugin_notification_endpoints table if it does not exist."""
+        """Create the endpoint table, and additively add any columns a table
+        created by an older core is missing.
+
+        ``create(checkfirst=True)`` only creates the table when absent; it never
+        touches an existing table. A deployment whose ``plugin_notification_endpoints``
+        table predates a model column (e.g. ``provider_bindings`` from the
+        multi-provider routing work) would therefore keep failing every query
+        with ``Unknown column``. We reconcile the live columns against the model
+        and ``ALTER TABLE ADD COLUMN`` the gaps. Every added column is nullable
+        (or Python-side defaulted), so backfill is unnecessary.
+        """
         if self._schema_ready or not db_instance.engine:
             return
         try:
+            table = PluginNotificationEndpoint.__table__
             with db_instance.engine.begin() as connection:
-                PluginNotificationEndpoint.__table__.create(bind=connection, checkfirst=True)
-                # Sanity-check expected columns (additive migrations would go here).
+                table.create(bind=connection, checkfirst=True)
                 inspector = sqlalchemy_inspect(connection)
-                _ = {c["name"] for c in inspector.get_columns(PluginNotificationEndpoint.__tablename__)}
+                existing = {c["name"] for c in inspector.get_columns(table.name)}
+                dialect = connection.dialect
+                for column in table.columns:
+                    if column.name in existing:
+                        continue
+                    col_type = column.type.compile(dialect=dialect)
+                    connection.execute(
+                        text(f'ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type} NULL')
+                    )
+                    log.warning(
+                        "ROUTER: added missing column '%s.%s' (%s) — migrated from an older schema.",
+                        table.name, column.name, col_type,
+                    )
             self._schema_ready = True
         except Exception as exc:
             log.error(f"ROUTER: Failed to ensure endpoint schema: {exc}")
