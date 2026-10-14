@@ -253,9 +253,40 @@ class ClusterService:
                 except Exception:
                     log.debug("CLUSTER: periodic preflight failed", exc_info=True)
 
+    # Marker files that let the preflight tell whether STORAGE_DIR is one shared
+    # mount (every instance sees the others' markers) or instance-local disks.
+    STORAGE_MARKER_DIR = ".cluster"
+
+    def _write_storage_marker(self) -> None:
+        try:
+            marker_dir = os.path.join(settings.STORAGE_DIR, self.STORAGE_MARKER_DIR)
+            os.makedirs(marker_dir, exist_ok=True)
+            path = os.path.join(marker_dir, self.instance_id)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_utcnow().isoformat())
+        except Exception as exc:  # read-only or missing storage → the preflight reports it
+            log.debug("CLUSTER: storage marker not written: %s", exc)
+
+    def storage_markers(self) -> dict[str, float]:
+        """instance_id → marker age in seconds, for every marker visible from here."""
+        out: dict[str, float] = {}
+        marker_dir = os.path.join(settings.STORAGE_DIR, self.STORAGE_MARKER_DIR)
+        try:
+            now = time.time()
+            for name in os.listdir(marker_dir):
+                try:
+                    out[name] = max(0.0, now - os.path.getmtime(os.path.join(marker_dir, name)))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return out
+
     async def _heartbeat_once(self) -> None:
         try:
             await self.coordinator.heartbeat(self._meta())
+            if self.is_cluster:
+                await asyncio.to_thread(self._write_storage_marker)
             await self.refresh_instances()
             await self._refresh_leader()
             self._hb_failures = 0

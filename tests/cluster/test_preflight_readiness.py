@@ -43,14 +43,19 @@ class _FakeClusterService:
     start_error = None
     roles = ["api"]
     drain_seconds = 0
+    heartbeat_s = 10
     saw_forwarded_for = True
     coordinator = _FakeCoordinator()
 
-    def __init__(self, instances):
+    def __init__(self, instances, markers=None):
         self._instances = instances
+        self._markers = markers if markers is not None else {}
 
     async def refresh_instances(self):
         return self._instances
+
+    def storage_markers(self):
+        return dict(self._markers)
 
 
 def _instance(iid, roles, secret_fp, plugins_fp="p1", version="1.4.0"):
@@ -83,7 +88,7 @@ def test_cluster_preflight_flags_contract_violations(monkeypatch):
     assert checks["database"].status == "warn" and "Galera" in checks["database"].message
     assert checks["clock"].status == "ok"
     assert checks["drain"].status == "warn"
-    assert checks["storage"].status == "warn"
+    assert checks["storage"].status == "warn" and "NOT shared" in checks["storage"].message  # no marker of b
 
 
 def test_cluster_preflight_healthy_pair(monkeypatch):
@@ -91,13 +96,33 @@ def test_cluster_preflight_healthy_pair(monkeypatch):
     monkeypatch.setattr(settings, "LYNDRIX_UI_ENGINE", "react")
     monkeypatch.setattr(settings, "LYNDRIX_TRUSTED_PROXIES", "10.0.0.0/8")
     monkeypatch.setattr(settings, "DB_ALLOW_DIRECT_NODE", True)
-    svc = _FakeClusterService([_instance("a", ["api", "leader"], "same"), _instance("b", ["api", "runner"], "same")])
+    svc = _FakeClusterService(
+        [_instance("a", ["api", "leader"], "same"), _instance("b", ["api", "runner"], "same")],
+        markers={"a": 2.0, "b": 7.5},   # both instances write into the same directory
+    )
     svc.drain_seconds = 10
     checks = _by_id(asyncio.run(run_checks(svc)))
     assert not [c for c in checks.values() if c.status == "fail"]
     assert checks["roles"].status == "ok" and checks["storage_secret"].status == "ok"
     assert checks["trusted_proxies"].status == "ok" and checks["drain"].status == "ok"
     assert checks["database"].status == "ok"
+    assert checks["storage"].status == "ok" and "shared mount" in checks["storage"].message
+
+
+def test_storage_check_needs_fresh_peer_markers():
+    pair = [_instance("a", ["api", "leader"], "s"), _instance("b", ["api", "leader"], "s")]
+    stale = _by_id(asyncio.run(run_checks(_FakeClusterService(pair, markers={"a": 1.0, "b": 900.0}))))
+    assert stale["storage"].status == "warn" and "b" in stale["storage"].message
+    alone = _by_id(asyncio.run(run_checks(_FakeClusterService(pair[:1], markers={"a": 1.0}))))
+    assert alone["storage"].status == "warn" and "only this instance" in alone["storage"].message
+
+
+def test_storage_markers_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    cluster_service._write_storage_marker()
+    markers = cluster_service.storage_markers()
+    assert cluster_service.instance_id in markers and markers[cluster_service.instance_id] < 5
+    assert (tmp_path / cluster_service.STORAGE_MARKER_DIR / cluster_service.instance_id).exists()
 
 
 def test_readiness_reasons(monkeypatch):

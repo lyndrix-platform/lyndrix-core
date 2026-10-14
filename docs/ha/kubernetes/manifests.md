@@ -217,5 +217,6 @@ kubectl -n lyndrix port-forward svc/lyndrix-core 8081   # then: curl -s localhos
 kubectl -n lyndrix delete pod -l app=lyndrix-core --field-selector status.phase=Running --wait=false  # one at a time → the other keeps serving
 ```
 
-Settings → Cluster shows both pods, the leader and the preflight; the `storage` check warns
-(no shared storage driver yet) and `redundancy` is `ok` with two replicas.
+Settings → Cluster shows both pods, the leader and the preflight; with the RWX volume the
+`storage` check is `ok` ("shared mount — markers of 1 peer visible") and `redundancy` is `ok`
+with two replicas.

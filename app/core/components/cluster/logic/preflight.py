@@ -222,11 +222,30 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     else:
         add("drain", "ok", f"drain on SIGTERM: {service.drain_seconds}s" if service.drain_seconds else "no drain (single instance)")
 
-    # 13. shared storage (not shipped yet — be explicit)
-    if cluster:
-        add("storage", "warn", "no shared storage driver in this core version — plugin files stay instance-local",
-            "Attachments/uploads written on one instance are not visible on the others; use a shared mount for /data/storage until the storage driver ships.")
-    else:
+    # 13. shared storage: every instance drops a marker file in STORAGE_DIR/.cluster on
+    #     each heartbeat. Seeing the other live instances' fresh markers proves the
+    #     directory is one shared mount (NFS/CIFS/RWX volume); otherwise files written
+    #     here are invisible elsewhere.
+    if not cluster:
         add("storage", "skip", "single-instance mode — local storage")
+    else:
+        others = [i for i in alive if not i.is_self]
+        markers = {}
+        try:
+            markers = await asyncio.to_thread(service.storage_markers)
+        except Exception as exc:
+            add("storage", "warn", f"could not inspect {settings.STORAGE_DIR}: {str(exc)[:80]}")
+        else:
+            fresh_s = max(3 * service.heartbeat_s, 60)
+            if not others:
+                add("storage", "warn", f"cannot verify that {settings.STORAGE_DIR} is shared — only this instance is alive",
+                    "Uploads and attachments are only safe in a cluster when every instance mounts the same directory (NFS/CIFS/RWX volume); the check turns ok once a second instance reports.")
+            else:
+                missing = [i.instance_id for i in others if markers.get(i.instance_id, float("inf")) > fresh_s]
+                if missing:
+                    add("storage", "warn", f"{settings.STORAGE_DIR} is NOT shared — markers of {', '.join(missing)} are not visible here",
+                        "Attachments/uploads written on one instance are invisible on the others. Mount one directory (NFS/CIFS/RWX volume) on every instance; an object-store driver (S3/MinIO) is on the roadmap.")
+                else:
+                    add("storage", "ok", f"{settings.STORAGE_DIR} is a shared mount — markers of {len(others)} peer(s) visible")
 
     return checks

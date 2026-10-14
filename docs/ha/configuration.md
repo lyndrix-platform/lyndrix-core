@@ -48,7 +48,7 @@ and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run ch
 | `clock` | — | this instance's clock is more than 5 s off the database clock |
 | `vault_nodes` | — | a node in `VAULT_NODES` does not answer `/v1/sys/health` |
 | `drain` | — | cluster mode with `LYNDRIX_DRAIN_SECONDS=0` |
-| `storage` | — | cluster mode: no shared storage driver — plugin files stay instance-local |
+| `storage` | — | cluster mode: `STORAGE_DIR` is not one shared mount (peer marker files missing/stale), or only one instance is alive so it cannot be verified |
 
 Only `coordinator` and `storage_secret` failures take **this** instance out of rotation
 (`/api/ready` → 503 with `preflight:<id>` in `reasons`). A cluster-level failure such as a missing

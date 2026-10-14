@@ -21,13 +21,17 @@ storage). Planned: `LYNDRIX_STORAGE_DRIVER`, `LYNDRIX_STORAGE_S3_*`.
 
 ## Verify
 
-Upload a theme or an ITSM attachment through the load balancer and fetch it again a few times —
-every instance must serve it.
+The preflight `storage` check does it for you: every instance writes a marker file
+`STORAGE_DIR/.cluster/<instance_id>` on each heartbeat; when an instance sees fresh markers of
+every other live instance the directory is one shared mount → `ok`. Markers that are missing or
+stale → `warn` naming the instances whose files are invisible here. (With one live instance the
+check cannot decide and stays `warn`.) Then upload a theme or an ITSM attachment through the load
+balancer and fetch it again a few times — every instance must serve it.
 
 ## Known limits
 
-- No storage driver yet; the preflight `storage` check warns in cluster mode to make that
-  explicit.
+- No object-store driver yet (`LYNDRIX_STORAGE_DRIVER=s3` with MinIO/Garage/S3 is the roadmap item);
+  today "shared" means one mounted directory.
 - The core writes `/app/logs/lyndrix.log` on every instance — do **not** share that directory;
   rely on stdout/`docker logs` instead.
 - NiceGUI's per-user storage (`/app/.nicegui`) is process-bound; irrelevant with `react`.
