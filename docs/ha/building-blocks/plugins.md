@@ -9,13 +9,16 @@
 
 ## How artifacts converge
 
-`plugin_states` in the database is the source of truth. Installing, enabling or disabling a
-plugin on one instance writes the row and broadcasts `plugin:desired_changed`; every other
-instance reconciles: a folder that exists on disk but is not loaded is loaded (shared
-`/app/plugins` mount), a missing plugin is installed from its `repo_url` at `desired_version`
-(separate disks), enable/disable is applied without re-persisting. A periodic pass every five
-minutes catches missed events. The preflight `plugin_artifacts` check warns while the loaded sets
-differ.
+`plugin_states` in the database is the source of truth. Installing, enabling, disabling or
+uninstalling a plugin on one instance writes (or deletes) the row and broadcasts
+`plugin:desired_changed`; every other instance reconciles: a folder that exists on disk but is
+not loaded is loaded (shared `/app/plugins` mount), a missing plugin is installed from its
+`repo_url` at the version the cluster runs (separate disks), enable/disable is applied without
+re-persisting, and a plugin that is loaded here but has no row any more is uninstalled here too
+(after a two-minute grace period for freshly loaded plugins). Reconcile installs are silent — only
+the instance that executed the operator's action announces the install. A periodic pass every
+five minutes catches missed events. The preflight `plugin_artifacts` check warns while the loaded
+sets differ.
 
 | Option | Notes | When |
 |---|---|---|

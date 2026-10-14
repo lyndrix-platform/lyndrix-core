@@ -28,6 +28,9 @@ _LEGACY_PLUGIN_STATE_IDS = {
 # (10 min → 24 h) instead of on every pass.
 _RECONCILE_INSTALL_BACKOFF_BASE_S = 600
 _RECONCILE_INSTALL_BACKOFF_MAX_S = 86400
+# A loaded plugin without a plugin_states row is treated as "uninstalled on a
+# peer" only after this many seconds since it was loaded here.
+_RECONCILE_UNINSTALL_GRACE_S = 120
 
 
 class ModuleManager:
@@ -255,12 +258,17 @@ class ModuleManager:
                 error_message = "; ".join(critical_issues)
 
             # Register as initializing/parked/degraded
+            import time as _time
+
             self.registry[manifest.id] = {
                 "manifest": manifest,
                 "module": module,
                 "context": ctx,
                 "status": initial_status,
                 "error_message": error_message,
+                # Cluster reconcile grace: a plugin loaded seconds ago may not have
+                # its plugin_states row yet — never mistake it for "uninstalled".
+                "loaded_at": _time.monotonic(),
             }
 
             if not is_plugin:
@@ -356,9 +364,24 @@ class ModuleManager:
         elif action == "uninstall":
             module_id = payload.get("id")
             self.unload_module(module_id)
+            # plugin_states is the cluster's source of truth: without this the row
+            # kept saying "active" and peers (or the next boot) re-installed the plugin.
+            await asyncio.to_thread(self._delete_plugin_state, module_id)
             bus.emit("plugin:state_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} uninstalled."})
+
+    def _delete_plugin_state(self, module_id: str) -> None:
+        if not module_id or not db_instance.SessionLocal:
+            return
+        try:
+            with db_instance.SessionLocal() as session:
+                deleted = session.query(PluginState).filter(PluginState.module_id == module_id).delete()
+                session.commit()
+            if deleted:
+                log.info(f"UNINSTALL: removed plugin_states row for '{module_id}'.")
+        except Exception as exc:
+            log.warning(f"UNINSTALL: could not remove plugin_states row for '{module_id}': {exc}")
 
     async def _verify_after_install(self, module_id: str) -> bool:
         """Post-install/upgrade health gate. The plugin must be loaded, not in a
@@ -944,16 +967,30 @@ class ModuleManager:
                     if self.toggle_module(mid, False, persist=False):
                         summary["disabled"].append(mid)
 
-            # Uninstalled elsewhere: no row AND the folder is gone → drop it here too.
+            # Uninstalled elsewhere: loaded here but no plugin_states row any more →
+            # uninstall here too (files + unload). Plugins loaded moments ago are
+            # skipped: their row may simply not be written yet.
+            import time as _time
+
             for mid, entry in list(self.registry.items()):
                 manifest = entry.get("manifest")
                 if not manifest or manifest.type != "PLUGIN" or mid in known_ids:
                     continue
+                if _time.monotonic() - float(entry.get("loaded_at") or 0.0) < _RECONCILE_UNINSTALL_GRACE_S:
+                    continue
                 module = entry.get("module")
                 module_file = getattr(module, "__file__", None)
-                if module_file and not os.path.exists(module_file):
+                folder = Path(module_file).parent.name if module_file else None
+                if folder and os.path.exists(module_file):
+                    log.info(f"RECONCILE: '{mid}' has no plugin_states row (uninstalled on a peer) — removing it here.")
+                    try:
+                        await plugin_service.uninstall_plugin(mid, folder)  # removes files, emits files_changed → unload
+                    except Exception as exc:
+                        log.warning(f"RECONCILE: uninstall of '{mid}' failed ({exc}) — unloading only.")
+                        self.unload_module(mid)
+                else:
                     self.unload_module(mid)
-                    summary["unloaded"].append(mid)
+                summary["unloaded"].append(mid)
 
         changed = {k: v for k, v in summary.items() if v}
         if changed:
