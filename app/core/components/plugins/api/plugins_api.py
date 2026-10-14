@@ -346,6 +346,9 @@ async def get_plugin_settings(
     values: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
 
     for field in schema_fields:
+        if field.kind == "action":
+            values.pop(field.key, None)  # actions have no value
+            continue
         if field.key not in values and field.default is not None:
             values[field.key] = field.default
 
@@ -369,32 +372,21 @@ async def get_plugin_settings(
     }
 
 
-@plugins_router.put("/{plugin_id}/settings", summary="Update plugin settings")
-async def update_plugin_settings(
-    plugin_id: str,
-    payload: PluginSettingsUpdate,
-    identity: ApiIdentity = Depends(require_permission("admin:write")),
-):
-    from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
+def coerce_plugin_settings(schema_fields, values: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and coerce a settings update against the manifest schema.
 
-    mgr = _manager()
-    entry = mgr.registry.get(plugin_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-
-    manifest = entry["manifest"]
-    schema_fields = getattr(manifest, "settings_schema", [])
+    Raises ``HTTPException(400)`` for unknown keys, structured values, action
+    fields (buttons, not values), bad ints and select values outside ``options``.
+    Blank secrets keep their stored value.
+    """
     schema_by_key = {f.key: f for f in schema_fields}
-
-    # Existing stored values — used to preserve secrets that are submitted blank
-    # (the GET masks them, so a round-trip without retyping must not wipe them).
-    existing: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
-
     coerced: Dict[str, Any] = {}
-    for key, raw in payload.values.items():
+    for key, raw in values.items():
         if key not in schema_by_key:
             raise HTTPException(status_code=400, detail=f"Unknown setting key: '{key}'")
         field = schema_by_key[key]
+        if field.kind == "action":
+            raise HTTPException(status_code=400, detail=f"'{key}' is an action, not a value")
         # Reject structured values for every scalar field kind — a dict/list would
         # otherwise be stringified to a Python repr and silently corrupt the value.
         if isinstance(raw, (dict, list)):
@@ -417,6 +409,29 @@ async def update_plugin_settings(
             coerced[key] = str(raw)
         else:
             coerced[key] = "" if raw is None else str(raw)
+    return coerced
+
+
+@plugins_router.put("/{plugin_id}/settings", summary="Update plugin settings")
+async def update_plugin_settings(
+    plugin_id: str,
+    payload: PluginSettingsUpdate,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
+
+    mgr = _manager()
+    entry = mgr.registry.get(plugin_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    manifest = entry["manifest"]
+    schema_fields = getattr(manifest, "settings_schema", [])
+
+    # Existing stored values — used to preserve secrets that are submitted blank
+    # (the GET masks them, so a round-trip without retyping must not wipe them).
+    existing: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
+    coerced = coerce_plugin_settings(schema_fields, payload.values, existing)
 
     if not write_secret_dict(f"plugins/{plugin_id}/settings", coerced):
         raise HTTPException(status_code=503, detail="Vault unavailable — settings were not persisted")

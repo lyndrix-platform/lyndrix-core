@@ -712,6 +712,21 @@
       "cluster_not_available": "Not available in this core version — running as a single instance"
     }
   },
+  "plugin_settings": {
+    "title": "{{name}} — Settings",
+    "none": "This plugin has no configurable settings."
+  },
+  "plugin_actions": {
+    "section": "Actions",
+    "run": "Run",
+    "confirm_question": "Run \"{{label}}\" now?",
+    "confirm": "Yes, run",
+    "cancel": "Cancel",
+    "running": "Running…",
+    "done": "Done.",
+    "failed": "Failed: {{error}}",
+    "danger_hint": "Destructive — cannot be undone."
+  },
   "plugin_runtime": {
     "starting": "Starting up",
     "maintenance": "Maintenance",

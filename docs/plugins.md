@@ -137,12 +137,34 @@ class MyRecord(Base):
 | `permissions.vault_paths` | as needed | Additional Vault paths beyond the plugin's default namespace |
 | `custom_permissions` | as needed | Fine-grained permissions the plugin declares (see below) — `[ManifestPermission]` |
 | `roles` | as needed | Named permission bundles with optional group auto-mapping — `[ManifestRole]` |
-| `settings_schema` | optional | Schema-driven settings rendered by core (`GET/PUT /api/plugins/<id>/settings`) |
+| `settings_schema` | optional | Schema-driven settings rendered by core (`GET/PUT /api/plugins/<id>/settings`); fields of `kind: "action"` become buttons (see *Settings actions*) |
 | `dependencies` | as needed | List of `{id, version_constraint}` entries for required plugins/modules |
 | `min_core_version` | recommended | Minimum Lyndrix API version required by this plugin |
 | `auto_enable_on_install` | recommended | Whether the plugin auto-activates on install — **default is `False`; the manifest defaults to not activating until configured** |
 | `repo_url` | recommended | Source repository URL — used for update checks and marketplace metadata — must point to the canonical `lyndrix-platform` org URL |
 | `notification_endpoints` | as needed | List of `NotificationEndpoint`s the plugin can route through the central [Notification Router](core-components/notification-router.md) |
+
+### Settings actions (API 1.6)
+
+A `settings_schema` field with `kind: "action"` is rendered as a **button** in the core's plugin
+settings dialog instead of a value. Clicking it calls `<method> /api/plugins/<id><action>` — a route
+on the plugin's own router, so the plugin's permission gates apply — and shows the reply's `message`.
+Nothing is stored in Vault for action fields; a `PUT /settings` naming one is rejected with 400.
+
+```python
+settings_schema=[
+    {"key": "action_prune", "label": "Prune old heartbeats now", "kind": "action",
+     "action": "/maintenance/prune", "category": "Maintenance",
+     "description": "Runs the hourly retention job right away."},
+    {"key": "action_delete_all", "label": "Delete ALL monitors", "kind": "action",
+     "action": "/maintenance/delete-monitors/all", "confirm": True, "danger": True},
+]
+```
+
+`confirm: true` asks before running, `danger: true` renders the button destructively, `method`
+defaults to `POST` (`PUT`/`DELETE` allowed). The route should return JSON with a human-readable
+`message` plus any counts; it runs with the caller's identity, so gate it with the plugin's
+`api:write` (or a custom permission) exactly like any other mutating route.
 
 ### Permissions & roles (1.0)
 

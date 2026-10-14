@@ -68,7 +68,7 @@ request topic in ``permissions.emit`` and the reply topic in
 ``permissions.subscribe``.
 """
 
-__api_version__ = "1.5.0"
+__api_version__ = "1.6.0"
 
 from typing import Any, Dict, Literal, Optional
 

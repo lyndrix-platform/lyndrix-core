@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Any, Optional
 
 # --- NEW IMPORTS FOR DATABASE MODEL ---
@@ -120,6 +120,29 @@ class PluginSettingField(BaseModel):
     description: str = Field(default="", description="Help text shown below the field")
     category: str = Field(default="General", description="Groups fields into sections in the UI")
     default: Optional[str] = Field(default=None, description="Default value serialised as string")
+    # kind='action' (core API >= 1.6): a button in the core's settings dialog
+    # instead of a stored value. The UI calls ``<method> /api/plugins/<id><action>``
+    # — a route on the plugin's own router, so the plugin's permission gates
+    # apply — and shows the JSON reply's ``message``. Nothing is written to Vault.
+    action: Optional[str] = Field(
+        default=None,
+        description="Route path relative to the plugin router, e.g. '/maintenance/prune' (kind='action' only)",
+    )
+    method: str = Field(default="POST", description="HTTP method for kind='action': POST | PUT | DELETE")
+    confirm: bool = Field(default=False, description="Ask the operator to confirm before running (kind='action')")
+    danger: bool = Field(default=False, description="Render as a destructive action (kind='action')")
+
+    @model_validator(mode="after")
+    def _validate_action(self) -> "PluginSettingField":
+        if self.kind == "action":
+            if not self.action or not str(self.action).startswith("/"):
+                raise ValueError(
+                    f"settings field '{self.key}': kind='action' needs an 'action' route path starting with '/'"
+                )
+            self.method = (self.method or "POST").upper()
+            if self.method not in ("POST", "PUT", "DELETE"):
+                raise ValueError(f"settings field '{self.key}': action method must be POST, PUT or DELETE")
+        return self
 
 
 class ModuleManifest(BaseModel):
