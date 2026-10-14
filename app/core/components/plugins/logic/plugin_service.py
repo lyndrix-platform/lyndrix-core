@@ -57,6 +57,8 @@ class PluginService:
         self.plugin_dir = Path(__file__).parents[4] / "plugins"
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
         self.github_api_base = "https://api.github.com/repos"
+        # Per-repo install serialization (see install_plugin).
+        self._install_locks: dict = {}
         
         # Cache für Marketplace-Daten
         self._marketplace_cache = []
@@ -683,8 +685,34 @@ class PluginService:
             log.error(f"Failed to fetch tags for {github_url}: {e}")
         return []
 
+    def _install_lock(self, safe_repo_name: str) -> asyncio.Lock:
+        lock = self._install_locks.get(safe_repo_name)
+        if lock is None:
+            lock = self._install_locks[safe_repo_name] = asyncio.Lock()
+        return lock
+
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False):
-        """Downloads, extracts and registers a new plugin from GitHub or GitLab."""
+        """Downloads, extracts and registers a new plugin from GitHub or GitLab.
+
+        Installs of the same repo are serialized per instance: the boot-time
+        desired-plugin reconcile, the reconcile that runs after every install
+        event and the cluster reconcile can all ask for the same plugin within
+        the same second. Two concurrent ``shutil.move`` calls into
+        ``/app/plugins/<name>`` ended with "File exists" for the loser. Under the
+        lock a plain install of a plugin that is already on disk is a no-op.
+        """
+        try:
+            safe_repo_name = self.validate_repo_url(github_url).repo.replace("-", "_")
+        except Exception:
+            # Let the real implementation produce the proper rejection + event.
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade)
+        async with self._install_lock(safe_repo_name):
+            if not upgrade and (self.plugin_dir / safe_repo_name / "entrypoint.py").exists():
+                log.info(f"INSTALL: '{safe_repo_name}' is already installed — duplicate install request skipped.")
+                return True
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade)
+
+    async def _install_plugin_unlocked(self, github_url: str, version: str = "latest", upgrade: bool = False):
         try:
             ref = self.validate_repo_url(github_url)
         except ValueError as exc:

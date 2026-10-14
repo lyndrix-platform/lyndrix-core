@@ -1,0 +1,18 @@
+# Keep the image free of host artefacts. In particular app/plugins/*: the dev
+# compose mounts plugin repos at /app/plugins/<name>, which creates empty
+# mount-point directories on the host (and on the CI runner during the smoke
+# test) — without this rule `COPY app/ .` shipped them in every image.
+app/plugins/*
+!app/plugins/.gitkeep
+app/logs/
+.dev/
+**/__pycache__/
+**/*.pyc
+.git/
+.github/
+docs/
+features/
+tests/
+site/
+*.md
+!README.md

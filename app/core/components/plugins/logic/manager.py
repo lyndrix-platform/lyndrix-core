@@ -1171,6 +1171,17 @@ class ModuleManager:
         if not desired:
             return
 
+        # Single-flight: _activate_saved_plugins() ends with this call and runs
+        # after every install event, so the boot-time pass used to overlap with
+        # the pass triggered by its own first install (same plugins, same second).
+        lock = self._lock_for("__desired_reconcile__")
+        if lock.locked():
+            log.debug("RECONCILE: desired-plugin pass already running — skipped.")
+            return
+        async with lock:
+            await self._reconcile_desired_plugins_locked(desired)
+
+    async def _reconcile_desired_plugins_locked(self, desired: list):
         self._ensure_plugin_state_schema()
 
         from .plugin_service import plugin_service
