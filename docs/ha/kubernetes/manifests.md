@@ -220,3 +220,31 @@ kubectl -n lyndrix delete pod -l app=lyndrix-core --field-selector status.phase=
 Settings → Cluster shows both pods, the leader and the preflight; with the RWX volume the
 `storage` check is `ok` ("shared mount — markers of 1 peer visible") and `redundancy` is `ok`
 with two replicas.
+
+## Migrating an existing single instance
+
+The data of a Docker single instance moves over as-is; the schema is the same at the same core
+version, so bring the old instance to the target version first (and its plugins to releases that
+know about placement — orchestrator ≥ 1.3.0, monitoring ≥ 1.4.0).
+
+1. **Database**: `mariadb-dump --single-transaction <db> | gzip` on the old host (consistent while
+   it keeps running), `zcat … | kubectl exec -i lyndrix-db-0 -- mariadb -u root -p… <db>` here.
+   The dump replaces every table it contains; the `cluster_*` tables stay as they are.
+2. **Vault**: copy the file-storage directory (`/vault/file`) onto the Vault volume with the Vault
+   pod stopped, owned by the Vault user (uid 100, gid 1000, directories 0700, files 0600 — the
+   mount root itself must stay traversable, e.g. `0:1000 2775`). The Vault image must be **at
+   least** the version that last wrote the storage; downgrades are not supported.
+3. **Key file**: `/data/security/vault_keys.enc` onto the shared volume, together with the old
+   instance's `LYNDRIX_MASTER_KEY` (decrypts it), `STORAGE_SECRET` and `LYNDRIX_SYSTEM_API_KEY` in
+   the Secret. `LYNDRIX_ADMIN_PASSWORD` / `LYNDRIX_BOT_PASSWORD` are re-applied from the
+   environment at every boot, so set them to the old values as well.
+4. **Storage**: `/data/storage` minus anything only a `runner` instance needs (orchestrator git
+   working trees, job workspaces, SSH keys).
+5. Start **one** core pod. It unseals Vault, connects the database and installs every plugin that
+   `plugin_states` lists (silently, from the recorded release tag — both tag spellings are tried).
+   Then scale out; each new pod does the same at boot.
+
+Leave `LYNDRIX_PLUGINS_DESIRED` unset in a migrated cluster — the database already says what to
+run. A pinned plugin (orchestrator) installs fine but answers 503 `remote` and the preflight
+`roles` check fails until an instance with that role joins; the old Docker host can be that
+instance (same database and Vault, `LYNDRIX_INSTANCE_ROLES=runner`).

@@ -685,6 +685,22 @@ class PluginService:
             log.error(f"Failed to fetch tags for {github_url}: {e}")
         return []
 
+    @staticmethod
+    def _alternate_tag_forms(version: str) -> list[str]:
+        """Other spellings of a release tag worth trying after a 404.
+
+        ``1.1.2`` → ``["v1.1.2"]``, ``v1.1.2`` → ``["1.1.2"]``; anything that is
+        not a plain version (branch names, ``latest``) has no alternative.
+        """
+        v = (version or "").strip()
+        if not v or v == "latest":
+            return []
+        if v.startswith(("v", "V")) and v[1:2].isdigit():
+            return [v[1:]]
+        if v[:1].isdigit():
+            return [f"v{v}"]
+        return []
+
     def _install_lock(self, safe_repo_name: str) -> asyncio.Lock:
         lock = self._install_locks.get(safe_repo_name)
         if lock is None:
@@ -788,6 +804,19 @@ class PluginService:
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
                     zip_url = git_providers.archive_url(ref, "master", is_tag=False)
                     response = await client.get(zip_url, follow_redirects=True)
+
+                # Tag-form fallback: plugin_states stores the manifest version
+                # ("1.1.2") while many repos only tag "v1.1.2" (or the other way
+                # round). A cluster reconcile converging on the recorded version
+                # must not fail on that spelling difference.
+                if response.status_code == 404 and not is_latest:
+                    for alt in self._alternate_tag_forms(version):
+                        alt_url = git_providers.archive_url(ref, alt, is_tag=True)
+                        log.info(f"DOWNLOAD: tag '{version}' not found, trying '{alt}'...")
+                        response = await client.get(alt_url, follow_redirects=True)
+                        if response.status_code != 404:
+                            zip_url = alt_url
+                            break
 
                 response.raise_for_status()
 

@@ -14,11 +14,17 @@ uninstalling a plugin on one instance writes (or deletes) the row and broadcasts
 `plugin:desired_changed`; every other instance reconciles: a folder that exists on disk but is
 not loaded is loaded (shared `/app/plugins` mount), a missing plugin is installed from its
 `repo_url` at the version the cluster runs (separate disks), enable/disable is applied without
-re-persisting, and a plugin that is loaded here but has no row any more is uninstalled here too
-(after a two-minute grace period for freshly loaded plugins). Reconcile installs are silent — only
-the instance that executed the operator's action announces the install. A periodic pass every
-five minutes catches missed events. The preflight `plugin_artifacts` check warns while the loaded
-sets differ.
+re-persisting, and a plugin that is loaded here but has no row any more is uninstalled here too.
+Reconcile installs are silent — only the instance that executed the operator's action announces
+the install. A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
+right after the `LYNDRIX_PLUGINS_DESIRED` pass, so it serves every plugin before the first periodic
+pass; the periodic pass every five minutes catches missed events. The recorded version is
+downloaded as a tag in both spellings (`1.1.2` and `v1.1.2`). The preflight `plugin_artifacts`
+check warns while the loaded sets differ.
+
+Migrating an existing single instance into a cluster therefore needs no plugin step: import its
+database, start one instance, and it installs what `plugin_states` lists (see
+`kubernetes/manifests.md`). Rows without `repo_url` (external registrations) are skipped.
 
 | Option | Notes | When |
 |---|---|---|

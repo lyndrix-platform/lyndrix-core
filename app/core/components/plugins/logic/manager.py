@@ -420,6 +420,12 @@ class ModuleManager:
         if status in ("failed", "degraded"):
             log.warning(f"VERIFY: '{module_id}' is '{status}' after install.")
             return False
+        if status == "remote":
+            # Pinned to a role this instance does not have: setup() never ran
+            # here, so health() would only report "not initialized". The files
+            # loaded and the manifest parsed — that is all this instance can verify.
+            log.info(f"VERIFY: '{module_id}' is pinned elsewhere (remote) — artifact verified, health skipped.")
+            return True
         health_fn = getattr(entry.get("module"), "health", None)
         if not callable(health_fn):
             return True
@@ -750,8 +756,25 @@ class ModuleManager:
             if not progressed:
                 break
 
-        # After restoring known plugins, reconcile desired plugins from config
+        await self._converge_after_restore()
+
+    async def _converge_after_restore(self) -> None:
+        """Bring this instance to the desired plugin set after the saved states
+        were restored: first the ``LYNDRIX_PLUGINS_DESIRED`` pins, then — in
+        cluster mode — ``plugin_states``.
+
+        A fresh instance (new pod, empty plugin dir) must converge on
+        ``plugin_states`` right away, not at the first periodic pass five minutes
+        later: until then every plugin route on this instance would be a 404
+        while the load balancer already sends traffic here.
+        """
         await self.reconcile_desired_plugins()
+        if settings.LYNDRIX_CLUSTER_MODE != "cluster":
+            return
+        try:
+            await self.reconcile_cluster_state(trigger="boot")
+        except Exception:
+            log.error("RECONCILE: boot-time cluster reconcile failed", exc_info=True)
 
     def toggle_module(self, module_id: str, active: bool, *, persist: bool = True):
         """Toggles the module state in RAM and persists it to the DB.
