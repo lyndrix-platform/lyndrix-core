@@ -661,13 +661,15 @@
     "mode_cluster": "Cluster mode",
     "elapsed": "{{seconds}} s",
     "summary": "{{online}} of {{total}} online",
+    "summary_unknown": "status unknown",
     "open_vault_setup": "Open Vault setup",
     "open_vault_unseal": "Unseal Vault",
     "phase": {
       "waiting_core": "Waiting for core services",
       "loading_modules": "Loading modules and plugins",
       "ready": "Ready",
-      "failed": "Boot failed"
+      "failed": "Boot failed",
+      "unreachable": "Core not reachable"
     },
     "service": {
       "vault": "Vault",
@@ -685,9 +687,11 @@
       "waiting": "Waiting",
       "action": "Action required",
       "failed": "Failed",
-      "unavailable": "Not available"
+      "unavailable": "Not available",
+      "unknown": "Unknown"
     },
     "detail": {
+      "unknown": "No information — the core is not answering",
       "connecting": "Connecting…",
       "unsealed": "Unsealed and connected",
       "needs_init": "Vault is not initialized",
