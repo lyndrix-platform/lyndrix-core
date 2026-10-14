@@ -14,6 +14,9 @@
 | Login limiter blocks everyone after a few failures | the core sees the balancer's IP | set `LYNDRIX_TRUSTED_PROXIES` (preflight `trusted_proxies` warns) |
 | Mixed versions after an update | an instance did not restart | finish the rolling update; preflight `versions` is `warn` until then |
 | Boot screen shows *Cluster coordinator: Starting…* forever | DB connected but the coordinator keeps failing | logs of that instance; typically credentials or `max_statement_time` too low for `GET_LOCK` |
+| UI answers 502 on every `/api/*` (Kubernetes), nginx log "could not be resolved" | the UI's nginx resolves the backend via `LYNDRIX_DNS_RESOLVER` (default: Docker's 127.0.0.11) and ignores search domains | set the kube-dns IP and the Service FQDN in `LYNDRIX_BACKEND_URL` ([manifests](../kubernetes/manifests.md)) |
+| Vault pod crash-loops with "Failed to lock memory" (Kubernetes) | non-root container without ambient `IPC_LOCK` | `disable_mlock: true` in the Vault config |
+| First-boot plugin installs abort with `DetachedInstanceError` | core < 1.4.1 | upgrade; the plugins were still activated, only the post-install verification was skipped |
 
 ## Collecting state
 

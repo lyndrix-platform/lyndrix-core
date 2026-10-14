@@ -147,10 +147,11 @@ spec: { minAvailable: 1, selector: { matchLabels: { app: lyndrix-core } } }
 Service `lyndrix-core` (ClusterIP, 8081) selects `app: lyndrix-core`.
 
 **First boot with one replica.** Two fresh pods would both see an uninitialised Vault and race
-the `vault operator init`; the loser stays at *needs init*. Start with `replicas: 1`, wait for
-`/api/ready`, then `kubectl scale deploy/lyndrix-core --replicas=2`. Every later rollout can run
-with N replicas — database bootstrap and the cluster tables are created under a cross-instance
-lock.
+the `vault operator init`; the loser stays at *needs init*. Leave `replicas` out of the manifest
+(the first apply creates one pod), wait for `/api/ready`, then
+`kubectl scale deploy/lyndrix-core --replicas=2` — later `kubectl apply` calls keep that scale
+instead of resetting it. Every later rollout can run with N replicas — database bootstrap and
+the cluster tables are created under a cross-instance lock.
 
 ## UI
 
@@ -174,7 +175,11 @@ spec:
 ```
 
 The nginx inside proxies `/api/*` and `/auth/callback/oidc` to the core Service with buffering
-off (SSE), so the UI needs one public origin only.
+off (SSE), so the UI needs one public origin only. Two Kubernetes specifics: nginx resolves the
+backend at runtime through `LYNDRIX_DNS_RESOLVER` (the image defaults to Docker's `127.0.0.11`
+— set the kube-dns Service IP), and nginx's resolver ignores search domains, so
+`LYNDRIX_BACKEND_URL` must carry the Service **FQDN**; a short name yields 502 "could not be
+resolved".
 
 ## Certificate and route (Traefik CRD)
 
