@@ -28,9 +28,6 @@ _LEGACY_PLUGIN_STATE_IDS = {
 # (10 min → 24 h) instead of on every pass.
 _RECONCILE_INSTALL_BACKOFF_BASE_S = 600
 _RECONCILE_INSTALL_BACKOFF_MAX_S = 86400
-# A loaded plugin without a plugin_states row is treated as "uninstalled on a
-# peer" only after this many seconds since it was loaded here.
-_RECONCILE_UNINSTALL_GRACE_S = 120
 
 
 class ModuleManager:
@@ -266,9 +263,11 @@ class ModuleManager:
                 "context": ctx,
                 "status": initial_status,
                 "error_message": error_message,
-                # Cluster reconcile grace: a plugin loaded seconds ago may not have
-                # its plugin_states row yet — never mistake it for "uninstalled".
                 "loaded_at": _time.monotonic(),
+                # Set once this instance wrote or read a plugin_states row for the
+                # plugin; the cluster reconcile only treats "row gone" as an
+                # uninstall-on-a-peer when it is True.
+                "persisted": False,
             }
 
             if not is_plugin:
@@ -601,6 +600,7 @@ class ModuleManager:
                     db_state.desired_version = manifest.version
                     db_state.repo_url = manifest.repo_url or db_state.repo_url
                 session.commit()
+            self.registry[module_id]["persisted"] = True
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
 
@@ -679,6 +679,7 @@ class ModuleManager:
 
                 if not db_state:  # pragma: no cover - inserted above; defensive
                     continue
+                entry["persisted"] = True
                 db_state.installed_version = manifest.version
                 db_state.repo_url = manifest.repo_url or db_state.repo_url
                 if not db_state.desired_version:
@@ -967,16 +968,15 @@ class ModuleManager:
                     if self.toggle_module(mid, False, persist=False):
                         summary["disabled"].append(mid)
 
-            # Uninstalled elsewhere: loaded here but no plugin_states row any more →
-            # uninstall here too (files + unload). Plugins loaded moments ago are
-            # skipped: their row may simply not be written yet.
-            import time as _time
-
+            # Uninstalled elsewhere: loaded here, this instance has seen its
+            # plugin_states row before, and the row is gone now → uninstall here
+            # too (files + unload). A plugin whose row this instance never saw is a
+            # fresh local install still being persisted — leave it alone.
             for mid, entry in list(self.registry.items()):
                 manifest = entry.get("manifest")
                 if not manifest or manifest.type != "PLUGIN" or mid in known_ids:
                     continue
-                if _time.monotonic() - float(entry.get("loaded_at") or 0.0) < _RECONCILE_UNINSTALL_GRACE_S:
+                if not entry.get("persisted"):
                     continue
                 module = entry.get("module")
                 module_file = getattr(module, "__file__", None)

@@ -149,7 +149,10 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     if missing:
         add("roles", "fail", "no live instance has role(s) " + ", ".join(
             f"'{role}' (needed by {', '.join(ids)})" for role, ids in sorted(missing.items())),
-            "Start an instance with LYNDRIX_INSTANCE_ROLES including that role, or change the plugin placement.")
+            "The plugin is installed but cannot run anywhere: start an instance whose LYNDRIX_INSTANCE_ROLES "
+            "include that role (the IaC Orchestrator needs a Docker host), or uninstall the plugin on this "
+            "deployment if it does not belong here. Traffic is not affected — every instance answers 503 "
+            "'remote' for that plugin's routes.")
     elif cluster and "leader" not in alive_roles:
         add("roles", "fail", "no leader-capable instance is alive",
             "At least one instance needs the 'leader' role for seeds, reconcilers and singleton plugins.")
