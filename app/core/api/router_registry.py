@@ -19,6 +19,12 @@ verifies its own signature, like a Discord/GitLab inbound hook) opts in with
 public=True)``. This mounts the router WITHOUT ``require_api_auth`` — the
 handler itself is then solely responsible for authenticating the request.
 
+Runtime gate: every mounted plugin route (public ones too) also carries a
+dependency that answers ``503`` with ``Retry-After`` while the plugin reports a
+*blocking* ``starting``/``maintenance`` status via ``ctx.set_status`` — so a
+plugin in its warm-up window never has to defend its own endpoints and the
+shell gets a clean, retryable signal instead of timeouts.
+
 Usage (from a plugin entrypoint)::
 
     from fastapi import APIRouter
@@ -36,14 +42,51 @@ Usage (from a plugin entrypoint)::
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 
 from core.logger import get_logger
 
 log = get_logger("Core:RouterRegistry")
+
+RUNTIME_GATE_HEADER = "X-Plugin-Runtime"
+
+
+def runtime_gate(module_id: str):
+    """FastAPI dependency: 503 while *module_id* reports a blocking runtime phase.
+
+    The body keeps ``detail`` a plain string (every plugin UI maps that to its
+    error banner); the full runtime status travels in the ``X-Plugin-Runtime``
+    header as JSON and in ``Retry-After``.
+    """
+
+    async def _gate() -> None:
+        # Lazy import: the registry is imported by the manager at boot.
+        from core.components.plugins.logic.manager import module_manager
+
+        runtime = module_manager.get_runtime(module_id)
+        if not runtime or not runtime.get("blocking"):
+            return
+        phase = runtime.get("phase")
+        if phase not in ("starting", "maintenance"):
+            return
+        name = module_manager.display_name(module_id)
+        message = runtime.get("message")
+        retry_after = int(runtime.get("retry_after") or 10)
+        raise HTTPException(
+            status_code=503,
+            detail=f"{name} is {phase}" + (f": {message}" if message else "") + " — retry shortly.",
+            headers={
+                "Retry-After": str(retry_after),
+                RUNTIME_GATE_HEADER: json.dumps({"plugin_id": module_id, **runtime}),
+            },
+        )
+
+    _gate.__qualname__ = f"runtime_gate<{module_id}>"
+    return _gate
 
 
 class PluginRouterRegistry:
@@ -157,7 +200,10 @@ class PluginRouterRegistry:
             # Depends(require_permission(...)) on their own routes for finer
             # authorization (e.g. api:write on mutations). public=True opts a
             # whole router out of this — the handler must self-authenticate.
+            # Auth first (an anonymous caller learns nothing about the plugin's
+            # state), then the runtime gate (503 while blocking warm-up/maintenance).
             dependencies = [] if public else [Depends(require_api_auth)]
+            dependencies.append(Depends(runtime_gate(module_id)))
             if public:
                 log.warning(
                     "RouterRegistry: mounting PUBLIC routes for '%s' at '%s' — "

@@ -423,6 +423,11 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
         ctx = entry.get("context")
         if module is None or ctx is None or not hasattr(module, "health"):
             return module_id, PluginHealthStatus(status="unknown")
+        # A plugin in its warm-up window is not probed: health() would only add
+        # load to the very work it is waiting for, and "starting" is not an error.
+        runtime = getattr(ctx, "runtime", None)
+        if runtime and runtime.get("phase") == "starting":
+            return module_id, PluginHealthStatus(status="unknown", details={"reason": "starting"})
         try:
             t0 = _time.monotonic()
             result = await asyncio.wait_for(module.health(ctx), timeout=5.0)
@@ -445,7 +450,10 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
 
     gathered = await asyncio.gather(*tasks)
     for module_id, health_status in gathered:
-        plugin_results[module_id] = health_status.model_dump()
+        plugin_results[module_id] = {
+            **health_status.model_dump(),
+            "runtime": module_manager.get_runtime(module_id),
+        }
         if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
             worst = health_status.status
 

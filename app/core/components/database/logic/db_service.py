@@ -1,6 +1,6 @@
 import asyncio
 from typing import Optional
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from core.bus import bus
 from core.logger import get_logger
@@ -19,6 +19,34 @@ _PERMANENT_ERROR_MARKERS = [
 
 
 class DatabaseService:
+    @staticmethod
+    def _install_statement_cap(engine) -> None:
+        """Cap statement time on every new pooled connection (see
+        ``DB_STATEMENT_TIMEOUT_SECONDS``). MariaDB: ``max_statement_time`` (s,
+        all statements); MySQL fallback: ``max_execution_time`` (ms, SELECT only).
+        Failures are logged once and never block the connection."""
+        seconds = int(getattr(settings, "DB_STATEMENT_TIMEOUT_SECONDS", 0) or 0)
+        if seconds <= 0 or engine.dialect.name not in ("mysql", "mariadb"):
+            return
+        warned = {"done": False}
+
+        @event.listens_for(engine, "connect")
+        def _cap(dbapi_conn, _record):
+            cur = dbapi_conn.cursor()
+            try:
+                try:
+                    cur.execute(f"SET SESSION max_statement_time = {seconds}")
+                except Exception:
+                    cur.execute(f"SET SESSION max_execution_time = {seconds * 1000}")
+            except Exception as exc:
+                if not warned["done"]:
+                    warned["done"] = True
+                    log.warning(f"DATABASE: could not cap statement time ({exc}) — running uncapped")
+            finally:
+                cur.close()
+
+        log.info(f"DATABASE: statement time capped at {seconds}s per connection (DB_STATEMENT_TIMEOUT_SECONDS)")
+
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
@@ -53,6 +81,7 @@ class DatabaseService:
                 pool_pre_ping=True,
                 connect_args={'connect_timeout': 5}
             )
+            self._install_statement_cap(self.engine)
             self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
             self._connection_task = bus.create_tracked_task(

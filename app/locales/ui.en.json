@@ -649,5 +649,19 @@
     "picker_hint": "Pick from the plugin collection which plugins the core reconciles on boot — this edits the same list as the raw field below.",
     "picker_saved": "Saved.",
     "picker_locked": "Locked by environment variable."
+  },
+  "plugin_runtime": {
+    "starting": "Starting up",
+    "maintenance": "Maintenance",
+    "degraded": "Degraded",
+    "ready": "Ready",
+    "progress": "{{done}} of {{total}}",
+    "elapsed": "{{seconds}} s",
+    "since": "since {{time}}",
+    "panel_title": "{{name}} is starting up",
+    "panel_title_maintenance": "{{name}} is in maintenance",
+    "panel_hint": "The plugin's API pauses until this is done. This page continues by itself.",
+    "banner_hint": "Some data may be incomplete until this finishes.",
+    "retry_hint": "Requests are answered with 503 and retried automatically."
   }
 }

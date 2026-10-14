@@ -34,6 +34,10 @@ class PluginOut(BaseModel):
     update_available: bool = False
     # Precomputed logger name for GET /api/logs (convention stays server-side).
     log_source: str = ""
+    # Runtime status reported by the plugin via ctx.set_status():
+    # {phase, message, progress, blocking, since, updated_at, retry_after}.
+    # None unless the plugin is active. Live updates: SSE plugin:runtime_status.
+    runtime: Optional[Dict[str, Any]] = None
 
 
 class PluginSettingsUpdate(BaseModel):
@@ -96,6 +100,7 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         latest_version=latest,
         update_available=update_available,
         log_source=f"{'Core' if manifest.type == 'CORE' else 'Plugin'}:{manifest.name}",
+        runtime=_manager().get_runtime(module_id),
     )
 
 

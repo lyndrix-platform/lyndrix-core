@@ -10,6 +10,54 @@ from core.logger import get_logger
 from core.services import vault_instance
 from .models import ModuleManifest
 
+# Runtime phases a module may report via ``ctx.set_status``. ``blocking`` only
+# has an effect in the two transient phases.
+RUNTIME_PHASES = ("starting", "ready", "degraded", "maintenance")
+RUNTIME_BLOCKING_PHASES = ("starting", "maintenance")
+RUNTIME_STATUS_TOPIC = "plugin:runtime_status"
+# Progress-only updates are coalesced to this interval so a busy warm-up loop
+# cannot flood the bus / SSE clients. Phase changes are always emitted.
+_RUNTIME_EMIT_MIN_INTERVAL_S = 1.0
+
+
+def _ready_runtime(now: datetime | None = None) -> dict:
+    ts = (now or datetime.now(timezone.utc)).isoformat()
+    return {
+        "phase": "ready",
+        "message": None,
+        "progress": None,
+        "blocking": False,
+        "since": ts,
+        "updated_at": ts,
+        "retry_after": None,
+    }
+
+
+class _MaintenanceWindow:
+    """``async with ctx.maintenance("…")`` / ``with ctx.maintenance("…")``."""
+
+    def __init__(self, ctx: "ModuleContext", message: str | None, blocking: bool, retry_after: int | None):
+        self._ctx = ctx
+        self._message = message
+        self._blocking = blocking
+        self._retry_after = retry_after
+
+    def __enter__(self):
+        self._ctx.set_status("maintenance", message=self._message, blocking=self._blocking,
+                             retry_after=self._retry_after)
+        return self._ctx
+
+    def __exit__(self, exc_type, exc, tb):
+        self._ctx.set_status("ready")
+        return False  # never swallow the exception
+
+    async def __aenter__(self):
+        return self.__enter__()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return self.__exit__(exc_type, exc, tb)
+
+
 class ModuleContext:
     """
     Der isolierte Sandkasten für JEDES Modul (Core & Plugin).
@@ -31,6 +79,111 @@ class ModuleContext:
         # by request_id.
         self._pending_requests: dict[str, asyncio.Future] = {}
         self._reply_listeners: set[str] = set()
+        # Runtime status (startup sweep / maintenance window), see set_status().
+        self._runtime: dict = _ready_runtime()
+        self._runtime_emitted_at: datetime | None = None
+
+    # --- RUNTIME STATUS (startup sequence / maintenance window) ---
+
+    @property
+    def runtime(self) -> dict:
+        """Current runtime status: ``{phase, message, progress, blocking, since,
+        updated_at, retry_after}``. Always present — a module that never calls
+        ``set_status`` is ``ready``."""
+        return dict(self._runtime)
+
+    def set_status(
+        self,
+        phase: str,
+        *,
+        message: str | None = None,
+        progress: tuple[int, int] | None = None,
+        blocking: bool = False,
+        retry_after: int | None = None,
+    ) -> dict:
+        """Report this module's runtime phase to the core.
+
+        ``phase``: ``starting`` (warm-up such as an initial probe sweep),
+        ``ready``, ``degraded`` (working with reduced function) or
+        ``maintenance`` (temporarily unavailable on purpose).
+
+        ``progress=(done, total)`` is shown as a progress bar. ``blocking=True``
+        (only meaningful for ``starting``/``maintenance``) tells the core to
+        answer this module's API routes with ``503 Retry-After`` and the React
+        shell to show a warm-up panel instead of the plugin UI; non-blocking
+        phases only add a banner. ``retry_after`` (seconds) is sent with the 503.
+
+        The status is kept on the context (reset to ``ready`` on dispose) and
+        broadcast as ``plugin:runtime_status`` on the global bus — a core-owned
+        topic, so no manifest permission is needed. Progress-only updates are
+        coalesced to one per second; phase changes are always emitted.
+
+        Example::
+
+            ctx.set_status("starting", message="Initial probe sweep",
+                           progress=(0, total), blocking=True)
+            for i, item in enumerate(items, 1):
+                ...
+                ctx.set_status("starting", message="Initial probe sweep",
+                               progress=(i, total), blocking=True)
+            ctx.set_status("ready")
+        """
+        if phase not in RUNTIME_PHASES:
+            raise ValueError(f"Unknown runtime phase '{phase}' (expected one of {', '.join(RUNTIME_PHASES)})")
+        prog = None
+        if progress is not None:
+            done, total = progress
+            prog = {"done": max(0, int(done)), "total": max(0, int(total))}
+        now = datetime.now(timezone.utc)
+        prev = self._runtime
+        is_blocking = bool(blocking) and phase in RUNTIME_BLOCKING_PHASES
+        phase_changed = prev["phase"] != phase or prev["blocking"] != is_blocking
+        runtime = {
+            "phase": phase,
+            "message": message,
+            "progress": prog,
+            "blocking": is_blocking,
+            "since": now.isoformat() if phase_changed else prev["since"],
+            "updated_at": now.isoformat(),
+            "retry_after": int(retry_after) if retry_after else None,
+        }
+        self._runtime = runtime
+
+        last = self._runtime_emitted_at
+        if not phase_changed and last is not None and (now - last).total_seconds() < _RUNTIME_EMIT_MIN_INTERVAL_S:
+            return dict(runtime)  # coalesced; the state is current, the bus is not spammed
+        self._emit_runtime(now)
+        if phase_changed:
+            self.log.info(
+                "RUNTIME: %s%s%s", phase, " (blocking)" if is_blocking else "",
+                f" — {message}" if message else "",
+            )
+        return dict(runtime)
+
+    def maintenance(self, message: str | None = None, *, blocking: bool = True,
+                    retry_after: int | None = None) -> _MaintenanceWindow:
+        """Context manager (sync or async) that reports ``maintenance`` on enter
+        and ``ready`` on exit — also when the body raises::
+
+            async with ctx.maintenance("Re-importing inventory"):
+                await asyncio.to_thread(self._reimport)
+        """
+        return _MaintenanceWindow(self, message, blocking, retry_after)
+
+    def reset_runtime(self) -> None:
+        """Back to ``ready`` (used by the ModuleManager on dispose/failure) so a
+        stopped module can never leave a stale blocking status behind."""
+        if self._runtime["phase"] == "ready" and not self._runtime["blocking"]:
+            return
+        self._runtime = _ready_runtime()
+        self._emit_runtime(datetime.now(timezone.utc))
+
+    def _emit_runtime(self, now: datetime) -> None:
+        self._runtime_emitted_at = now
+        try:
+            global_bus.emit(RUNTIME_STATUS_TOPIC, {"plugin_id": self.manifest.id, **self._runtime})
+        except Exception:
+            self.log.debug("RUNTIME: status emit failed", exc_info=True)
 
     # --- EVENT BUS PROXY ---
 
@@ -149,6 +302,9 @@ class ModuleContext:
             except Exception:
                 self.log.debug("DISPOSE: task cancel failed", exc_info=True)
         self._tasks.clear()
+        # A disabled/unloaded module is not "starting" any more — never leave a
+        # blocking status behind that would 503 the next incarnation's routes.
+        self.reset_runtime()
 
     def notify(
         self,

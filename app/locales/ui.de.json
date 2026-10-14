@@ -649,5 +649,19 @@
     "picker_hint": "Aus der Plugin-Collection wählen, welche Plugins der Core beim Boot abgleicht — bearbeitet dieselbe Liste wie das Rohfeld darunter.",
     "picker_saved": "Gespeichert.",
     "picker_locked": "Durch Umgebungsvariable gesperrt."
+  },
+  "plugin_runtime": {
+    "starting": "Startet",
+    "maintenance": "Wartung",
+    "degraded": "Eingeschränkt",
+    "ready": "Bereit",
+    "progress": "{{done}} von {{total}}",
+    "elapsed": "{{seconds}} s",
+    "since": "seit {{time}}",
+    "panel_title": "{{name}} startet",
+    "panel_title_maintenance": "{{name}} ist in Wartung",
+    "panel_hint": "Die API des Plugins pausiert, bis das abgeschlossen ist. Diese Seite geht von selbst weiter.",
+    "banner_hint": "Bis dahin können Daten unvollständig sein.",
+    "retry_hint": "Anfragen werden mit 503 beantwortet und automatisch wiederholt."
   }
 }

@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.4
+Lyndrix Core Plugin API — Stable Surface v1.5
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -18,6 +18,19 @@ Every plugin entrypoint.py is encouraged to implement these functions:
         Absence is allowed but triggers a validation warning.
         \"\"\"
         return PluginHealthStatus(status="ok")
+
+Runtime status (API >= 1.5): a plugin with a long warm-up or a maintenance
+window reports it instead of letting its endpoints time out:
+
+    ctx.set_status("starting", message="Initial probe sweep",
+                   progress=(done, total), blocking=True)   # ... later:
+    ctx.set_status("ready")
+    async with ctx.maintenance("Re-importing inventory"): ...
+
+While a *blocking* starting/maintenance status is set, the core answers the
+plugin's API routes with 503 + Retry-After and the React shell shows a
+warm-up panel; the status is broadcast as ``plugin:runtime_status``. Keep
+health() cheap — it is polled by every dashboard.
 
     def teardown(ctx: ModuleContext) -> None:
         \"\"\"Called when the plugin is deactivated.\"\"\"
@@ -55,7 +68,7 @@ request topic in ``permissions.emit`` and the reply topic in
 ``permissions.subscribe``.
 """
 
-__api_version__ = "1.4.0"
+__api_version__ = "1.5.0"
 
 from typing import Any, Dict, Literal, Optional
 

@@ -505,6 +505,8 @@ class ModuleManager:
                     log.error(f"RUNTIME_ERROR: Sync setup failed for '{module_id}': {e}")
                     entry["status"] = "failed"
                     entry["error_message"] = str(e)
+                    if hasattr(ctx, "reset_runtime"):
+                        ctx.reset_runtime()
                     try:
                         bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
                     except Exception as emit_err:
@@ -551,6 +553,8 @@ class ModuleManager:
             if module_id in self.registry:
                 self.registry[module_id]["status"] = "failed"
                 self.registry[module_id]["error_message"] = str(e)
+                if hasattr(ctx, "reset_runtime"):
+                    ctx.reset_runtime()
             # Emit on the global bus directly (bypass plugin permissions in ctx).
             try:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
@@ -716,6 +720,19 @@ class ModuleManager:
 
     def get_manifests(self):
         return [entry["manifest"] for entry in self.registry.values()]
+
+    def get_runtime(self, module_id: str) -> dict | None:
+        """Runtime status (``ctx.set_status``) of an *active* module, else None."""
+        entry = self.registry.get(module_id)
+        if not entry or entry.get("status") != "active":
+            return None
+        ctx = entry.get("context")
+        return ctx.runtime if ctx is not None and hasattr(ctx, "runtime") else None
+
+    def display_name(self, module_id: str) -> str:
+        entry = self.registry.get(module_id)
+        manifest = entry.get("manifest") if entry else None
+        return getattr(manifest, "name", None) or module_id
 
     def _teardown_ui(self, module_id: str):
         """Removes a module's UI components without unloading the code."""

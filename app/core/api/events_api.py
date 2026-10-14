@@ -41,6 +41,7 @@ _SSE_QUEUES: Set[asyncio.Queue] = set()
 _AUTH_TOPICS = frozenset({
     "system:boot_complete",
     "plugin:state_changed",
+    "plugin:runtime_status",
     "plugin:installed",
     "plugin:install_failed",
     "plugin:update_available",

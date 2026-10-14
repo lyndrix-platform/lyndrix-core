@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     DB_USER: str = "admin"
     DB_PASSWORD: str = "secret"
     DB_NAME: str = "lyndrix_db"
+    # Cap for a single SQL statement on every pooled connection (MariaDB
+    # max_statement_time / MySQL max_execution_time). A runaway plugin query is
+    # killed by the server instead of piling up after the client gave up.
+    # 0 disables the cap. Long batch jobs raise it per session.
+    DB_STATEMENT_TIMEOUT_SECONDS: int = 60
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"
