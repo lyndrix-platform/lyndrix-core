@@ -365,22 +365,47 @@ class ModuleManager:
             self.unload_module(module_id)
             # plugin_states is the cluster's source of truth: without this the row
             # kept saying "active" and peers (or the next boot) re-installed the plugin.
-            await asyncio.to_thread(self._delete_plugin_state, module_id)
+            # A failed delete must not fail open (peers would silently keep the
+            # plugin): retry in the background and tell the operator if it stays.
+            if not await asyncio.to_thread(self._delete_plugin_state, module_id):
+                bus.create_tracked_task(self._delete_plugin_state_with_retry(module_id),
+                                        name=f"module_manager:uninstall_row:{module_id}")
             bus.emit("plugin:state_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} uninstalled."})
 
-    def _delete_plugin_state(self, module_id: str) -> None:
-        if not module_id or not db_instance.SessionLocal:
-            return
+    def _delete_plugin_state(self, module_id: str) -> bool:
+        """Delete the plugin_states row; True when it is gone (or never existed)."""
+        if not module_id:
+            return True
+        if not db_instance.SessionLocal:
+            return False
         try:
             with db_instance.SessionLocal() as session:
                 deleted = session.query(PluginState).filter(PluginState.module_id == module_id).delete()
                 session.commit()
             if deleted:
                 log.info(f"UNINSTALL: removed plugin_states row for '{module_id}'.")
+            return True
         except Exception as exc:
             log.warning(f"UNINSTALL: could not remove plugin_states row for '{module_id}': {exc}")
+            return False
+
+    async def _delete_plugin_state_with_retry(self, module_id: str, attempts: int = 6) -> bool:
+        for attempt in range(1, attempts + 1):
+            await asyncio.sleep(min(60, 5 * attempt))
+            if await asyncio.to_thread(self._delete_plugin_state, module_id):
+                bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "uninstalled"})
+                return True
+        log.error(
+            f"UNINSTALL: plugin_states row for '{module_id}' could not be removed after {attempts} attempts — "
+            f"other instances keep the plugin until the row is deleted."
+        )
+        bus.emit("plugin:uninstall_failed", {
+            "plugin_id": module_id,
+            "error": "plugin_states row could not be removed — other cluster instances keep the plugin",
+        })
+        return False
 
     async def _verify_after_install(self, module_id: str) -> bool:
         """Post-install/upgrade health gate. The plugin must be loaded, not in a

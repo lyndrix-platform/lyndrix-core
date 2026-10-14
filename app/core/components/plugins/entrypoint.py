@@ -15,7 +15,7 @@ manifest = ModuleManifest(
         "subscribe": [
             "git:status_update", "system:boot_complete",
             "plugin:installed", "plugin:install_failed", "plugin:rolled_back",
-            "plugin:update_available",
+            "plugin:update_available", "plugin:uninstall_failed",
         ],
         "emit": ["git:sync", "notification:routed"],
     },
@@ -83,6 +83,21 @@ def _register_lifecycle_notifications(ctx):
             severity="error",
         )
 
+    def _on_uninstall_failed(payload):
+        # Cluster: the plugin_states row survived the uninstall, so the other
+        # instances keep the plugin. Loud on purpose — a revocation that fails
+        # must never fail silently.
+        pid = (payload or {}).get("plugin_id", "plugin")
+        error = (payload or {}).get("error", "unknown error")
+        ctx.notify(
+            "plugin_install_failed",
+            payload=payload or {},
+            notification_id=f"plugin_uninstall_{pid}",
+            title="Plugin uninstall incomplete",
+            body=f"'{pid}': {error}",
+            severity="error",
+        )
+
     def _on_rolled_back(payload):
         repo = (payload or {}).get("repo", "plugin")
         version = (payload or {}).get("version")
@@ -126,6 +141,7 @@ def _register_lifecycle_notifications(ctx):
 
     ctx.subscribe("plugin:installed")(_local_only(_on_installed))
     ctx.subscribe("plugin:install_failed")(_local_only(_on_failed))
+    ctx.subscribe("plugin:uninstall_failed")(_local_only(_on_uninstall_failed))
     ctx.subscribe("plugin:rolled_back")(_local_only(_on_rolled_back))
     ctx.subscribe("plugin:update_available")(_local_only(_on_update_available))
 
