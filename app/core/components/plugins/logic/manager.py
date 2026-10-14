@@ -1039,6 +1039,11 @@ class ModuleManager:
         # --- ROBUST UNLOAD: Purge all submodules of the plugin from memory ---
         base_package_name = ".".join(entry["module"].__name__.split('.')[:-1])
         modules_to_delete = [m for m in sys.modules if m.startswith(base_package_name)]
+        # The plugin's SQLAlchemy models stay registered on the shared Base after
+        # the module objects are gone; a re-import of the same folder (reload,
+        # auto-revert, cluster reconcile) then fails with "Table '…' is already
+        # defined for this MetaData instance". Forget them first.
+        self._forget_plugin_models(base_package_name)
         
         del self.registry[module_id]
         
@@ -1047,6 +1052,48 @@ class ModuleManager:
             
         log.info(f"UNLOAD: Module '{module_id}' unloaded from memory.")
         return True
+
+    @staticmethod
+    def _forget_plugin_models(base_package_name: str) -> int:
+        """Remove every ORM class (and its table) that a plugin package defined on
+        the shared ``Base`` so the package can be imported again. Returns the
+        number of tables removed. Never raises — a failure here must not block an
+        unload."""
+        removed = 0
+        try:
+            from sqlalchemy.orm import instrumentation
+
+            from core.components.database.logic.db_service import Base
+
+            prefix = base_package_name + "."
+            for mapper in list(Base.registry.mappers):
+                cls = mapper.class_
+                if not str(getattr(cls, "__module__", "")).startswith(prefix):
+                    continue
+                table = getattr(cls, "__table__", None)
+                try:
+                    # Same steps registry.dispose() takes per class, limited to this
+                    # plugin: drop the mapper + instrumentation, the class-name
+                    # registration and the manager bookkeeping (mappers property).
+                    manager = instrumentation.opt_manager_of_class(cls)
+                    if manager is not None:
+                        Base.registry._dispose_manager_and_mapper(manager)
+                        Base.registry._managers.pop(manager, None)
+                    else:
+                        Base.registry._dispose_cls(cls)
+                except Exception:
+                    log.debug(f"UNLOAD: could not dispose mapper for {cls!r}", exc_info=True)
+                if table is not None and table.key in Base.metadata.tables:
+                    try:
+                        Base.metadata.remove(table)
+                        removed += 1
+                    except Exception:
+                        log.debug(f"UNLOAD: could not remove table {table.key!r}", exc_info=True)
+            if removed:
+                log.info(f"UNLOAD: forgot {removed} ORM table(s) of '{base_package_name}' so it can be re-imported.")
+        except Exception:
+            log.debug("UNLOAD: model cleanup failed", exc_info=True)
+        return removed
 
     async def reload_module(self, module_id: str, module_folder: str | None = None):
         # Serialize concurrent reloads of the same plugin so the unload → re-import
