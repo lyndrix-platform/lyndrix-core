@@ -54,7 +54,17 @@ class DatabaseService:
         self._connection_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
         self._max_retries = 30  # ~2.5 minutes with 5s intervals
+        # Boot-screen telemetry (read by BootService.snapshot): how far the
+        # connection loop got, whether it gave up and why, and whether we were
+        # ever connected (a watchdog drop then reads as "reconnecting").
+        self.connect_attempts = 0
+        self.failure_reason: Optional[str] = None  # "config_error" | "max_retries"
+        self.was_connected = False
         bus.subscribe("vault:opened")(self.init_db_connection)
+
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
 
     async def init_db_connection(self, payload=None):
         # ``vault:opened`` fires repeatedly (reconnects, multiple vault code
@@ -95,13 +105,16 @@ class DatabaseService:
         """Retries DB connection, distinguishing transient from permanent failures."""
         log.info(f"CONNECT: Attempting connection to {settings.DB_HOST}...")
         attempt = 0
+        self.failure_reason = None
 
         while not self.is_connected:
             attempt += 1
+            self.connect_attempts = attempt
             try:
                 await asyncio.to_thread(self._check_db_sync)
 
                 self.is_connected = True
+                self.was_connected = True
                 log.info("SUCCESS: Database connection established.")
                 bus.emit("db:connected", {"status": "ready"})
                 bus.emit("system:maintenance_mode", {"service": "db", "active": False})
@@ -118,11 +131,13 @@ class DatabaseService:
                 # Check if this is a permanent config/credential error
                 if any(marker.lower() in error_str.lower() for marker in _PERMANENT_ERROR_MARKERS):
                     log.error(f"PERMANENT: Database configuration error (not retrying): {self._redact_error(error_str)}")
+                    self.failure_reason = "config_error"
                     bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "config_error"})
                     return
 
                 if attempt >= self._max_retries:
                     log.error(f"EXHAUSTED: Database connection failed after {attempt} attempts. Giving up.")
+                    self.failure_reason = "max_retries"
                     bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "max_retries"})
                     return
 

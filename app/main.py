@@ -44,6 +44,7 @@ from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
 from core.api.logs_api import logs_router
 from core.api.i18n_api import i18n_router
+from core.api.boot_api import boot_router
 from core.components.auth.api.users_api import users_router
 from core.components.plugins.api.plugins_api import plugins_router
 from core.components.settings.api.themes_api import themes_router
@@ -272,6 +273,70 @@ async def manifest_redirect():
     )
 
 
+# NiceGUI boot page: Material icon names + English literals (the legacy UI is not
+# localized; the React shell translates the same ids via ``boot.*`` ui-namespace keys).
+_BOOT_SERVICE_ICONS = {
+    "vault": "key",
+    "database": "storage",
+    "iam": "verified_user",
+    "modules": "extension",
+    "coordinator": "hub",
+    "leader": "workspace_premium",
+    "peers": "dns",
+    "storage": "folder_shared",
+}
+_BOOT_SERVICE_LABELS = {
+    "vault": "Vault",
+    "database": "Database",
+    "iam": "Identity & access",
+    "modules": "Modules & plugins",
+    "coordinator": "Cluster coordinator",
+    "leader": "Leader election",
+    "peers": "Cluster peers",
+    "storage": "Shared storage",
+}
+_BOOT_STATUS_ICONS = {
+    "online": ("check_circle", "text-emerald-400"),
+    "pending": ("sync", "text-cyan-400"),
+    "waiting": ("schedule", "text-zinc-500"),
+    "action": ("warning", "text-amber-400"),
+    "failed": ("error", "text-red-400"),
+    "unavailable": ("remove_circle_outline", "text-zinc-600"),
+}
+_BOOT_DETAIL_TEXT = {
+    "connecting": "Connecting…",
+    "unsealed": "Unsealed and connected",
+    "needs_init": "Vault is not initialized — open /setup",
+    "sealed": "Vault is sealed — open /unseal",
+    "vault_error": "Vault is not reachable",
+    "connected": "Connected",
+    "reconnecting": "Connection lost — reconnecting",
+    "db_retry": "Not reachable yet — attempt {attempt} of {max}",
+    "db_config_error": "Configuration or credential error — check the logs",
+    "db_gave_up": "Gave up after {max} attempts — check the logs",
+    "iam_bootstrapping": "Creating tables, groups and users",
+    "iam_ready": "Ready",
+    "iam_failed": "Bootstrap failed — check the logs",
+    "modules_loading": "Discovering and starting plugins",
+    "modules_summary": "{active} active, {failed} failed, {total} registered",
+    "modules_failed": "Module loading failed — check the logs",
+    "waiting_for": "Waiting for {service}",
+    "cluster_not_available": "Not available in this core version — running as a single instance",
+}
+
+
+def _boot_detail_text(svc: dict) -> str:
+    template = _BOOT_DETAIL_TEXT.get(svc.get("detail") or "", svc.get("detail") or "")
+    params = dict(svc.get("detail_params") or {})
+    if svc.get("detail") == "waiting_for":
+        # "waiting_for" names another service by id — show its label.
+        params["service"] = _BOOT_SERVICE_LABELS.get(str(params.get("service")), params.get("service"))
+    try:
+        return template.format(**params)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
 if _nicegui_enabled:
     @ui.page("/")
     def entry_point():
@@ -290,18 +355,48 @@ if _nicegui_enabled:
             ui.navigate.to("/unseal")
             return
 
-        # 2. Boot Lock (Loading Screen)
+        # 2. Boot Lock (Loading Screen) — same dependency list as GET /api/boot,
+        #    refreshed once a second until the core releases the UI.
         if boot_service.is_booting or vault_instance.ui_state == "loading":
-            phase = getattr(boot_service, "phase", None)
-            phase_label = phase.value.replace("_", " ") if phase else "initializing"
-            with ui.column().classes("w-full h-screen items-center justify-center gap-4"):
-                ui.spinner("dots", size="3em", color="white")
-                ui.label("Lyndrix Boot Sequence...").classes(
-                    "text-zinc-500 text-sm tracking-widest uppercase"
-                )
-                ui.label(f"phase: {phase_label}").classes(
-                    "text-zinc-600 text-xs tracking-wide uppercase"
-                )
+
+            @ui.refreshable
+            def boot_panel():
+                snap = boot_service.snapshot()
+                phase_label = snap["phase"].replace("_", " ")
+                mode_label = "cluster mode" if snap["mode"] == "cluster" else "single instance"
+                summary = snap["summary"]
+                with ui.column().classes("w-full h-screen items-center justify-center gap-4"):
+                    ui.spinner("dots", size="3em", color="white")
+                    ui.label("Lyndrix Boot Sequence...").classes(
+                        "text-zinc-500 text-sm tracking-widest uppercase"
+                    )
+                    ui.label(
+                        f"phase: {phase_label} · {mode_label} · "
+                        f"{summary['online']}/{summary['total']} online · {int(snap['elapsed_s'])} s"
+                    ).classes("text-zinc-600 text-xs tracking-wide uppercase")
+                    with ui.column().classes("gap-2 mt-2 w-[360px] max-w-full"):
+                        for svc in snap["services"]:
+                            status_icon, status_cls = _BOOT_STATUS_ICONS.get(
+                                svc["status"], ("help", "text-zinc-500")
+                            )
+                            with ui.row().classes("items-center gap-3 w-full no-wrap"):
+                                ui.icon(_BOOT_SERVICE_ICONS.get(svc["id"], "circle")).classes(
+                                    "text-zinc-400 text-xl"
+                                )
+                                with ui.column().classes("gap-0 flex-1 min-w-0"):
+                                    ui.label(_BOOT_SERVICE_LABELS.get(svc["id"], svc["id"])).classes(
+                                        "text-sm text-zinc-200 leading-tight"
+                                    )
+                                    ui.label(_boot_detail_text(svc)).classes(
+                                        "text-xs text-zinc-500 leading-tight"
+                                    )
+                                if svc["status"] == "pending":
+                                    ui.spinner(size="1.1em", color="cyan")
+                                else:
+                                    ui.icon(status_icon).classes(f"{status_cls} text-xl")
+
+            boot_panel()
+            ui.timer(1.0, boot_panel.refresh)
 
             async def poll_boot_complete():
                 while boot_service.is_booting or vault_instance.ui_state == "loading":
@@ -390,6 +485,9 @@ app.include_router(vault_api_router)
 
 # i18n catalog endpoint (unauthenticated — login/setup pages localize pre-auth).
 app.include_router(i18n_router)
+
+# Boot status (unauthenticated — the boot screen polls it before the core is ready).
+app.include_router(boot_router)
 
 
 # ==========================================
@@ -623,6 +721,11 @@ async def startup_event():
     # ui.run_with() startup hooks are confirmed compatible (a custom lifespan
     # suppresses on_event-registered handlers, which NiceGUI relies on).
     log.info("STARTUP: Lyndrix Core Engine is starting...")
+    if settings.LYNDRIX_CLUSTER_MODE == "cluster":
+        log.warning(
+            "CLUSTER: LYNDRIX_CLUSTER_MODE=cluster requested, but the cluster coordinator is not "
+            "available in this core version — running as a single instance (see features/high-availability*.md)."
+        )
     bus.emit("system:started", {})
 
 

@@ -650,6 +650,64 @@
     "picker_saved": "Saved.",
     "picker_locked": "Locked by environment variable."
   },
+  "boot": {
+    "title": "Lyndrix is starting",
+    "title_failed": "Lyndrix could not start",
+    "title_unreachable": "Waiting for the core",
+    "subtitle": "Core services are coming online. This page continues by itself.",
+    "subtitle_failed": "The core stays in maintenance mode. Check the logs and restart it.",
+    "unreachable": "The core is not reachable yet — retrying…",
+    "mode_single": "Single instance",
+    "mode_cluster": "Cluster mode",
+    "elapsed": "{{seconds}} s",
+    "summary": "{{online}} of {{total}} online",
+    "open_vault_setup": "Open Vault setup",
+    "open_vault_unseal": "Unseal Vault",
+    "phase": {
+      "waiting_core": "Waiting for core services",
+      "loading_modules": "Loading modules and plugins",
+      "ready": "Ready",
+      "failed": "Boot failed"
+    },
+    "service": {
+      "vault": "Vault",
+      "database": "Database",
+      "iam": "Identity & access",
+      "modules": "Modules & plugins",
+      "coordinator": "Cluster coordinator",
+      "leader": "Leader election",
+      "peers": "Cluster peers",
+      "storage": "Shared storage"
+    },
+    "status": {
+      "online": "Online",
+      "pending": "Starting",
+      "waiting": "Waiting",
+      "action": "Action required",
+      "failed": "Failed",
+      "unavailable": "Not available"
+    },
+    "detail": {
+      "connecting": "Connecting…",
+      "unsealed": "Unsealed and connected",
+      "needs_init": "Vault is not initialized",
+      "sealed": "Vault is sealed",
+      "vault_error": "Vault is not reachable",
+      "connected": "Connected",
+      "reconnecting": "Connection lost — reconnecting",
+      "db_retry": "Not reachable yet — attempt {{attempt}} of {{max}}",
+      "db_config_error": "Configuration or credential error — check the logs",
+      "db_gave_up": "Gave up after {{max}} attempts — check the logs",
+      "iam_bootstrapping": "Creating tables, groups and users",
+      "iam_ready": "Ready",
+      "iam_failed": "Bootstrap failed — check the logs",
+      "modules_loading": "Discovering and starting plugins",
+      "modules_summary": "{{active}} active, {{failed}} failed, {{total}} registered",
+      "modules_failed": "Module loading failed — check the logs",
+      "waiting_for": "Waiting for {{service}}",
+      "cluster_not_available": "Not available in this core version — running as a single instance"
+    }
+  },
   "plugin_runtime": {
     "starting": "Starting up",
     "maintenance": "Maintenance",

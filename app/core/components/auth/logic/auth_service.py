@@ -85,6 +85,8 @@ class AuthService:
             bus.emit("iam:ready")
         except Exception as e:
             log.error(f"ERROR: IAM Service initialization failed: {e}", exc_info=True)
+            # Let the boot screen show IAM as failed instead of "bootstrapping" forever.
+            bus.emit("iam:failed", {"error": str(e)})
 
     def _bootstrap_iam(self) -> None:
         """Synchronous IAM bootstrap, executed off the event loop."""

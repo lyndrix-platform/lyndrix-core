@@ -650,6 +650,64 @@
     "picker_saved": "Gespeichert.",
     "picker_locked": "Durch Umgebungsvariable gesperrt."
   },
+  "boot": {
+    "title": "Lyndrix startet",
+    "title_failed": "Lyndrix konnte nicht starten",
+    "title_unreachable": "Warte auf den Core",
+    "subtitle": "Die Core-Dienste kommen online. Diese Seite geht von selbst weiter.",
+    "subtitle_failed": "Der Core bleibt im Wartungsmodus. Logs prüfen und neu starten.",
+    "unreachable": "Der Core ist noch nicht erreichbar — neuer Versuch…",
+    "mode_single": "Einzelinstanz",
+    "mode_cluster": "Cluster-Modus",
+    "elapsed": "{{seconds}} s",
+    "summary": "{{online}} von {{total}} online",
+    "open_vault_setup": "Vault einrichten",
+    "open_vault_unseal": "Vault entsiegeln",
+    "phase": {
+      "waiting_core": "Warte auf Core-Dienste",
+      "loading_modules": "Lade Module und Plugins",
+      "ready": "Bereit",
+      "failed": "Start fehlgeschlagen"
+    },
+    "service": {
+      "vault": "Vault",
+      "database": "Datenbank",
+      "iam": "Identität & Zugriff",
+      "modules": "Module & Plugins",
+      "coordinator": "Cluster-Koordinator",
+      "leader": "Leader-Wahl",
+      "peers": "Cluster-Knoten",
+      "storage": "Gemeinsamer Speicher"
+    },
+    "status": {
+      "online": "Online",
+      "pending": "Startet",
+      "waiting": "Wartet",
+      "action": "Aktion nötig",
+      "failed": "Fehlgeschlagen",
+      "unavailable": "Nicht verfügbar"
+    },
+    "detail": {
+      "connecting": "Verbinde…",
+      "unsealed": "Entsiegelt und verbunden",
+      "needs_init": "Vault ist nicht initialisiert",
+      "sealed": "Vault ist versiegelt",
+      "vault_error": "Vault ist nicht erreichbar",
+      "connected": "Verbunden",
+      "reconnecting": "Verbindung verloren — verbinde neu",
+      "db_retry": "Noch nicht erreichbar — Versuch {{attempt}} von {{max}}",
+      "db_config_error": "Konfigurations- oder Zugangsdatenfehler — Logs prüfen",
+      "db_gave_up": "Nach {{max}} Versuchen aufgegeben — Logs prüfen",
+      "iam_bootstrapping": "Lege Tabellen, Gruppen und Benutzer an",
+      "iam_ready": "Bereit",
+      "iam_failed": "Bootstrap fehlgeschlagen — Logs prüfen",
+      "modules_loading": "Erkenne und starte Plugins",
+      "modules_summary": "{{active}} aktiv, {{failed}} fehlgeschlagen, {{total}} registriert",
+      "modules_failed": "Laden der Module fehlgeschlagen — Logs prüfen",
+      "waiting_for": "Wartet auf {{service}}",
+      "cluster_not_available": "In dieser Core-Version nicht verfügbar — läuft als Einzelinstanz"
+    }
+  },
   "plugin_runtime": {
     "starting": "Startet",
     "maintenance": "Wartung",

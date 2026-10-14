@@ -177,6 +177,15 @@ class Settings(BaseSettings):
     # The API always runs regardless of this setting.
     LYNDRIX_UI_ENGINE: str = "api"
 
+    # Deployment topology (opt-in, see features/high-availability*.md):
+    #   "single"  — one core instance; today's behaviour (default)
+    #   "cluster" — N identical instances behind a load balancer. The cluster
+    #               coordinator is NOT shipped in this core version yet: the flag
+    #               makes the boot screen list the cluster dependencies (as
+    #               unavailable) and logs a startup warning; otherwise the core
+    #               keeps running as a single instance.
+    LYNDRIX_CLUSTER_MODE: str = "single"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"
@@ -287,6 +296,16 @@ class Settings(BaseSettings):
         if self.VAULT_SKIP_VERIFY:
             violations.append("VAULT_SKIP_VERIFY (Vault TLS verification disabled)")
         return violations
+
+    @model_validator(mode="after")
+    def _validate_cluster_mode(self) -> "Settings":
+        mode = (self.LYNDRIX_CLUSTER_MODE or "single").strip().lower()
+        if mode not in ("single", "cluster"):
+            raise ValueError(
+                f"LYNDRIX_CLUSTER_MODE must be 'single' or 'cluster', got {self.LYNDRIX_CLUSTER_MODE!r}"
+            )
+        self.LYNDRIX_CLUSTER_MODE = mode
+        return self
 
     @model_validator(mode="after")
     def _enforce_secure_defaults(self) -> "Settings":
