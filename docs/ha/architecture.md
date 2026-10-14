@@ -98,6 +98,11 @@ one-time SSO exchange codes (callback on B, token exchange on C) and the failed-
 (5 failures per minute per user and client IP, cluster-wide). The OIDC callback route is
 registered on API-only instances too.
 
+Nothing secret is at rest in that table: an exchange code names only the authenticated identity
+and the session token is minted when the SPA redeems it; the PKCE verifier is useless without
+the authorization code the IdP sends to the callback; counters are counters. Rows expire
+within 60–300 s and the leader prunes them.
+
 ## What stays per instance (by design)
 
 - The runtime-status gate (503 while a plugin warms up) is evaluated on the instance that answers;

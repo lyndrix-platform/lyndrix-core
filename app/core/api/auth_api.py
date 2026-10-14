@@ -230,11 +230,13 @@ async def login(payload: LoginRequest, request: Request):
 # Provider discovery + SSO flow for the React SPA (Identity 2.0)
 # ==========================================
 
-# One-time SSO exchange codes: the OIDC callback mints a session token
-# server-side and hands the SPA a short-lived single-use code instead of
-# putting the token itself in a redirect URL (referrer/history leak).
-# Stored in the cluster KV (in-memory in single mode) because the callback
-# and the SPA's token exchange may hit different core instances.
+# One-time SSO exchange codes: the OIDC callback hands the SPA a short-lived
+# single-use code instead of a token in a redirect URL (referrer/history leak).
+# The payload names the identity ONLY (username, roles, display name,
+# provider) — the session token is minted when the code is redeemed. Stored in
+# the cluster KV (in-memory in single mode, a shared-DB table in cluster mode)
+# because the callback and the SPA's token exchange may hit different core
+# instances; keeping tokens out of it means nothing secret is at rest there.
 _SSO_EXCHANGE_TTL = 60
 
 
@@ -322,12 +324,27 @@ class TokenExchangeRequest(BaseModel):
 
 @auth_router.post("/token-exchange", response_model=LoginResponse, summary="Redeem a one-time SSO code")
 async def sso_token_exchange(payload: TokenExchangeRequest):
-    """Swap the single-use code from the SSO callback for the session token."""
+    """Swap the single-use code from the SSO callback for the session token.
+
+    The code only names the authenticated identity; the session token is minted
+    here, at redeem time, so it never exists before the SPA asks for it and is
+    never stored (the exchange payload lives in the cluster kv for up to 60 s —
+    in cluster mode that is a table in the shared database).
+    """
     data = await _redeem_sso_exchange_code(payload.code)
-    if data is None:
+    if data is None or not data.get("username"):
         raise HTTPException(status_code=401, detail="Invalid or expired exchange code")
+
+    from core.components.auth.logic.api_key_service import api_key_service
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    label = f"web-session · SSO ({data.get('provider') or 'oidc'}) · {stamp} UTC"
+    raw_token, _ = await asyncio.to_thread(
+        api_key_service.create, data["username"], label=label, scopes=[]
+    )
+    log.info(f"AUTH API: SSO session established for '{data['username']}' (code redeemed).")
     return LoginResponse(
-        token=data["token"],
+        token=raw_token,
         username=data["username"],
         roles=list(data.get("roles") or []),
         display_name=data.get("display_name"),

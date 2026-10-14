@@ -151,28 +151,21 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             return RedirectResponse("/login?error=auth_failed")
 
         if flow_meta.get("flow") == "react":
-            # React SPA flow: resolve the linked local profile, mint the web
-            # session token server-side and hand the SPA a one-time exchange
-            # code (never the token itself — no referrer/history leak).
-            import asyncio as _asyncio
-            from datetime import datetime, timezone
-
+            # React SPA flow: resolve the linked local profile and hand the SPA a
+            # one-time exchange code. The code carries only the identity — the
+            # session token is minted when the code is redeemed
+            # (/api/auth/token-exchange), so no bearer token is ever at rest in
+            # the cluster kv (shared DB) or in a redirect URL.
             from core.api.auth_api import create_sso_exchange_code
-            from core.components.auth.logic.api_key_service import api_key_service
 
             linked = await provider_registry.link_identity(result)
             oidc_provider.consume_result(state)  # burn the pending result
 
-            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            label = f"web-session · SSO ({linked.provider}) · {stamp} UTC"
-            raw_token, _ = await _asyncio.to_thread(
-                api_key_service.create, linked.username, label=label, scopes=[]
-            )
             xc = await create_sso_exchange_code({
-                "token": raw_token,
                 "username": linked.username,
                 "roles": list(linked.roles or []),
                 "display_name": str(linked.full_name or "") or None,
+                "provider": str(linked.provider or "oidc"),
             })
             redirect_uri, _, next_path = (flow_meta.get("redirect") or "|/").partition("|")
             log.info(f"AUTH:OIDC: React SSO session established for '{linked.username}'.")
