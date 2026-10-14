@@ -18,10 +18,24 @@ from core.i18n import register_client_namespace, register_plugin_locales
 
 log = get_logger("Core:ModuleManager")
 
+# plugin_states rows of former plugins that became core components (or were
+# retired). They are deleted at boot: a stale row with a dead repo_url would
+# otherwise make every instance retry the install forever.
+_LEGACY_PLUGIN_STATE_IDS = {
+    "lyndrix.service.git": "git is a core component (core/components/git) since core 1.0",
+}
+# Cluster reconcile: a failed install is retried with exponential back-off
+# (10 min → 24 h) instead of on every pass.
+_RECONCILE_INSTALL_BACKOFF_BASE_S = 600
+_RECONCILE_INSTALL_BACKOFF_MAX_S = 86400
+
+
 class ModuleManager:
     def __init__(self):
         self.registry = {}
         self._plugin_state_schema_ready = False
+        # module_id → (failures, monotonic time of the next allowed install attempt)
+        self._reconcile_install_backoff: dict = {}
         self._mounted_static_paths: set = set()
         # Per-module locks serialize reload/upgrade so two concurrent
         # plugin:files_changed events for the same plugin cannot interleave the
@@ -797,6 +811,47 @@ class ModuleManager:
             except Exception:
                 log.error("RECONCILE: periodic cluster reconcile failed", exc_info=True)
 
+    def _reconcile_install_allowed(self, module_id: str) -> bool:
+        entry = self._reconcile_install_backoff.get(module_id)
+        if entry is None:
+            return True
+        import time as _time
+
+        failures, next_attempt = entry
+        if _time.monotonic() >= next_attempt:
+            return True
+        log.debug(f"RECONCILE: install of '{module_id}' is backed off ({failures} failure(s)).")
+        return False
+
+    def _reconcile_install_failed(self, module_id: str) -> None:
+        import time as _time
+
+        failures = self._reconcile_install_backoff.get(module_id, (0, 0.0))[0] + 1
+        delay = min(_RECONCILE_INSTALL_BACKOFF_BASE_S * (2 ** (failures - 1)), _RECONCILE_INSTALL_BACKOFF_MAX_S)
+        self._reconcile_install_backoff[module_id] = (failures, _time.monotonic() + delay)
+        log.warning(
+            f"RECONCILE: install of '{module_id}' failed {failures}× — next attempt in {delay // 60} min. "
+            f"If the plugin no longer exists, remove its plugin_states row."
+        )
+
+    def _drop_legacy_plugin_states(self) -> None:
+        """Delete plugin_states rows of plugins that became core components."""
+        if not db_instance.SessionLocal:
+            return
+        try:
+            with db_instance.SessionLocal() as session:
+                rows = session.query(PluginState).filter(PluginState.module_id.in_(list(_LEGACY_PLUGIN_STATE_IDS))).all()
+                for row in rows:
+                    log.warning(
+                        f"PLUGIN_MANAGER: removing legacy plugin_states row '{row.module_id}' "
+                        f"({_LEGACY_PLUGIN_STATE_IDS[row.module_id]}; repo {row.repo_url})."
+                    )
+                    session.delete(row)
+                if rows:
+                    session.commit()
+        except Exception as exc:
+            log.debug(f"PLUGIN_MANAGER: legacy row cleanup skipped: {exc}")
+
     def _load_plugin_states(self) -> list[dict]:
         with db_instance.SessionLocal() as session:
             rows = session.query(PluginState).all()
@@ -858,13 +913,23 @@ class ModuleManager:
                         if self.load_module(folder, is_plugin=True):
                             summary["loaded"].append(mid)
                     elif row.get("repo_url") and row["is_active"]:
-                        version = row.get("desired_version") or "latest"
+                        if not self._reconcile_install_allowed(mid):
+                            continue
+                        # What the cluster runs right now (installed_version) is the
+                        # version to converge on; desired_version only carries the
+                        # LYNDRIX_PLUGINS_DESIRED pin and may be stale.
+                        version = row.get("installed_version") or row.get("desired_version") or "latest"
                         log.info(f"RECONCILE: installing '{mid}' from {row['repo_url']}@{version} ({trigger})")
                         try:
-                            await plugin_service.install_plugin(row["repo_url"], version=version)
-                            summary["installed"].append(mid)
+                            ok = await plugin_service.install_plugin(row["repo_url"], version=version)
                         except Exception as exc:
+                            ok = False
                             log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
+                        if ok is False:
+                            self._reconcile_install_failed(mid)
+                        else:
+                            self._reconcile_install_backoff.pop(mid, None)
+                            summary["installed"].append(mid)
                         continue  # the install path loads + activates via plugin:files_changed
                     else:
                         continue
@@ -1190,6 +1255,7 @@ class ModuleManager:
                         except Exception as exc:
                             if "Duplicate column" not in str(exc) and "already exists" not in str(exc):
                                 raise
+            self._drop_legacy_plugin_states()
 
         self._plugin_state_schema_ready = True
 
