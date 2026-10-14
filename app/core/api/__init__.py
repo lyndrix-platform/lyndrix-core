@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.3
+Lyndrix Core Plugin API — Stable Surface v1.4
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -38,9 +38,24 @@ Plugins can expose HTTP endpoints without touching main.py::
     def setup(ctx):
         ctx.register_routes(router)
         # Routes are mounted under /api/plugins/<plugin-id>/
+
+Request/response over the bus (API 1.4)
+---------------------------------------
+The bus is fire-and-forget; ``ctx.request`` layers a correlated reply on top::
+
+    reply = await ctx.request(
+        "entity_registry:identify", {"identifiers": {...}},
+        reply_topic="entity_registry:identified", timeout=5,
+    )
+    if reply is None:   # responder plugin absent/disabled → degrade, don't fail
+        ...
+
+The responder must echo ``payload["request_id"]`` in its reply. Declare the
+request topic in ``permissions.emit`` and the reply topic in
+``permissions.subscribe``.
 """
 
-__api_version__ = "1.3.0"
+__api_version__ = "1.4.0"
 
 from typing import Any, Dict, Literal, Optional
 

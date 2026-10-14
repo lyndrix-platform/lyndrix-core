@@ -1,7 +1,8 @@
+import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
 import threading
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter
 from core.bus import bus as global_bus
@@ -26,6 +27,10 @@ class ModuleContext:
         # reloaded plugin keeps firing its old handlers and leaks a task per cycle.
         self._subscriptions: list[tuple[str, object]] = []
         self._tasks: list = []
+        # request()/reply plumbing: one listener per reply topic, futures keyed
+        # by request_id.
+        self._pending_requests: dict[str, asyncio.Future] = {}
+        self._reply_listeners: set[str] = set()
 
     # --- EVENT BUS PROXY ---
 
@@ -56,6 +61,59 @@ class ModuleContext:
             self.log.error(message)
             raise PermissionError(message)
 
+    async def request(
+        self,
+        topic: str,
+        payload: dict | None = None,
+        *,
+        reply_topic: str,
+        timeout: float = 10.0,
+    ) -> dict | None:
+        """Emit ``topic`` and await the matching reply on ``reply_topic``.
+
+        Request/response on top of the fire-and-forget bus: a fresh
+        ``request_id`` is added to the payload and the responder must echo it
+        in its reply. Returns the reply payload, or ``None`` when nobody
+        answers within ``timeout`` (responder plugin absent/disabled) — callers
+        are expected to degrade gracefully instead of failing.
+
+        Both topics are checked against the manifest: ``topic`` must be in
+        ``permissions.emit`` and ``reply_topic`` in ``permissions.subscribe``.
+        """
+        self._ensure_reply_listener(reply_topic)
+        request_id = str(uuid4())
+        future = asyncio.get_running_loop().create_future()
+        self._pending_requests[request_id] = future
+        try:
+            self.emit(topic, {**(payload or {}), "request_id": request_id})
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            self.log.debug(f"REQUEST: no reply on '{reply_topic}' for '{topic}' within {timeout}s")
+            return None
+        finally:
+            self._pending_requests.pop(request_id, None)
+
+    def _ensure_reply_listener(self, reply_topic: str) -> None:
+        if reply_topic in self._reply_listeners:
+            return
+
+        def _on_reply(payload):
+            request_id = (payload or {}).get("request_id") if isinstance(payload, dict) else None
+            future = self._pending_requests.get(request_id) if request_id else None
+            if future is None or future.done():
+                return  # someone else's request, or already timed out
+            loop = future.get_loop()
+            loop.call_soon_threadsafe(
+                lambda: future.done() or future.set_result(payload)
+            )
+
+        # The bus de-duplicates subscribers by module + qualname; make the
+        # listener unique per plugin and topic or the second plugin's
+        # listener would be silently dropped as a "duplicate".
+        _on_reply.__qualname__ = f"ModuleContext.request<{self.manifest.id}:{reply_topic}>"
+        self.subscribe(reply_topic)(_on_reply)
+        self._reply_listeners.add(reply_topic)
+
     def create_task(self, coro, *, name: str = None):
         """Create an observed background task owned by this module."""
         task_name = name or f"module:{self.manifest.id}"
@@ -78,6 +136,11 @@ class ModuleContext:
             except Exception:
                 self.log.debug("DISPOSE: unsubscribe failed for '%s'", topic, exc_info=True)
         self._subscriptions.clear()
+        self._reply_listeners.clear()
+        for future in self._pending_requests.values():
+            if not future.done():
+                future.cancel()
+        self._pending_requests.clear()
 
         for task in self._tasks:
             try:
