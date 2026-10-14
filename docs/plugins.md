@@ -450,6 +450,36 @@ Rules:
 
 ---
 
+## Cluster placement and leases (API 1.7)
+
+A Lyndrix deployment may run several core instances behind a load balancer
+(`LYNDRIX_CLUSTER_MODE=cluster`). Plugins keep **one code path**: in single mode every lease is
+granted to the only instance and `cluster=True` is a no-op.
+
+```python
+manifest = ModuleManifest(..., placement="any")     # any | singleton | pinned:<role>
+
+def setup(ctx):
+    ctx.register_routes(router)                       # every instance
+    on_lease = getattr(ctx, "on_lease", None)         # older cores: start directly
+    if callable(on_lease):
+        on_lease("myplugin:worker", acquired=svc.start, lost=svc.stop)   # exactly one instance
+    else:
+        svc.start()
+    ctx.emit("myplugin:items_changed", {...}, cluster=True)  # peers receive it with payload["_origin"]
+```
+
+- `on_lease`: `acquired` fires when this instance obtains the lease, `lost` when a peer took it or
+  the coordinator was unreachable for a full TTL — stop the work in `lost`. Leases are released on
+  `dispose()`.
+- `ctx.lease(name)` is a one-shot lease for a piece of work; `ctx.is_leader`, `ctx.instance_id`,
+  `ctx.cluster_size`, `ctx.roles`, `ctx.cluster_mode` for diagnostics and one-off tasks.
+- `placement="pinned:<role>"`: `setup()` runs only on instances with that role; the others answer
+  503 `X-Plugin-Runtime: {"phase": "remote"}` and the shell shows "runs on another instance".
+- Rules for cluster-safe plugins (idempotent locked DDL, tolerate MariaDB 1020 on concurrent
+  writes, no in-process state peers need, standby-aware `health()`):
+  [High Availability → For plugin developers](ha/plugin-development.md).
+
 ## Authentication extensions
 
 Plugins can register custom authentication providers at runtime through the event bus.

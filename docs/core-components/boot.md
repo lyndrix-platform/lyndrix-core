@@ -71,7 +71,10 @@ core needs:
 | `database` | `waiting` for Vault, `pending` with retry progress (`db_retry` attempt/max, `reconnecting`), `online`, `failed` (`db_config_error`, `db_gave_up`) |
 | `iam` | `waiting` for the database, `pending` (`iam_bootstrapping`), `online`, `failed` |
 | `modules` | `waiting` for IAM, `pending` while `load_all()` runs, `online` with active/failed/total counts, `failed` |
-| `coordinator`, `leader`, `peers`, `storage` | only in cluster mode; `unavailable` until the cluster coordinator ships |
+| `coordinator` | cluster mode only: `waiting` for the database, `pending` while starting, `online` (`coordinator_connected` with the driver), `failed` |
+| `leader` | cluster mode only: `waiting` for the coordinator, `pending` (`leader_electing`), `online` (`leader_self` / `leader_other` with the instance id) |
+| `peers` | cluster mode only: `online` with the number of other live instances |
+| `storage` | cluster mode only: `unavailable` — no shared storage driver in this core version |
 
 Each row carries `status` (`online | pending | waiting | action | failed | unavailable`), a
 `detail` key with `detail_params`, and `since` (last status change). The payload is built from

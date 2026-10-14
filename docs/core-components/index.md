@@ -8,6 +8,7 @@ This section documents the internal core components of Lyndrix Core, together wi
 - [Event Catalog](events.md)
 - [Auth Component](auth.md)
 - [Boot Component](boot.md)
+- [Cluster Component](cluster.md)
 - [Dashboard Component](dashboard.md)
 - [Database Component](database.md)
 - [Git Component](git.md)
@@ -26,6 +27,7 @@ This section documents the internal core components of Lyndrix Core, together wi
 |---|---|
 | Auth | IAM bootstrap, provider-chain initialization, user and group persistence |
 | Boot | Boot phase state machine and module-loading release point |
+| Cluster | Instances, leader lease, plugin leases, TTL key/value, bus bridge, readiness/drain, preflight (single and cluster mode) |
 | Dashboard | Main authenticated landing page and widget host |
 | Database | SQLAlchemy engine lifecycle, connection retries, readiness signaling |
 | Git | Repository clone/pull/commit workflows triggered by events |

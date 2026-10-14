@@ -35,6 +35,7 @@ nav:
       - Event Catalog: core-components/events.md
       - Auth: core-components/auth.md
       - Boot: core-components/boot.md
+      - Cluster: core-components/cluster.md
       - Dashboard: core-components/dashboard.md
       - Database: core-components/database.md
       - Git: core-components/git.md
@@ -46,6 +47,34 @@ nav:
       - Sockets: core-components/sockets.md
       - System Monitoring: core-components/system.md
       - Vault: core-components/vault.md
+  - High Availability:
+      - Overview & decision guide: ha/index.md
+      - Tiers: ha/tiers.md
+      - Architecture & contracts: ha/architecture.md
+      - Configuration reference: ha/configuration.md
+      - Building blocks:
+          - Load balancer: ha/building-blocks/load-balancer.md
+          - Coordination: ha/building-blocks/coordination.md
+          - Database: ha/building-blocks/database.md
+          - Secrets (Vault / OpenBao): ha/building-blocks/secrets.md
+          - Shared storage: ha/building-blocks/storage.md
+          - Plugin artifacts & placement: ha/building-blocks/plugins.md
+          - Frontend: ha/building-blocks/frontend.md
+      - Docker:
+          - Overview & host layouts: ha/docker/index.md
+          - The separate load balancer: ha/docker/load-balancer.md
+          - Compose reference: ha/docker/compose-reference.md
+          - Rolling updates: ha/docker/rolling-updates.md
+      - Kubernetes:
+          - Overview: ha/kubernetes/index.md
+          - Ingress & load balancing: ha/kubernetes/ingress.md
+          - Rolling updates: ha/kubernetes/rolling-updates.md
+      - Operations:
+          - Cluster status & preflight: ha/operations/cluster-status.md
+          - Failover drills: ha/operations/failover-drills.md
+          - Troubleshooting: ha/operations/troubleshooting.md
+          - Backup & restore: ha/operations/backup-restore.md
+      - For plugin developers: ha/plugin-development.md
   - Plugin Ecosystem: ecosystem.md
   - Security: security.md
   - Architecture: architecture.md

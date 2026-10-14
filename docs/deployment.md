@@ -131,6 +131,14 @@ That is useful when:
 
 If you add or change plugin mounts, ensure that the target host paths actually exist.
 
+## More than one instance
+
+Everything on this page describes one core instance. To run several behind a load balancer —
+rolling updates without downtime, surviving a dead container — see the
+[High Availability](ha/index.md) section. It is opt-in (`LYNDRIX_CLUSTER_MODE=cluster`) and
+nothing here changes for a single instance; its health check `GET /api/ready` is worth using even
+with one instance.
+
 ## Deriving a production setup
 
 The repository does not ship a complete production deployment manifest. Instead, treat the development compose file as a reference implementation and derive your production setup from it.
