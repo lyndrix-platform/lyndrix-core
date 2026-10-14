@@ -37,7 +37,8 @@ terminationGracePeriodSeconds: 30    # ≥ LYNDRIX_DRAIN_SECONDS + 15
 
 ## Known limits
 
-- No Helm chart or Kustomize base is shipped yet; the object model above is the spec for it.
+- No Helm chart is shipped yet; [Reference manifests](manifests.md) has the verified plain
+  manifests for a Kustomize directory, the object model above is the spec for the chart.
 - Orchestrator runners need a Docker daemon; running them as Kubernetes Jobs is a redesign that
   is out of scope for this milestone.
 

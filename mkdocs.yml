@@ -67,6 +67,7 @@ nav:
           - Rolling updates: ha/docker/rolling-updates.md
       - Kubernetes:
           - Overview: ha/kubernetes/index.md
+          - Reference manifests: ha/kubernetes/manifests.md
           - Ingress & load balancing: ha/kubernetes/ingress.md
           - Rolling updates: ha/kubernetes/rolling-updates.md
       - Operations:
