@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.5
+Lyndrix Core Plugin API — Stable Surface v1.7
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -66,9 +66,27 @@ The bus is fire-and-forget; ``ctx.request`` layers a correlated reply on top::
 The responder must echo ``payload["request_id"]`` in its reply. Declare the
 request topic in ``permissions.emit`` and the reply topic in
 ``permissions.subscribe``.
+
+Cluster (API 1.7, docs/ha/plugin-development.md)
+------------------------------------------------
+One code path for single and cluster mode::
+
+    manifest = ModuleManifest(..., placement="any")   # any | singleton | pinned:<role>
+
+    def setup(ctx):
+        ctx.register_routes(router)                        # every instance
+        ctx.on_lease("monitoring:prober",                  # exactly one instance
+                     acquired=svc.start, lost=svc.stop)
+        ctx.emit("monitoring:monitors_changed", {...}, cluster=True)   # reaches peers
+
+    async with ctx.lease("itsm:nightly") as held: ...   # one-shot lease
+    ctx.is_leader, ctx.instance_id, ctx.cluster_size, ctx.roles, ctx.cluster_mode
+
+Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
+directly when it is missing.
 """
 
-__api_version__ = "1.6.0"
+__api_version__ = "1.7.0"
 
 from typing import Any, Dict, Literal, Optional
 
@@ -134,6 +152,9 @@ notification_service = _lazy("core.components.notifications.logic.notification_s
 auth_service = _lazy("core.components.auth.logic.auth_service.auth_service")
 monitor_service = _lazy("core.components.system.logic.monitor_service.monitor_service")
 plugin_service = _lazy("core.components.plugins.logic.plugin_service.plugin_service")
+# Read-only cluster view (instances, leader, leases). Plugins normally use the
+# ctx.* accessors; this is for dashboards/diagnostics.
+cluster_service = _lazy("core.components.cluster.logic.cluster_service.cluster_service")
 
 # Theming — stable plugin surface
 # Import after services to avoid circular-import issues at module load time.
@@ -197,6 +218,7 @@ __all__ = [
     "auth_service",
     "monitor_service",
     "plugin_service",
+    "cluster_service",
     # Theming
     "UIStyles",
     "ThemeEngine",

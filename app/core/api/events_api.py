@@ -49,6 +49,9 @@ _AUTH_TOPICS = frozenset({
     "system:metrics_update",
     "vault:status_changed",
     "notification:new",
+    "cluster:changed",
+    "cluster:leader_changed",
+    "system:draining",
 })
 
 # Subset sent to unauthenticated clients.
@@ -56,6 +59,25 @@ _PUBLIC_TOPICS = frozenset({
     "system:boot_complete",
     "vault:status_changed",
 })
+
+# Internal queue message that ends a stream (drain / shutdown). The generator
+# sends a final ``event: reconnect`` and closes, so EventSource clients
+# reconnect through the load balancer and land on a live instance.
+_CLOSE_KEY = "__close__"
+
+
+def close_all_streams(reason: str = "reconnect") -> int:
+    """Ask every open SSE connection to close with a reconnect hint."""
+    closed = 0
+    for q in list(_SSE_QUEUES):
+        try:
+            q.put_nowait(json.dumps({_CLOSE_KEY: reason}))
+            closed += 1
+        except asyncio.QueueFull:
+            _SSE_QUEUES.discard(q)
+    if closed:
+        log.info("SSE: closing %d stream(s) (%s)", closed, reason)
+    return closed
 
 
 # ─── Stream tickets ──────────────────────────────────────────────────────────
@@ -217,6 +239,17 @@ async def sse_stream(
                     # Unparseable message — forward best-effort and move on.
                     yield f"data: {msg}\n\n"
                     continue
+
+                if _CLOSE_KEY in data:
+                    try:
+                        from core.components.cluster.logic.cluster_service import cluster_service
+
+                        instance_id = cluster_service.instance_id
+                    except Exception:  # pragma: no cover - defensive
+                        instance_id = None
+                    hint = json.dumps({"reason": data[_CLOSE_KEY], "instance_id": instance_id})
+                    yield f"event: reconnect\ndata: {hint}\n\n"
+                    break
 
                 topic = data.get("topic")
                 if topic not in allowed:

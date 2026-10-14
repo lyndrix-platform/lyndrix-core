@@ -89,6 +89,27 @@ def runtime_gate(module_id: str):
     return _gate
 
 
+def _remote_router(module_id: str, role: str) -> APIRouter:
+    """Catch-all router for a plugin pinned to a role this instance lacks.
+
+    Every path answers 503 with ``X-Plugin-Runtime: {"phase": "remote", …}`` so
+    clients (and the React shell) can say "runs on the <role> instance" instead
+    of "not found". The plugin's real routes live on the pinned instance.
+    """
+    router = APIRouter()
+    detail = f"this plugin runs on an instance with role '{role}' — not available on this instance"
+    header = json.dumps({"plugin_id": module_id, "phase": "remote", "role": role, "blocking": True})
+
+    async def _remote(path: str = "") -> None:
+        raise HTTPException(status_code=503, detail=detail, headers={"Retry-After": "30", RUNTIME_GATE_HEADER: header})
+
+    _remote.__qualname__ = f"remote_stub<{module_id}>"
+    methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    router.add_api_route("", _remote, methods=methods, include_in_schema=False)
+    router.add_api_route("/{path:path}", _remote, methods=methods, include_in_schema=False)
+    return router
+
+
 class PluginRouterRegistry:
     """Thread-safe registry for plugin-contributed FastAPI routers."""
 
@@ -98,6 +119,8 @@ class PluginRouterRegistry:
         self._routers: Dict[str, APIRouter] = {}
         # module_id → whether it was registered as public (no require_api_auth)
         self._public: Dict[str, bool] = {}
+        # module_id → role, for plugins pinned to a role this instance lacks
+        self._remote: Dict[str, str] = {}
         # Keep a reference to the FastAPI app once it's available.
         self._app: Optional[FastAPI] = None
 
@@ -145,6 +168,16 @@ class PluginRouterRegistry:
         else:
             log.debug("RouterRegistry: queued router for '%s' (app not yet bound)", module_id)
 
+    def register_remote(self, module_id: str, role: str) -> None:
+        """Mount the 503 "remote" stub for a plugin pinned to another role."""
+        self.unmount(module_id)
+        with self._lock:
+            self._remote[module_id] = role
+        self.register(module_id, _remote_router(module_id, role), public=False)
+
+    def remote_role(self, module_id: str) -> Optional[str]:
+        return self._remote.get(module_id)
+
     def unmount(self, module_id: str) -> None:
         """
         Remove all routes contributed by *module_id* from the live app.
@@ -153,6 +186,7 @@ class PluginRouterRegistry:
         with self._lock:
             router = self._routers.pop(module_id, None)
             self._public.pop(module_id, None)
+            self._remote.pop(module_id, None)
             app = self._app
 
         if router is None or app is None:

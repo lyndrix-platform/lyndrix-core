@@ -21,6 +21,12 @@ entryPoints:
           permanent: true
   websecure:
     address: ":443"
+  # Plain-HTTP load-balancer entrypoint for the two-instance HA test bench
+  # (docker-compose.ha.dev.yml publishes it as :8090). Traefik ignores CLI flags
+  # once a config file is used, so the entrypoint has to live here; unused in
+  # the plain dev stack.
+  ha:
+    address: ":8090"
 
 providers:
   docker:

@@ -89,13 +89,19 @@ class AuthService:
             bus.emit("iam:failed", {"error": str(e)})
 
     def _bootstrap_iam(self) -> None:
-        """Synchronous IAM bootstrap, executed off the event loop."""
-        Base.metadata.create_all(bind=db_instance.engine)
-        log.debug("DB: IAM tables checked/created.")
-        self._migrate_schema()
-        self._seed_default_groups()
-        self._ensure_admin_permissions()
-        self._seed_users()
+        """Synchronous IAM bootstrap, executed off the event loop.
+
+        DDL + seeds run under the cross-instance ``lyndrix_bootstrap`` lock so
+        two cores booting at once (cluster first boot, rolling restart) serialize
+        instead of racing ``create_all``/``ALTER``/unique inserts.
+        """
+        with db_instance.advisory_lock("lyndrix_bootstrap", timeout=120):
+            Base.metadata.create_all(bind=db_instance.engine)
+            log.debug("DB: IAM tables checked/created.")
+            self._migrate_schema()
+            self._seed_default_groups()
+            self._ensure_admin_permissions()
+            self._seed_users()
         self._initialize_providers()
 
     def _seed_default_groups(self) -> None:
@@ -108,17 +114,24 @@ class AuthService:
         """
         if not db_instance.SessionLocal:
             return
+        from sqlalchemy.exc import IntegrityError
+
         with db_instance.SessionLocal() as session:
             for name, description, permissions in _DEFAULT_GROUPS:
-                if session.query(Group).filter(Group.name == name).first() is None:
-                    session.add(Group(
-                        name=name,
-                        description=description,
-                        permissions=list(permissions),
-                        ldap_mappings=[],
-                    ))
+                if session.query(Group).filter(Group.name == name).first() is not None:
+                    continue
+                session.add(Group(
+                    name=name,
+                    description=description,
+                    permissions=list(permissions),
+                    ldap_mappings=[],
+                ))
+                try:
+                    session.commit()  # one group per transaction: a lost race costs only that insert
                     log.info(f"SEED: Created default group '{name}'.")
-            session.commit()
+                except IntegrityError:
+                    session.rollback()  # a peer instance seeded it first — fine
+                    log.info(f"SEED: Default group '{name}' was created by another instance.")
 
     def _ensure_admin_permissions(self) -> None:
         """One-time additive migration: guarantee INT_ADMIN carries admin:read/admin:write.
@@ -263,8 +276,11 @@ class AuthService:
                 session.commit()
                 log.info(f"SUCCESS: User '{username}' created.")
             except Exception as e:
-                log.error(f"ERROR: User seeding failed for '{username}': {e}", exc_info=True)
                 session.rollback()
+                if "Duplicate" in str(e) or "UNIQUE" in str(e).upper():
+                    log.info(f"SEED: User '{username}' was created by another instance.")
+                else:
+                    log.error(f"ERROR: User seeding failed for '{username}': {e}", exc_info=True)
         else:
             # Update password if env var changed (allows CI/CD credential rotation)
             if not verify_password(str(user.hashed_password), password):

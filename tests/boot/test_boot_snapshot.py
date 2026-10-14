@@ -122,15 +122,41 @@ def test_boot_failure_marks_modules_failed(svc):
     assert _by_id(snap)["modules"]["status"] == FAILED
 
 
-def test_cluster_mode_lists_cluster_dependencies_as_unavailable(svc, monkeypatch):
+def test_cluster_mode_lists_cluster_dependencies(svc, monkeypatch):
+    from core.components.cluster.logic.cluster_service import cluster_service
+
     monkeypatch.setattr(settings, "LYNDRIX_CLUSTER_MODE", "cluster")
+    monkeypatch.setattr(cluster_service, "started", False)
+    monkeypatch.setattr(cluster_service, "start_error", None)
+    monkeypatch.setattr(cluster_service, "is_leader", False)
+    monkeypatch.setattr(cluster_service, "leader_id", None)
     snap = svc.snapshot()
-    assert snap["mode"] == "cluster"
+    rows = _by_id(snap)
+    assert snap["mode"] == "cluster" and snap["instance_id"] == cluster_service.instance_id
     assert [s["id"] for s in snap["services"]] == list(CORE_SERVICES) + list(CLUSTER_SERVICES)
-    for sid in CLUSTER_SERVICES:
-        row = _by_id(snap)[sid]
-        assert row["status"] == UNAVAILABLE and row["detail"] == "cluster_not_available"
+    # DB not connected yet → the coordinator waits for it, the rest waits for the coordinator.
+    assert rows["coordinator"]["status"] == WAITING and rows["coordinator"]["detail_params"] == {"service": "database"}
+    assert rows["leader"]["status"] == WAITING and rows["peers"]["status"] == WAITING
+    assert rows["storage"]["status"] == UNAVAILABLE and rows["storage"]["detail"] == "storage_not_available"
     assert snap["summary"]["total"] == 8
+
+    # Coordinator up, this instance leads, one peer alive.
+    monkeypatch.setattr(db_instance, "is_connected", True)
+    monkeypatch.setattr(cluster_service, "started", True)
+    monkeypatch.setattr(cluster_service, "is_leader", True)
+    monkeypatch.setattr(cluster_service, "leader_id", cluster_service.instance_id)
+    peer = type("I", (), {"alive": True})()
+    monkeypatch.setattr(cluster_service, "_instances", [peer, peer])
+    rows = _by_id(svc.snapshot())
+    assert rows["coordinator"]["status"] == ONLINE and rows["coordinator"]["detail"] == "coordinator_connected"
+    assert rows["leader"]["status"] == ONLINE and rows["leader"]["detail"] == "leader_self"
+    assert rows["peers"]["status"] == ONLINE and rows["peers"]["detail_params"] == {"peers": 1, "total": 2}
+
+    # Another instance leads.
+    monkeypatch.setattr(cluster_service, "is_leader", False)
+    monkeypatch.setattr(cluster_service, "leader_id", "peer-b")
+    row = _by_id(svc.snapshot())["leader"]
+    assert row["detail"] == "leader_other" and row["detail_params"] == {"instance": "peer-b"}
 
 
 def test_since_is_stamped_on_status_change(svc, monkeypatch):
@@ -143,6 +169,21 @@ def test_since_is_stamped_on_status_change(svc, monkeypatch):
 def test_cluster_mode_setting_is_validated():
     from pydantic import ValidationError
 
-    assert type(settings)(LYNDRIX_CLUSTER_MODE="Cluster").LYNDRIX_CLUSTER_MODE == "cluster"
+    Settings = type(settings)
+    s = Settings(LYNDRIX_CLUSTER_MODE="Cluster", LYNDRIX_COORDINATOR="db", LYNDRIX_INSTANCE_ROLES=None,
+                 LYNDRIX_DRAIN_SECONDS=None)
+    assert s.LYNDRIX_CLUSTER_MODE == "cluster" and s.is_cluster
+    assert s.instance_roles == ["api", "leader"] and s.LYNDRIX_DRAIN_SECONDS == 10  # cluster defaults
+    single = Settings(LYNDRIX_CLUSTER_MODE="single", LYNDRIX_COORDINATOR=None, LYNDRIX_INSTANCE_ROLES=None,
+                      LYNDRIX_DRAIN_SECONDS=None)
+    assert single.LYNDRIX_COORDINATOR == "local" and single.instance_roles == ["api", "leader", "runner"]
+    assert single.LYNDRIX_DRAIN_SECONDS == 0
     with pytest.raises(ValidationError):
-        type(settings)(LYNDRIX_CLUSTER_MODE="swarm")
+        Settings(LYNDRIX_CLUSTER_MODE="swarm")
+    with pytest.raises(ValidationError):  # cluster needs a shared coordinator
+        Settings(LYNDRIX_CLUSTER_MODE="cluster", LYNDRIX_COORDINATOR="local")
+    with pytest.raises(ValidationError):  # unknown role
+        Settings(LYNDRIX_INSTANCE_ROLES="api,worker")
+    with pytest.raises(ValidationError):  # heartbeat must fit twice into the TTL
+        Settings(LYNDRIX_LEASE_TTL_SECONDS=10, LYNDRIX_LEASE_HEARTBEAT_SECONDS=8)
+    assert Settings(VAULT_NODES="https://v1:8200, https://v2:8200/").vault_nodes == ["https://v1:8200", "https://v2:8200"]

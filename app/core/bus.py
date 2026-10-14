@@ -19,6 +19,14 @@ class GlobalEventBus:
             "monitoring:inventory_sync",
             "monitoring:state_changed",
         }
+        # Cluster bridge hook (core.components.cluster.logic.bridge): called after
+        # the local dispatch with (topic, payload, forced). None in tests / before
+        # the coordinator attached — the bus itself stays process-local.
+        self._cluster_publisher: Callable | None = None
+
+    def set_cluster_publisher(self, publisher: Callable | None) -> None:
+        """Install (or remove) the cluster bridge's publish hook."""
+        self._cluster_publisher = publisher
 
     def _summarize_payload(self, topic: str, payload: dict) -> str:
         if topic == "monitoring:inventory_sync":
@@ -94,8 +102,15 @@ class GlobalEventBus:
             keys.discard(self._callback_key(callback))
         return removed
 
-    def emit(self, topic: str, payload: dict = None):
-        """Dispatches an event to all subscribers, tracking async tasks."""
+    def emit(self, topic: str, payload: dict = None, *, cluster: bool = False):
+        """Dispatches an event to all subscribers, tracking async tasks.
+
+        ``cluster=True`` additionally publishes the event to every other core
+        instance through the cluster bridge (core-owned topics on the bridge's
+        allowlist are published regardless). A relayed event arrives on the
+        peers' local buses with ``payload["_origin"] = <sender instance id>``
+        and is never re-published. In ``single`` mode the flag is a no-op.
+        """
         if payload is None:
             payload = {}
 
@@ -127,6 +142,13 @@ class GlobalEventBus:
                         f"ERROR: Callback '{callback.__name__}' for '{topic}' raised: {e}",
                         exc_info=True,
                     )
+
+        publisher = self._cluster_publisher
+        if publisher is not None:
+            try:
+                publisher(topic, payload, cluster)
+            except Exception as e:
+                self.log.error(f"ERROR: cluster publish hook for '{topic}' raised: {e}", exc_info=True)
 
     def _track_task(self, task: asyncio.Task, topic: str, callback_name: str):
         """Tracks an async task and logs failures via done callback."""

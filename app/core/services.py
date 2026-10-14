@@ -12,9 +12,11 @@ from core.components.plugins.logic.plugin_service import plugin_service
 from core.components.system.logic.monitor_service import monitor_service
 from core.components.notifications.logic.notification_service import notification_service
 from core.components.git.logic.git_service import git_service
+from core.components.cluster.logic.cluster_service import cluster_service
 
 __all__ = [
     "vault_instance", "db_instance", "auth_service",
     "boot_service", "auto_unseal_manager", "plugin_service",
     "monitor_service", "notification_service", "git_service",
+    "cluster_service",
 ]

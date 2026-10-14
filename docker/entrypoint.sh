@@ -15,5 +15,10 @@ fi
 mkdir -p /data/security
 chmod -R 777 /app/plugins /data/security 2>/dev/null || true
 
+# 3. Reverse-Proxy-Vertrauen: uvicorn liest FORWARDED_ALLOW_IPS nativ (--forwarded-allow-ips).
+#    Ohne diesen Wert sieht der Core hinter einem Load Balancer nur dessen IP
+#    (Login-Limiter, Audit). Quelle ist LYNDRIX_TRUSTED_PROXIES (docs/ha/configuration.md).
+export FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-${LYNDRIX_TRUSTED_PROXIES:-127.0.0.1}}"
+
 echo "[Boot] Starte Anwendung: $@"
 exec "$@"

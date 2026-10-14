@@ -38,6 +38,9 @@ class PluginOut(BaseModel):
     # {phase, message, progress, blocking, since, updated_at, retry_after}.
     # None unless the plugin is active. Live updates: SSE plugin:runtime_status.
     runtime: Optional[Dict[str, Any]] = None
+    # Cluster placement (core API ≥ 1.7): any | singleton | pinned:<role>.
+    # status == "remote" means it is pinned to a role this instance lacks.
+    placement: str = "any"
 
 
 class PluginSettingsUpdate(BaseModel):
@@ -101,6 +104,7 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         update_available=update_available,
         log_source=f"{'Core' if manifest.type == 'CORE' else 'Plugin'}:{manifest.name}",
         runtime=_manager().get_runtime(module_id),
+        placement=getattr(manifest, "placement", "any") or "any",
     )
 
 

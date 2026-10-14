@@ -58,6 +58,44 @@ class _MaintenanceWindow:
         return self.__exit__(exc_type, exc, tb)
 
 
+class _LeaseScope:
+    """``async with ctx.lease("name") as held:`` — one-shot, non-renewed lease.
+
+    If the module already holds the lease through ``ctx.on_lease`` the scope
+    reports ``held=True`` without touching the coordinator (and does not
+    release it on exit). Otherwise it tries to acquire the lease once for
+    ``ttl`` seconds and releases it when the block ends.
+    """
+
+    def __init__(self, ctx: "ModuleContext", name: str, ttl: int | None):
+        self._ctx = ctx
+        self._name = name
+        self._ttl = ttl
+        self._acquired_here = False
+        self.held = False
+
+    async def __aenter__(self) -> bool:
+        cluster = self._ctx._cluster()
+        if cluster.leases.holds(self._name):
+            self.held = True
+            return True
+        try:
+            self.held = bool(await cluster.coordinator.try_acquire(self._name, self._ttl))
+        except Exception as exc:
+            self._ctx.log.debug("LEASE: try_acquire('%s') failed: %s", self._name, exc)
+            self.held = False
+        self._acquired_here = self.held
+        return self.held
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._acquired_here:
+            try:
+                await self._ctx._cluster().coordinator.release(self._name)
+            except Exception as rel_exc:
+                self._ctx.log.debug("LEASE: release('%s') failed: %s", self._name, rel_exc)
+        return False
+
+
 class ModuleContext:
     """
     Der isolierte Sandkasten für JEDES Modul (Core & Plugin).
@@ -75,6 +113,8 @@ class ModuleContext:
         # reloaded plugin keeps firing its old handlers and leaks a task per cycle.
         self._subscriptions: list[tuple[str, object]] = []
         self._tasks: list = []
+        # Leases registered via on_lease(): (lease name, acquired cb, lost cb).
+        self._leases: list[tuple[str, object, object]] = []
         # request()/reply plumbing: one listener per reply topic, futures keyed
         # by request_id.
         self._pending_requests: dict[str, asyncio.Future] = {}
@@ -181,9 +221,83 @@ class ModuleContext:
     def _emit_runtime(self, now: datetime) -> None:
         self._runtime_emitted_at = now
         try:
-            global_bus.emit(RUNTIME_STATUS_TOPIC, {"plugin_id": self.manifest.id, **self._runtime})
+            global_bus.emit(RUNTIME_STATUS_TOPIC, {
+                "plugin_id": self.manifest.id, "instance_id": self.instance_id, **self._runtime,
+            })
         except Exception:
             self.log.debug("RUNTIME: status emit failed", exc_info=True)
+
+    # --- CLUSTER (core API >= 1.7, docs/ha/plugin-development.md) ---
+
+    @staticmethod
+    def _cluster():
+        # Lazy: the cluster service imports config/bus only, but keeping it out of
+        # the module import keeps the context importable in isolation (tests).
+        from core.components.cluster.logic.cluster_service import cluster_service
+
+        return cluster_service
+
+    @property
+    def instance_id(self) -> str:
+        """Id of the core instance this module runs on (``LYNDRIX_INSTANCE_ID``)."""
+        return self._cluster().instance_id
+
+    @property
+    def is_leader(self) -> bool:
+        """``True`` while this instance holds the core leader lease. Always
+        ``True`` in single mode once the DB is connected."""
+        return self._cluster().is_leader
+
+    @property
+    def cluster_mode(self) -> str:
+        """``single`` or ``cluster`` (``LYNDRIX_CLUSTER_MODE``)."""
+        return self._cluster().mode
+
+    @property
+    def cluster_size(self) -> int:
+        """Number of live core instances (1 in single mode)."""
+        alive = [i for i in self._cluster()._instances if i.alive]
+        return max(1, len(alive))
+
+    @property
+    def roles(self) -> list[str]:
+        """Roles of this instance (``LYNDRIX_INSTANCE_ROLES``)."""
+        return list(self._cluster().roles)
+
+    def _lease_name(self, name: str) -> str:
+        # A singleton plugin is one unit of background work: every on_lease()
+        # call binds to the plugin's single lease, whatever name it passes.
+        if getattr(self.manifest, "placement", "any") == "singleton":
+            return f"plugin:{self.manifest.id}:singleton"
+        return name
+
+    def on_lease(self, name: str, *, acquired=None, lost=None, ttl: int | None = None) -> None:
+        """Run background work on exactly one instance.
+
+        ``acquired`` fires when this instance obtains lease ``name`` (immediately
+        in single mode), ``lost`` when a peer took it over or the coordinator was
+        unreachable for a full TTL — stop the work in ``lost``. Callbacks may be
+        sync or async. Example::
+
+            def setup(ctx):
+                ctx.register_routes(router)          # every instance
+                ctx.on_lease("monitoring:prober",     # one instance
+                             acquired=svc.start_probing, lost=svc.stop_probing)
+
+        Guard with ``getattr(ctx, "on_lease", None)`` to stay loadable on older
+        cores (fall back to starting the work directly).
+        """
+        full = self._lease_name(name)
+        self._cluster().leases.want(full, acquired=acquired, lost=lost, ttl=ttl)
+        self._leases.append((full, acquired, lost))
+        self.log.debug("LEASE: wants '%s'", full)
+
+    def holds_lease(self, name: str) -> bool:
+        return self._cluster().leases.holds(self._lease_name(name))
+
+    def lease(self, name: str, *, ttl: int | None = None) -> _LeaseScope:
+        """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""
+        return _LeaseScope(self, self._lease_name(name), ttl)
 
     # --- EVENT BUS PROXY ---
 
@@ -203,9 +317,12 @@ class ModuleContext:
             return callback
         return decorator
 
-    def emit(self, topic: str, payload: dict = None):
+    def emit(self, topic: str, payload: dict = None, *, cluster: bool = False):
+        """Emit on the local bus; ``cluster=True`` also reaches every other core
+        instance (peers receive it with ``payload["_origin"]`` set). Use it for
+        "my data changed, re-read it" signals — never to fan work out N times."""
         if topic in self.manifest.permissions.emit or "*" in self.manifest.permissions.emit:
-            global_bus.emit(topic, payload)
+            global_bus.emit(topic, payload, cluster=cluster)
         else:
             message = (
                 f"Plugin '{self.manifest.id}' is not permitted to emit topic "
@@ -302,6 +419,13 @@ class ModuleContext:
             except Exception:
                 self.log.debug("DISPOSE: task cancel failed", exc_info=True)
         self._tasks.clear()
+        # Give leases up so a peer can take the work over right away.
+        for name, acquired, lost in self._leases:
+            try:
+                self._cluster().leases.forget(name, acquired=acquired, lost=lost)
+            except Exception:
+                self.log.debug("DISPOSE: lease forget failed for '%s'", name, exc_info=True)
+        self._leases.clear()
         # A disabled/unloaded module is not "starting" any more — never leave a
         # blocking status behind that would 503 the next incarnation's routes.
         self.reset_runtime()

@@ -138,9 +138,12 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             )
             return RedirectResponse("/login?error=no_oidc_provider")
 
-        # PKCE verifier + flow metadata were bound to the state at start time.
+        # PKCE verifier + flow metadata were bound to the state at start time —
+        # possibly on another core instance (cluster KV), hence the async lookup.
         flow_meta = {}
-        if hasattr(oidc_provider, "state_meta"):
+        if hasattr(oidc_provider, "state_meta_async"):
+            flow_meta = await oidc_provider.state_meta_async(state)
+        elif hasattr(oidc_provider, "state_meta"):
             flow_meta = oidc_provider.state_meta(state)
 
         result = await oidc_provider.exchange_code(code, state)
@@ -165,7 +168,7 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             raw_token, _ = await _asyncio.to_thread(
                 api_key_service.create, linked.username, label=label, scopes=[]
             )
-            xc = create_sso_exchange_code({
+            xc = await create_sso_exchange_code({
                 "token": raw_token,
                 "username": linked.username,
                 "roles": list(linked.roles or []),

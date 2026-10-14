@@ -90,6 +90,16 @@ class SystemConfigService:
                     getattr(logging, str(settings_updates["LOG_LEVEL"]), logging.INFO)
                 )
 
+        if persist:
+            # Bridged topic: peers re-hydrate from Vault so a theme/log-level/auth
+            # change made on one instance does not wait for their next restart.
+            try:
+                from core.bus import bus
+
+                bus.emit("settings:changed", {"keys": sorted(updates.keys()), "removed": sorted(remove_keys)})
+            except Exception:  # pragma: no cover - never fail a save over a notification
+                pass
+
         applied: List[str] = sorted(settings_updates) if apply_runtime else []
         return {
             "updated_keys": sorted(updates.keys()),

@@ -145,8 +145,54 @@ class OIDCProvider(AuthProvider):
             self._state_meta.pop(k, None)
 
     def state_meta(self, state: str) -> dict:
-        """Flow metadata recorded when the authorization URL was built."""
+        """Flow metadata recorded when the authorization URL was built (this instance)."""
         return dict(self._state_meta.get(state) or {})
+
+    # --- cluster-shared state (start on instance A, callback on instance B) ---
+
+    @staticmethod
+    def _kv_key(state: str) -> str:
+        return f"oidc:state:{state}"
+
+    @staticmethod
+    def _cluster():
+        from core.components.cluster.logic.cluster_service import cluster_service
+
+        return cluster_service
+
+    async def _store_state(self, state: str, verifier: str, meta: dict) -> None:
+        """Keep PKCE verifier + flow metadata where every core instance can read them."""
+        try:
+            await self._cluster().kv_set(self._kv_key(state), {"verifier": verifier, **meta}, ttl=_STATE_TTL)
+        except Exception as exc:
+            log.warning(f"AUTH:OIDC: could not share login state across instances: {exc}")
+
+    async def _load_state(self, state: str) -> Optional[dict]:
+        """Local first (same instance), then the cluster KV (another instance started the flow)."""
+        if state in self._pending_states:
+            return {"verifier": self._state_verifiers.get(state), **self._state_meta.get(state, {})}
+        try:
+            entry = await self._cluster().kv_get(self._kv_key(state))
+        except Exception as exc:
+            log.warning(f"AUTH:OIDC: cluster KV lookup failed: {exc}")
+            return None
+        return dict(entry) if isinstance(entry, dict) else None
+
+    async def _drop_state(self, state: str) -> None:
+        self._pending_states.pop(state, None)
+        self._state_verifiers.pop(state, None)
+        self._state_meta.pop(state, None)
+        try:
+            await self._cluster().kv_delete(self._kv_key(state))
+        except Exception:
+            pass
+
+    async def state_meta_async(self, state: str) -> dict:
+        """Flow metadata for ``state`` from this instance or the cluster KV."""
+        entry = await self._load_state(state)
+        if not entry:
+            return {}
+        return {k: v for k, v in entry.items() if k != "verifier"}
 
     async def build_login_url(self, flow: str = "nicegui", redirect: str = "/") -> Optional[str]:
         """Ensure discovery is loaded, then return a fresh authorization URL.
@@ -179,6 +225,8 @@ class OIDCProvider(AuthProvider):
         )
         self._state_verifiers[state] = verifier
         self._state_meta[state] = {"flow": flow, "redirect": redirect or "/"}
+        # The callback may land on another core instance behind the load balancer.
+        await self._store_state(state, verifier, self._state_meta[state])
 
         params = {
             "response_type": "code",
@@ -202,9 +250,16 @@ class OIDCProvider(AuthProvider):
         """
         self._clean_expired_states()
 
-        if state not in self._pending_states:
+        shared = await self._load_state(state)
+        if shared is None:
             log.warning("AUTH:OIDC: Received callback with unknown or expired state.")
             return None
+        if state not in self._pending_states:
+            log.info("AUTH:OIDC: callback for a flow started on another core instance — using shared state.")
+            self._pending_states[state] = time.monotonic()
+            self._state_meta[state] = {k: v for k, v in shared.items() if k != "verifier"}
+            if shared.get("verifier"):
+                self._state_verifiers[state] = str(shared["verifier"])
 
         try:
             discovery = await self._get_discovery()
@@ -281,8 +336,9 @@ class OIDCProvider(AuthProvider):
             email_verified=bool(userinfo.get("email_verified") is True),
         )
 
-        # Invalidate the state and store the result for /auth/complete to consume
-        del self._pending_states[state]
+        # Invalidate the state (locally and cluster-wide — a code is single-use)
+        # and store the result for /auth/complete to consume on this instance.
+        await self._drop_state(state)
         self._pending_results[state] = result
 
         log.info(

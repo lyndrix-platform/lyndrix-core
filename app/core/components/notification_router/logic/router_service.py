@@ -171,6 +171,26 @@ class NotificationRouterService:
 
         # Run the synchronous SQLAlchemy transaction off the event loop.
         def _sync() -> tuple[int, int]:
+            # N core instances run this on the same db:connected; under MariaDB's
+            # snapshot isolation two concurrent upserts of the same rows fail
+            # with 1020 "Record has changed since last read". Serialize across
+            # instances and retry the transient codes.
+            import time as _time
+
+            from sqlalchemy.exc import OperationalError
+
+            with db_instance.advisory_lock("lyndrix_notification_sync", timeout=30):
+                for attempt in range(3):
+                    try:
+                        return _sync_once()
+                    except OperationalError as exc:
+                        code = getattr(getattr(exc, "orig", None), "args", [None])[0]
+                        if code not in (1020, 1205, 1213) or attempt == 2:
+                            raise
+                        _time.sleep(0.2 * (attempt + 1))
+            return 0, 0  # pragma: no cover - unreachable
+
+        def _sync_once() -> tuple[int, int]:
             self._ensure_schema()
             now = datetime.now(timezone.utc)
             with db_instance.SessionLocal() as session:

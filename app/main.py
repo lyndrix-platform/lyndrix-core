@@ -45,6 +45,8 @@ from core.api.events_api import events_router
 from core.api.logs_api import logs_router
 from core.api.i18n_api import i18n_router
 from core.api.boot_api import boot_router
+from core.components.cluster.api.cluster_api import cluster_router
+from core.components.cluster.logic.cluster_service import cluster_service
 from core.components.auth.api.users_api import users_router
 from core.components.plugins.api.plugins_api import plugins_router
 from core.components.settings.api.themes_api import themes_router
@@ -243,6 +245,11 @@ async def boot_interceptor(request: Request, call_next):
         "/api",
     ]
 
+    # Preflight input: did a reverse proxy ever hand us X-Forwarded-For? (Cheap
+    # header lookup; the flag only flips once.)
+    if not cluster_service.saw_forwarded_for and "x-forwarded-for" in request.headers:
+        cluster_service.saw_forwarded_for = True
+
     # Utilizing boot_service from the new path
     if getattr(boot_service, "is_booting", True):
         if request.url.path == "/" or any(
@@ -322,6 +329,14 @@ _BOOT_DETAIL_TEXT = {
     "modules_failed": "Module loading failed — check the logs",
     "waiting_for": "Waiting for {service}",
     "cluster_not_available": "Not available in this core version — running as a single instance",
+    "coordinator_connected": "Connected ({driver} driver)",
+    "coordinator_starting": "Starting…",
+    "coordinator_failed": "Failed to start — check the logs",
+    "leader_self": "This instance ({instance}) is the leader",
+    "leader_other": "Leader: {instance}",
+    "leader_electing": "Electing…",
+    "peers_count": "{peers} other instance(s) alive",
+    "storage_not_available": "No shared storage driver in this core version — plugin files stay instance-local",
 }
 
 
@@ -397,11 +412,18 @@ if _nicegui_enabled:
 
             boot_panel()
             ui.timer(1.0, boot_panel.refresh)
+            client = ui.context.client
 
             async def poll_boot_complete():
                 while boot_service.is_booting or vault_instance.ui_state == "loading":
                     await asyncio.sleep(0.2)
-                ui.navigate.to("/")
+                # Background task → no implicit slot; enter the page's client
+                # explicitly or NiceGUI raises "slot stack for this task is empty".
+                try:
+                    with client:
+                        ui.navigate.to("/")
+                except Exception as exc:  # client already gone (tab closed / reload)
+                    log.debug(f"BOOT: navigate after boot skipped: {exc}")
 
             bus.create_tracked_task(poll_boot_complete(), name="boot_poll")
             return
@@ -432,13 +454,22 @@ else:
 # ==========================================
 
 # NiceGUI pages (login, dashboard, settings, vault setup UI) — only when engine is active.
-# OIDC callback also lives here because its handoff targets the NiceGUI /auth/complete page.
 if _nicegui_enabled:
     register_auth_routes()
-    register_oidc_fastapi_routes(app)
     register_settings_routes()
     register_vault_routes()
     register_dashboard_routes()
+
+# OIDC callback (/auth/callback/oidc) — ALWAYS registered: the React SSO flow
+# needs it on API-only instances too (behind a load balancer every instance may
+# receive the IdP redirect). The NiceGUI hand-off branch inside only triggers
+# for flows started from the legacy UI.
+try:
+    if not _nicegui_enabled:
+        from core.components.auth.ui.routes import register_oidc_fastapi_routes
+    register_oidc_fastapi_routes(app)
+except Exception as _oidc_exc:  # pragma: no cover - slim images without nicegui
+    log.warning(f"AUTH: OIDC callback route not registered: {_oidc_exc}")
 
 # FastAPI notification feed — always active (used by React notification bell + API clients).
 register_notification_fastapi_routes(app)
@@ -489,10 +520,19 @@ app.include_router(i18n_router)
 # Boot status (unauthenticated — the boot screen polls it before the core is ready).
 app.include_router(boot_router)
 
+# Liveness/readiness probes + cluster inspection (docs/ha/operations/cluster-status.md).
+app.include_router(cluster_router)
+
 
 # ==========================================
 # GLOBAL HEALTH CHECK
 # ==========================================
+
+# /api/health calls every plugin's health(); dashboards and probes poll it, so
+# the plugin round is cached briefly (N pollers → one round per window).
+_HEALTH_CACHE_TTL_S = 10.0
+_health_cache: Dict[str, Any] = {"at": 0.0, "worst": "ok", "plugins": {}}
+
 
 @app.get("/api/health", tags=["System"])
 async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_auth)):
@@ -504,13 +544,32 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
     reported as ``"unknown"``.
 
     The top-level ``status`` field is the worst-case across all components:
-    ``error`` > ``degraded`` > ``unknown`` > ``ok``.
+    ``error`` > ``degraded`` > ``unknown`` > ``ok``. ``ready`` mirrors
+    ``GET /api/ready`` (use *that* for load-balancer checks — it is cheap and
+    does not touch plugins). The plugin round is cached for 10 s.
 
     Anonymous callers receive only the coarse top-level ``status``; the detailed
     per-plugin breakdown, raw failure reasons and version numbers are returned
     only to authenticated callers with the ``api:read`` permission.
     """
     from core.components.plugins.logic.manager import module_manager
+
+    ready, reasons = cluster_service.readiness()
+    now = _time.monotonic()
+    if now - _health_cache["at"] < _HEALTH_CACHE_TTL_S:
+        worst, plugin_results = _health_cache["worst"], _health_cache["plugins"]
+        if identity is None or not identity.allows("api:read"):
+            return {"status": worst, "ready": ready}
+        return {
+            "status": worst,
+            "ready": ready,
+            "readiness_reasons": reasons,
+            "instance_id": cluster_service.instance_id,
+            "core_version": __core_version__,
+            "api_version": __api_version__,
+            "plugins": plugin_results,
+            "cached": True,
+        }
 
     plugin_results: dict = {}
     severity_order = {"error": 3, "degraded": 2, "unknown": 1, "ok": 0}
@@ -555,16 +614,22 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
         if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
             worst = health_status.status
 
+    _health_cache.update({"at": _time.monotonic(), "worst": worst, "plugins": plugin_results})
+
     # Public callers only see the coarse status — no plugin inventory, failure
     # reasons or version numbers (avoid information disclosure / reconnaissance).
     if identity is None or not identity.allows("api:read"):
-        return {"status": worst}
+        return {"status": worst, "ready": ready}
 
     return {
         "status": worst,
+        "ready": ready,
+        "readiness_reasons": reasons,
+        "instance_id": cluster_service.instance_id,
         "core_version": __core_version__,
         "api_version": __api_version__,
         "plugins": plugin_results,
+        "cached": False,
     }
 
 
@@ -582,6 +647,10 @@ async def system_info(identity: ApiIdentity = Depends(require_permission("api:re
         "uptime_s": round(_time.monotonic() - _startup_time),
         "vault_connected": vault_instance.is_connected,
         "db_connected": bool(db_ok) if db_ok is not None else None,
+        "cluster_mode": cluster_service.mode,
+        "instance_id": cluster_service.instance_id,
+        "roles": cluster_service.roles,
+        "is_leader": cluster_service.is_leader,
     }
 
 
@@ -660,7 +729,16 @@ async def system_restart(identity: ApiIdentity = Depends(require_permission("adm
     flushed first, then the restart fires ~1s later, so the client's connection drops as
     the container goes down and comes back — the UI should show "restarting" and poll for
     the core to return. Requires the ``api:write`` permission.
+
+    Cluster mode: no Docker socket needed. ``system:restart_requested`` is broadcast to
+    every instance; each one drains and exits in a staggered order (leader last) and the
+    restart policy / kubelet brings it back — a rolling restart without an external tool.
     """
+    if cluster_service.is_cluster:
+        payload = cluster_service.request_restart(identity.username)
+        log.warning(f"SYSTEM: cluster rolling restart requested by '{identity.username}' (order {payload['order']}).")
+        return {"status": "restarting", "mode": "cluster", **payload}
+
     from core.components.sockets.providers.docker_provider import DockerProvider, own_container_id
 
     provider = DockerProvider()
@@ -721,12 +799,18 @@ async def startup_event():
     # ui.run_with() startup hooks are confirmed compatible (a custom lifespan
     # suppresses on_event-registered handlers, which NiceGUI relies on).
     log.info("STARTUP: Lyndrix Core Engine is starting...")
-    if settings.LYNDRIX_CLUSTER_MODE == "cluster":
-        log.warning(
-            "CLUSTER: LYNDRIX_CLUSTER_MODE=cluster requested, but the cluster coordinator is not "
-            "available in this core version — running as a single instance (see features/high-availability*.md)."
-        )
+    cluster_service.on_startup()
     bus.emit("system:started", {})
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Release leases + deregister the instance so peers take over at once
+    # instead of after the lease TTL. Idempotent after a drain.
+    try:
+        await cluster_service.stop("shutdown")
+    except Exception as exc:  # pragma: no cover - never block shutdown
+        log.debug(f"CLUSTER: stop on shutdown failed: {exc}")
 
 
 async def _hydrate_settings_from_vault(payload=None):
@@ -739,6 +823,20 @@ async def _hydrate_settings_from_vault(payload=None):
 
 
 bus.subscribe("vault:opened")(_hydrate_settings_from_vault)
+
+
+async def _on_settings_changed_remote(payload=None):
+    """A peer saved settings → re-read Vault here (bridged ``settings:changed``)."""
+    if not (payload or {}).get("_origin"):
+        return  # our own save already applied the values in-process
+    await _hydrate_settings_from_vault()
+    import logging as _logging
+
+    _logging.getLogger().setLevel(getattr(_logging, str(settings.LOG_LEVEL).upper(), _logging.INFO))
+    log.info(f"CONFIG: settings re-hydrated after a change on instance {payload.get('_origin')}.")
+
+
+bus.subscribe("settings:changed")(_on_settings_changed_remote)
 
 
 # --- NiceGUI (optional admin dashboard) ---

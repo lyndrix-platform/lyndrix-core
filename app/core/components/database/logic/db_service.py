@@ -1,5 +1,6 @@
 import asyncio
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from core.bus import bus
@@ -66,6 +67,42 @@ class DatabaseService:
     def max_retries(self) -> int:
         return self._max_retries
 
+    @contextmanager
+    def advisory_lock(self, name: str, timeout: int = 60) -> Iterator[bool]:
+        """Serialize a critical section across core instances with MariaDB ``GET_LOCK``.
+
+        Used around bootstrap DDL and seeds so two instances booting at the same
+        time cannot race ``create_all``/``ALTER``/``INSERT`` (the loser used to
+        hang in ``waiting_core`` forever). Held on a dedicated connection for the
+        duration of the block. Yields ``True`` when the lock was obtained,
+        ``False`` on timeout or on non-MySQL dialects (SQLite tests) — callers
+        proceed either way; the lock only narrows the race window.
+        """
+        engine = self.engine
+        if engine is None or engine.dialect.name not in ("mysql", "mariadb"):
+            yield False
+            return
+        cap = int(getattr(settings, "DB_STATEMENT_TIMEOUT_SECONDS", 0) or 0)
+        if cap > 0:
+            timeout = max(1, min(timeout, cap - 5))  # GET_LOCK waiting counts as statement time
+        conn = engine.connect()
+        acquired = False
+        try:
+            try:
+                acquired = bool(conn.execute(text("SELECT GET_LOCK(:n, :t)"), {"n": name, "t": timeout}).scalar())
+            except Exception as exc:
+                log.warning(f"DATABASE: GET_LOCK('{name}') failed ({exc}) — continuing unlocked")
+            if not acquired:
+                log.warning(f"DATABASE: could not obtain lock '{name}' within {timeout}s — continuing unlocked")
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    conn.execute(text("SELECT RELEASE_LOCK(:n)"), {"n": name})
+                except Exception:
+                    pass
+            conn.close()
+
     async def init_db_connection(self, payload=None):
         # ``vault:opened`` fires repeatedly (reconnects, multiple vault code
         # paths). If an engine is already live or a connection loop is in flight,
@@ -86,9 +123,13 @@ class DatabaseService:
 
         log.info(f"DATABASE: Vault is open. Initializing engine for {settings.DATABASE_URL_SAFE}")
         try:
+            recycle = int(getattr(settings, "DB_POOL_RECYCLE_SECONDS", 0) or 0)
             self.engine = create_engine(
                 settings.DATABASE_URL,
                 pool_pre_ping=True,
+                # Proxies (MaxScale/ProxySQL) and Galera nodes drop idle
+                # connections; recycle ours before they do (0 → never).
+                pool_recycle=recycle if recycle > 0 else -1,
                 connect_args={'connect_timeout': 5}
             )
             self._install_statement_cap(self.engine)
@@ -107,6 +148,7 @@ class DatabaseService:
         attempt = 0
         self.failure_reason = None
 
+        reconnecting = self.was_connected
         while not self.is_connected:
             attempt += 1
             self.connect_attempts = attempt
@@ -116,6 +158,13 @@ class DatabaseService:
                 self.is_connected = True
                 self.was_connected = True
                 log.info("SUCCESS: Database connection established.")
+                if reconnecting:
+                    # Reconnect after an outage (DB restart, MaxScale failover):
+                    # peers that only need "the DB is back" listen here; the
+                    # legacy db:connected still fires for plugins that re-run
+                    # their table checks on it. The boot service ignores the
+                    # repeated iam:ready so modules are NOT loaded twice.
+                    bus.emit("db:reconnected", {"status": "ready", "attempts": attempt})
                 bus.emit("db:connected", {"status": "ready"})
                 bus.emit("system:maintenance_mode", {"service": "db", "active": False})
 
@@ -135,11 +184,22 @@ class DatabaseService:
                     bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "config_error"})
                     return
 
-                if attempt >= self._max_retries:
+                if attempt >= self._max_retries and not reconnecting:
                     log.error(f"EXHAUSTED: Database connection failed after {attempt} attempts. Giving up.")
                     self.failure_reason = "max_retries"
                     bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "max_retries"})
                     return
+
+                if reconnecting:
+                    # Never give up on a connection we once had: a DB/proxy failover
+                    # or maintenance window must not turn into a dead core instance.
+                    delay = min(30, 5 * (1 + attempt // 6))
+                    if attempt in (1, 6, 12) or attempt % 60 == 0:
+                        log.warning(f"RETRY: Database connection lost — reconnect attempt {attempt}, next in {delay}s")
+                    if attempt == 1:
+                        bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "reconnecting"})
+                    await asyncio.sleep(delay)
+                    continue
 
                 log.warning(f"RETRY: Database not reachable (attempt {attempt}/{self._max_retries}). Retrying in 5s...")
                 await asyncio.sleep(5)

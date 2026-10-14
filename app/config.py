@@ -177,14 +177,51 @@ class Settings(BaseSettings):
     # The API always runs regardless of this setting.
     LYNDRIX_UI_ENGINE: str = "api"
 
-    # Deployment topology (opt-in, see features/high-availability*.md):
-    #   "single"  — one core instance; today's behaviour (default)
-    #   "cluster" — N identical instances behind a load balancer. The cluster
-    #               coordinator is NOT shipped in this core version yet: the flag
-    #               makes the boot screen list the cluster dependencies (as
-    #               unavailable) and logs a startup warning; otherwise the core
-    #               keeps running as a single instance.
+    # --- CLUSTER / HIGH AVAILABILITY (opt-in, docs/ha/) ---
+    # Deployment topology:
+    #   "single"  — one core instance; today's behaviour (default). The cluster
+    #               coordinator runs with the "local" driver: this instance is
+    #               always the leader, every lease is granted, cluster events
+    #               stay local. Plugins use ONE code path for both modes.
+    #   "cluster" — N identical instances behind a load balancer sharing one DB
+    #               and one Vault. Coordinator "db" (tables cluster_*), leader
+    #               lease, bus bridge, preflight, drain on SIGTERM.
     LYNDRIX_CLUSTER_MODE: str = "single"
+    # Stable id of this instance (diagnostics, lease holder). Default:
+    # "<hostname>-<4 hex>" — a new id after a restart is harmless (leases expire).
+    LYNDRIX_INSTANCE_ID: Optional[str] = None
+    # Comma-separated roles of this instance: api (serves routes), leader
+    # (may hold the core leader lease + singleton plugin leases), runner (hosts
+    # pinned:runner plugins, e.g. the IaC orchestrator with the Docker socket).
+    # Default: "api,leader,runner" in single mode, "api,leader" in cluster mode.
+    LYNDRIX_INSTANCE_ROLES: Optional[str] = None
+    # Coordinator driver: local | db. Default: "local" in single, "db" in cluster.
+    LYNDRIX_COORDINATOR: Optional[str] = None
+    # Lease semantics (seconds): a lease not renewed within TTL is up for grabs;
+    # holders renew every HEARTBEAT seconds. Failover time ≈ TTL.
+    LYNDRIX_LEASE_TTL_SECONDS: int = 30
+    LYNDRIX_LEASE_HEARTBEAT_SECONDS: int = 10
+    # Driver "db": poll interval of the cluster_events table (milliseconds).
+    LYNDRIX_EVENT_POLL_MS: int = 500
+    # Reverse proxies whose X-Forwarded-* headers are trusted (uvicorn
+    # --forwarded-allow-ips, exported by docker/entrypoint.sh). Mandatory behind
+    # any load balancer, otherwise the login limiter keys on the LB's IP.
+    LYNDRIX_TRUSTED_PROXIES: str = "127.0.0.1"
+    # SIGTERM handling: /api/ready answers 503 for this many seconds (the LB
+    # takes the instance out), then SSE streams are closed with a reconnect
+    # hint, leases are released and the process exits. Default: 0 in single
+    # mode (today's behaviour), 10 in cluster mode.
+    LYNDRIX_DRAIN_SECONDS: Optional[int] = None
+    # Recycle pooled DB connections after this many seconds (proxies such as
+    # MaxScale drop idle connections; 0 = never).
+    DB_POOL_RECYCLE_SECONDS: int = 300
+    # Set to 1 to silence the preflight warning when DB_HOST is a Galera node
+    # addressed directly instead of through MaxScale/ProxySQL.
+    DB_ALLOW_DIRECT_NODE: bool = False
+    # Comma-separated list of every Vault node (https://v1:8200,…). Today used
+    # by the preflight health check; the leader-driven multi-node unseal is a
+    # later milestone (docs/ha/building-blocks/secrets.md).
+    VAULT_NODES: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -305,7 +342,61 @@ class Settings(BaseSettings):
                 f"LYNDRIX_CLUSTER_MODE must be 'single' or 'cluster', got {self.LYNDRIX_CLUSTER_MODE!r}"
             )
         self.LYNDRIX_CLUSTER_MODE = mode
+
+        driver = (self.LYNDRIX_COORDINATOR or ("db" if mode == "cluster" else "local")).strip().lower()
+        if driver not in ("local", "db"):
+            raise ValueError(f"LYNDRIX_COORDINATOR must be 'local' or 'db', got {self.LYNDRIX_COORDINATOR!r}")
+        if mode == "cluster" and driver == "local":
+            raise ValueError(
+                "LYNDRIX_CLUSTER_MODE=cluster needs a shared coordinator — set LYNDRIX_COORDINATOR=db "
+                "(the 'local' driver cannot elect a leader across instances)"
+            )
+        self.LYNDRIX_COORDINATOR = driver
+
+        roles_raw = self.LYNDRIX_INSTANCE_ROLES or ("api,leader" if mode == "cluster" else "api,leader,runner")
+        roles = [r.strip().lower() for r in roles_raw.split(",") if r.strip()]
+        unknown = sorted(set(roles) - {"api", "leader", "runner"})
+        if unknown:
+            raise ValueError(
+                f"LYNDRIX_INSTANCE_ROLES contains unknown role(s) {unknown}; allowed: api, leader, runner"
+            )
+        if not roles:
+            raise ValueError("LYNDRIX_INSTANCE_ROLES must name at least one role (api, leader, runner)")
+        self.LYNDRIX_INSTANCE_ROLES = ",".join(dict.fromkeys(roles))
+
+        if self.LYNDRIX_LEASE_TTL_SECONDS < 5 or self.LYNDRIX_LEASE_HEARTBEAT_SECONDS < 1:
+            raise ValueError("LYNDRIX_LEASE_TTL_SECONDS must be >= 5 and LYNDRIX_LEASE_HEARTBEAT_SECONDS >= 1")
+        if self.LYNDRIX_LEASE_HEARTBEAT_SECONDS * 2 > self.LYNDRIX_LEASE_TTL_SECONDS:
+            raise ValueError(
+                "LYNDRIX_LEASE_HEARTBEAT_SECONDS must be at most half of LYNDRIX_LEASE_TTL_SECONDS "
+                "(a holder needs at least two renewal chances before its lease expires)"
+            )
+        if self.LYNDRIX_EVENT_POLL_MS < 100:
+            raise ValueError("LYNDRIX_EVENT_POLL_MS must be >= 100")
+        if self.LYNDRIX_DRAIN_SECONDS is None:
+            self.LYNDRIX_DRAIN_SECONDS = 10 if mode == "cluster" else 0
+        elif self.LYNDRIX_DRAIN_SECONDS < 0:
+            raise ValueError("LYNDRIX_DRAIN_SECONDS must be >= 0")
         return self
+
+    # ------------------------------------------------------------------
+    # Cluster helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def is_cluster(self) -> bool:
+        return self.LYNDRIX_CLUSTER_MODE == "cluster"
+
+    @property
+    def instance_roles(self) -> List[str]:
+        return [r for r in (self.LYNDRIX_INSTANCE_ROLES or "").split(",") if r]
+
+    @property
+    def vault_nodes(self) -> List[str]:
+        """Every Vault node URL from VAULT_NODES, falling back to VAULT_URL."""
+        raw = (self.VAULT_NODES or "").strip()
+        nodes = [n.strip().rstrip("/") for n in raw.split(",") if n.strip()]
+        return nodes or [self.VAULT_URL.rstrip("/")]
 
     @model_validator(mode="after")
     def _enforce_secure_defaults(self) -> "Settings":

@@ -1,0 +1,96 @@
+# Two-instance HA test bench on top of the dev stack (docs/ha/docker/compose-reference.md).
+#
+#   docker compose -f docker/docker-compose.dev.yml -f docker/docker-compose.ha.dev.yml up -d
+#
+# What it adds:
+#   * both cores run LYNDRIX_CLUSTER_MODE=cluster with the "db" coordinator
+#     (instances dev-a / dev-b, same DB, Vault, STORAGE_SECRET, plugin mounts)
+#   * the dev Traefik gets a plain-HTTP entrypoint :8090 that load-balances both
+#     instances with the LB contract from docs/ha/building-blocks/load-balancer.md
+#     (health check GET /api/ready every 3 s, no response buffering for SSE)
+#   * instance A keeps its direct port 8081 and the TLS dev hostname, instance B is
+#     reachable directly on 8082 — handy for "kill one, watch the other take over".
+#
+# Point the React dev shell at http://traefik:8090 (or the host at http://localhost:8090)
+# to drive the whole UI through the load balancer.
+services:
+  traefik:
+    # The "ha" entrypoint itself is declared in traefik.dev.yml (Traefik ignores
+    # CLI flags when a config file is in use); this only publishes it.
+    ports:
+      - "8090:8090/tcp"
+
+  lyndrix:
+    container_name: lyndrix-core-dev
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LYNDRIX_CLUSTER_MODE=cluster
+      - LYNDRIX_COORDINATOR=db
+      - LYNDRIX_INSTANCE_ID=dev-a
+      - LYNDRIX_INSTANCE_ROLES=api,leader,runner
+      - LYNDRIX_TRUSTED_PROXIES=*
+      - LYNDRIX_DRAIN_SECONDS=5
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.lyndrix-ha.rule: "PathPrefix(`/`)"
+      traefik.http.routers.lyndrix-ha.entrypoints: "ha"
+      traefik.http.routers.lyndrix-ha.service: "lyndrix-ha"
+      traefik.http.services.lyndrix-ha.loadbalancer.server.port: "8081"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.path: "/api/ready"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.interval: "3s"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.timeout: "2s"
+      traefik.http.services.lyndrix-ha.loadbalancer.responseforwarding.flushinterval: "-1"
+
+  lyndrix-b:
+    # Same image the dev stack built for `lyndrix` (project "docker" → docker-lyndrix);
+    # override with LYNDRIX_DEV_IMAGE if your project name differs.
+    image: ${LYNDRIX_DEV_IMAGE:-docker-lyndrix}
+    container_name: lyndrix-core-dev-2
+    restart: "unless-stopped"
+    ports:
+      - "8082:8081"
+    volumes:
+      - ../.dev/storage:/data/storage
+      - ../app:/app
+      - ../.dev/secure_data:/data/security
+      - ./entrypoint.sh:/app/entrypoint.sh
+      - ../../plugins/lyndrix-plugin-iac-orchestrator:/app/plugins/iac_orchestrator
+      - ../../plugins/lyndrix-plugin-discord-notifier:/app/plugins/discord_notifier
+      - ../../plugins/lyndrix-plugin-meeting-bingo:/app/plugins/meeting_bingo
+      - ../../plugins/lyndrix-plugin-monitoring:/app/plugins/state_monitoring
+      - ../../plugins/lyndrix-plugin-external-services:/app/plugins/external_services
+      - ../../plugins/lyndrix-plugin-server-manager:/app/plugins/server_manager
+      - ../../plugins/lyndrix-plugin-docker-manager:/app/plugins/docker_manager
+      - ../../plugins/lyndrix-plugin-entity-registry:/app/plugins/entity_registry
+      - ../../plugins/lyndrix-plugin-itsm:/app/plugins/itsm
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env.dev
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LYNDRIX_CLUSTER_MODE=cluster
+      - LYNDRIX_COORDINATOR=db
+      - LYNDRIX_INSTANCE_ID=dev-b
+      - LYNDRIX_INSTANCE_ROLES=api,leader
+      - LYNDRIX_TRUSTED_PROXIES=*
+      - LYNDRIX_DRAIN_SECONDS=5
+    command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload --timeout-graceful-shutdown 5
+    networks:
+      - default
+      - secured
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "dev-secured"
+      traefik.http.routers.lyndrix-ha.rule: "PathPrefix(`/`)"
+      traefik.http.routers.lyndrix-ha.entrypoints: "ha"
+      traefik.http.routers.lyndrix-ha.service: "lyndrix-ha"
+      traefik.http.services.lyndrix-ha.loadbalancer.server.port: "8081"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.path: "/api/ready"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.interval: "3s"
+      traefik.http.services.lyndrix-ha.loadbalancer.healthcheck.timeout: "2s"
+      traefik.http.services.lyndrix-ha.loadbalancer.responseforwarding.flushinterval: "-1"
+    depends_on:
+      db:
+        condition: service_healthy
+      vault:
+        condition: service_started

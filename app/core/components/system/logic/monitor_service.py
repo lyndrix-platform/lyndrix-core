@@ -50,7 +50,16 @@ class MonitorService:
                         'ram': psutil.virtual_memory().percent,
                         'disk': psutil.disk_usage('/').percent
                     })
-                    bus.emit("system:metrics_update", self.stats)
+                    # Tag with the instance id: behind a load balancer every
+                    # SSE client sees the numbers of whichever instance holds
+                    # its stream — the shell shows which one.
+                    try:
+                        from core.components.cluster.logic.cluster_service import cluster_service
+
+                        instance_id = cluster_service.instance_id
+                    except Exception:  # pragma: no cover - defensive
+                        instance_id = None
+                    bus.emit("system:metrics_update", {**self.stats, "instance_id": instance_id})
                     consecutive_failures = 0
                 except (OSError, psutil.Error) as e:
                     consecutive_failures += 1

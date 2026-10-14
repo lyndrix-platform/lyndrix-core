@@ -31,6 +31,11 @@ class ModuleManager:
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
         # Subscribe to filesystem change events from the PluginService
         bus.subscribe("plugin:files_changed")(self._handle_plugin_change)
+        # Cluster: a peer installed/enabled/disabled a plugin → converge on the
+        # DB state (plugin_states is the source of truth for every instance).
+        bus.subscribe("plugin:desired_changed")(self._on_desired_changed)
+        bus.subscribe("system:boot_complete")(self._start_cluster_reconciler)
+        self._reconcile_task = None
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         """Return (creating on first use) the reload lock for a module/folder key."""
@@ -314,6 +319,8 @@ class ModuleManager:
                 # follow-up refactor, not offloaded here.)
                 await asyncio.to_thread(self._persist_plugin_state, resolved_module_id, True)
                 await self._activate_saved_plugins()
+                # Tell the other instances to converge on plugin_states (bridged topic).
+                bus.emit("plugin:desired_changed", {"plugin_id": resolved_module_id, "action": "installed"})
 
             # Verification transaction: load + setup + health() must all pass; on
             # failure auto-revert to the retained previous version (upgrades only).
@@ -336,6 +343,7 @@ class ModuleManager:
             module_id = payload.get("id")
             self.unload_module(module_id)
             bus.emit("plugin:state_changed", {"plugin_id": module_id, "action": "uninstalled"})
+            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} uninstalled."})
 
     async def _verify_after_install(self, module_id: str) -> bool:
@@ -477,13 +485,30 @@ class ModuleManager:
         if not entry:
             return
 
-        if entry.get("status") == "active":
+        if entry.get("status") in ("active", "remote"):
             return
 
         # Degraded plugins (critical manifest issues) must not be activated.
         if entry.get("status") == "degraded":
             log.warning(
                 f"SETUP_BLOCKED: Module '{module_id}' is degraded; skipping setup()."
+            )
+            return
+
+        # Placement (core API 1.7): a plugin pinned to a role this instance does
+        # not have is registered as "remote" — no setup(), its routes answer 503
+        # with X-Plugin-Runtime phase=remote so the shell can point to the
+        # instance that runs it.
+        role = getattr(entry["manifest"], "pinned_role", None)
+        if role and role not in settings.instance_roles:
+            from core.api.router_registry import router_registry
+
+            entry["status"] = "remote"
+            entry["error_message"] = None
+            router_registry.register_remote(module_id, role)
+            log.info(
+                f"PLACEMENT: '{module_id}' is pinned to role '{role}' — this instance "
+                f"({','.join(settings.instance_roles)}) answers 503 remote for it."
             )
             return
 
@@ -581,6 +606,32 @@ class ModuleManager:
 
         enabled_plugin_ids = []
 
+        # Rows for plugins seen for the first time are inserted one per
+        # transaction up front: two instances booting together may both find a
+        # row missing — the loser's IntegrityError must not abort the whole pass.
+        from sqlalchemy.exc import IntegrityError
+
+        for module_id, entry in list(self.registry.items()):
+            if entry["manifest"].type == "CORE":
+                continue
+            manifest = entry["manifest"]
+            with db_instance.SessionLocal() as session:
+                if session.query(PluginState).filter(PluginState.module_id == module_id).first() is not None:
+                    continue
+                session.add(PluginState(
+                    module_id=module_id,
+                    is_active=manifest.auto_enable_on_install,
+                    installed_version=manifest.version,
+                    desired_version=manifest.version,
+                    repo_url=manifest.repo_url,
+                    auto_update=settings.LYNDRIX_PLUGINS_AUTO_UPDATE,
+                ))
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    log.info(f"DB_RESTORE: plugin_states row for '{module_id}' was created by another instance.")
+
         with db_instance.SessionLocal() as session:
             for module_id, entry in list(self.registry.items()):
                 if entry["manifest"].type == "CORE":
@@ -589,21 +640,12 @@ class ModuleManager:
                 manifest = entry["manifest"]
                 db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
 
-                if not db_state:
-                    db_state = PluginState(
-                        module_id=module_id,
-                        is_active=manifest.auto_enable_on_install,
-                        installed_version=manifest.version,
-                        desired_version=manifest.version,
-                        repo_url=manifest.repo_url,
-                        auto_update=settings.LYNDRIX_PLUGINS_AUTO_UPDATE,
-                    )
-                    session.add(db_state)
-                else:
-                    db_state.installed_version = manifest.version
-                    db_state.repo_url = manifest.repo_url or db_state.repo_url
-                    if not db_state.desired_version:
-                        db_state.desired_version = manifest.version
+                if not db_state:  # pragma: no cover - inserted above; defensive
+                    continue
+                db_state.installed_version = manifest.version
+                db_state.repo_url = manifest.repo_url or db_state.repo_url
+                if not db_state.desired_version:
+                    db_state.desired_version = manifest.version
 
                 if db_state.is_active:
                     enabled_plugin_ids.append(module_id)
@@ -648,15 +690,20 @@ class ModuleManager:
         # After restoring known plugins, reconcile desired plugins from config
         await self.reconcile_desired_plugins()
 
-    def toggle_module(self, module_id: str, active: bool):
-        """Toggles the module state in RAM and persists it to the DB."""
+    def toggle_module(self, module_id: str, active: bool, *, persist: bool = True):
+        """Toggles the module state in RAM and persists it to the DB.
+
+        ``persist=False`` applies a state another instance already wrote to
+        ``plugin_states`` (cluster reconcile) without writing it again or
+        re-broadcasting ``plugin:desired_changed``.
+        """
         if module_id not in self.registry:
             return False
 
         self._ensure_plugin_state_schema()
-            
+
         # 1. Persist to DB
-        if db_instance.SessionLocal:
+        if persist and db_instance.SessionLocal:
             try:
                 with db_instance.SessionLocal() as session:
                     db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
@@ -672,6 +719,7 @@ class ModuleManager:
 
         # 2. Update RAM status and execute lifecycle hooks
         entry = self.registry[module_id]
+        was_remote = entry.get("status") == "remote"
 
         if active:
             manifest = entry["manifest"]
@@ -690,8 +738,13 @@ class ModuleManager:
             log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
             # "Soft" unload: remove UI and call teardown, but keep module in memory.
             self._teardown_ui(module_id)
+            if was_remote:
+                # setup() never ran here — only the 503 stub has to go.
+                from core.api.router_registry import router_registry
+
+                router_registry.unmount(module_id)
             entry = self.registry.get(module_id)
-            if entry and hasattr(entry["module"], 'teardown'):
+            if entry and not was_remote and hasattr(entry["module"], 'teardown'):
                 log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")
                 teardown_func = entry["module"].teardown
                 if inspect.iscoroutinefunction(teardown_func):
@@ -715,8 +768,133 @@ class ModuleManager:
             self._unmount_plugin_statics(module_id)
 
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
-            
+
+        if persist:
+            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
+
         return True
+
+    # ------------------------------------------------------------------
+    # Cluster: converge this instance on plugin_states (docs/ha/building-blocks/plugins.md)
+    # ------------------------------------------------------------------
+
+    async def _on_desired_changed(self, payload: dict | None = None):
+        """A peer changed plugin_states (install/enable/disable/uninstall)."""
+        if not (payload or {}).get("_origin"):
+            return  # our own change — already applied locally
+        await self.reconcile_cluster_state(trigger=f"peer {payload.get('_origin')}: {payload.get('action')}")
+
+    async def _start_cluster_reconciler(self, payload: dict | None = None):
+        if settings.LYNDRIX_CLUSTER_MODE != "cluster" or self._reconcile_task is not None:
+            return
+        self._reconcile_task = bus.create_tracked_task(self._cluster_reconcile_loop(), name="module_manager:cluster_reconcile")
+
+    async def _cluster_reconcile_loop(self, interval_s: int = 300):
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self.reconcile_cluster_state(trigger="periodic")
+            except Exception:
+                log.error("RECONCILE: periodic cluster reconcile failed", exc_info=True)
+
+    def _load_plugin_states(self) -> list[dict]:
+        with db_instance.SessionLocal() as session:
+            rows = session.query(PluginState).all()
+            return [
+                {
+                    "module_id": r.module_id, "is_active": bool(r.is_active),
+                    "installed_version": r.installed_version, "desired_version": r.desired_version,
+                    "repo_url": r.repo_url,
+                }
+                for r in rows
+            ]
+
+    def _folder_for_state(self, row: dict) -> str | None:
+        """On-disk plugin folder for a plugin_states row (repo name, else manifest scan)."""
+        from .plugin_service import plugin_service
+
+        plugins_dir = Path(self.base_path) / "plugins"
+        candidates: list[str] = []
+        if row.get("repo_url"):
+            try:
+                _, repo = plugin_service._extract_repo_info(row["repo_url"])
+                candidates.append(repo.replace("-", "_"))
+            except Exception:
+                pass
+        for name in candidates:
+            if (plugins_dir / name / "entrypoint.py").exists() and self._read_plugin_manifest_id(name) == row["module_id"]:
+                return name
+        if plugins_dir.exists():
+            for item in os.listdir(plugins_dir):
+                if item.startswith((".", "__")) or not (plugins_dir / item / "entrypoint.py").exists():
+                    continue
+                if self._read_plugin_manifest_id(item) == row["module_id"]:
+                    return item
+        return None
+
+    async def reconcile_cluster_state(self, *, trigger: str = "manual") -> dict:
+        """Make this instance match ``plugin_states``: load folders that exist on
+        disk but are not loaded, install missing plugins from ``repo_url`` at
+        ``desired_version``, and apply enable/disable without re-persisting.
+
+        Shared-mount deployments (one ``/app/plugins`` for all instances) hit the
+        "exists on disk, not loaded" branch; separate disks hit the install branch.
+        """
+        if not db_instance.SessionLocal or not db_instance.is_connected:
+            return {"skipped": "db"}
+        summary = {"loaded": [], "installed": [], "enabled": [], "disabled": [], "unloaded": []}
+        async with self._lock_for("__cluster_reconcile__"):
+            from .plugin_service import plugin_service
+
+            rows = await asyncio.to_thread(self._load_plugin_states)
+            known_ids = {r["module_id"] for r in rows}
+
+            for row in rows:
+                mid = row["module_id"]
+                entry = self.registry.get(mid)
+                if entry is None:
+                    folder = await asyncio.to_thread(self._folder_for_state, row)
+                    if folder:
+                        if self.load_module(folder, is_plugin=True):
+                            summary["loaded"].append(mid)
+                    elif row.get("repo_url") and row["is_active"]:
+                        version = row.get("desired_version") or "latest"
+                        log.info(f"RECONCILE: installing '{mid}' from {row['repo_url']}@{version} ({trigger})")
+                        try:
+                            await plugin_service.install_plugin(row["repo_url"], version=version)
+                            summary["installed"].append(mid)
+                        except Exception as exc:
+                            log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
+                        continue  # the install path loads + activates via plugin:files_changed
+                    else:
+                        continue
+                    entry = self.registry.get(mid)
+                    if entry is None:
+                        continue
+                active_here = entry.get("status") in ("active", "initializing", "blocked", "remote")
+                if row["is_active"] and not active_here:
+                    if self.toggle_module(mid, True, persist=False):
+                        summary["enabled"].append(mid)
+                elif not row["is_active"] and active_here:
+                    if self.toggle_module(mid, False, persist=False):
+                        summary["disabled"].append(mid)
+
+            # Uninstalled elsewhere: no row AND the folder is gone → drop it here too.
+            for mid, entry in list(self.registry.items()):
+                manifest = entry.get("manifest")
+                if not manifest or manifest.type != "PLUGIN" or mid in known_ids:
+                    continue
+                module = entry.get("module")
+                module_file = getattr(module, "__file__", None)
+                if module_file and not os.path.exists(module_file):
+                    self.unload_module(mid)
+                    summary["unloaded"].append(mid)
+
+        changed = {k: v for k, v in summary.items() if v}
+        if changed:
+            log.info(f"RECONCILE ({trigger}): {changed}")
+            bus.emit("ui:needs_refresh", {"reason": "cluster plugin reconcile"})
+        return summary
 
     def get_manifests(self):
         return [entry["manifest"] for entry in self.registry.values()]
@@ -988,22 +1166,30 @@ class ModuleManager:
             "auto_update": "BOOLEAN DEFAULT 0",
         }
 
-        with db_instance.engine.begin() as connection:
-            PluginState.__table__.create(bind=connection, checkfirst=True)
-            PluginVersionHistory.__table__.create(bind=connection, checkfirst=True)
-            inspector = sqlalchemy_inspect(connection)
-            existing_columns = {
-                column["name"] for column in inspector.get_columns(PluginState.__tablename__)
-            }
+        # Same cross-instance lock as the IAM bootstrap: DDL from two booting
+        # instances must serialize (an unguarded ALTER used to abort
+        # _activate_saved_plugins on the loser → no plugins started).
+        with db_instance.advisory_lock("lyndrix_bootstrap", timeout=120):
+            with db_instance.engine.begin() as connection:
+                PluginState.__table__.create(bind=connection, checkfirst=True)
+                PluginVersionHistory.__table__.create(bind=connection, checkfirst=True)
+                inspector = sqlalchemy_inspect(connection)
+                existing_columns = {
+                    column["name"] for column in inspector.get_columns(PluginState.__tablename__)
+                }
 
-            for column_name, ddl in required_columns.items():
-                if column_name not in existing_columns:
-                    log.warning(
-                        f"PLUGIN_MANAGER: Migrating plugin_states table, adding column '{column_name}'."
-                    )
-                    connection.execute(
-                        text(f"ALTER TABLE {PluginState.__tablename__} ADD COLUMN {column_name} {ddl}")
-                    )
+                for column_name, ddl in required_columns.items():
+                    if column_name not in existing_columns:
+                        log.warning(
+                            f"PLUGIN_MANAGER: Migrating plugin_states table, adding column '{column_name}'."
+                        )
+                        try:
+                            connection.execute(
+                                text(f"ALTER TABLE {PluginState.__tablename__} ADD COLUMN {column_name} {ddl}")
+                            )
+                        except Exception as exc:
+                            if "Duplicate column" not in str(exc) and "already exists" not in str(exc):
+                                raise
 
         self._plugin_state_schema_ready = True
 

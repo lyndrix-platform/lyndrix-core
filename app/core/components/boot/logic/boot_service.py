@@ -5,8 +5,8 @@ is unchanged. New is :meth:`BootService.snapshot`, which turns the live state of
 every service the core depends on into one list the boot screens (React shell,
 NiceGUI) render: what is already online, what is still coming, what needs the
 operator (Vault init/unseal) and what failed. In ``LYNDRIX_CLUSTER_MODE=cluster``
-the cluster dependencies are listed too, so an operator sees at a glance which
-parts of a cluster deployment this core version provides.
+the cluster dependencies (coordinator, leader election, peers, shared storage)
+are listed too — fed by the cluster service's in-memory state.
 
 The snapshot is cheap by design: it reads in-memory flags only (no Vault or DB
 round-trip), so it can be polled every second by every open browser tab while
@@ -82,6 +82,12 @@ class BootService:
     async def on_core_ready(self, payload):
         self.iam_ready = True
         self.iam_error = None
+        if self.phase in (BootPhase.READY, BootPhase.LOADING_MODULES):
+            # iam:ready fires again after a DB reconnect (db:connected → IAM
+            # re-verifies). Modules are already loaded — loading them a second
+            # time would duplicate schedulers and subscriptions.
+            log.info("STARTUP: IAM re-verified after a database reconnect — modules stay loaded.")
+            return
         log.info("STARTUP: All core systems (Vault, DB, IAM) are online.")
         log.info("LOAD: Loading system modules and plugins...")
         self._set_state(BootPhase.LOADING_MODULES, is_booting=True)
@@ -196,6 +202,42 @@ class BootService:
             return self._row("modules", PENDING, "modules_loading")
         return self._row("modules", WAITING, "waiting_for", {"service": "iam"})
 
+    def _cluster_rows(self, db_online: bool) -> List[Dict[str, Any]]:
+        """Coordinator / leader / peers / storage rows (cluster mode only)."""
+        try:
+            from core.components.cluster.logic.cluster_service import cluster_service as cs
+        except Exception:  # pragma: no cover - defensive
+            return [self._row(sid, UNAVAILABLE, "cluster_not_available") for sid in CLUSTER_SERVICES]
+
+        rows: List[Dict[str, Any]] = []
+        if cs.started:
+            rows.append(self._row("coordinator", ONLINE, "coordinator_connected", {"driver": cs.driver}))
+        elif cs.start_error:
+            rows.append(self._row("coordinator", FAILED, "coordinator_failed"))
+        elif not db_online:
+            rows.append(self._row("coordinator", WAITING, "waiting_for", {"service": "database"}))
+        else:
+            rows.append(self._row("coordinator", PENDING, "coordinator_starting"))
+
+        if cs.is_leader:
+            rows.append(self._row("leader", ONLINE, "leader_self", {"instance": cs.instance_id}))
+        elif cs.leader_id:
+            rows.append(self._row("leader", ONLINE, "leader_other", {"instance": cs.leader_id}))
+        elif cs.started:
+            rows.append(self._row("leader", PENDING, "leader_electing"))
+        else:
+            rows.append(self._row("leader", WAITING, "waiting_for", {"service": "coordinator"}))
+
+        if cs.started:
+            alive = [i for i in cs._instances if i.alive]
+            rows.append(self._row("peers", ONLINE, "peers_count", {"peers": max(0, len(alive) - 1), "total": max(1, len(alive))}))
+        else:
+            rows.append(self._row("peers", WAITING, "waiting_for", {"service": "coordinator"}))
+
+        # Honest about what this core version does not provide yet.
+        rows.append(self._row("storage", UNAVAILABLE, "storage_not_available"))
+        return rows
+
     def _stamp_since(self, services: List[Dict[str, Any]]) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         for svc in services:
@@ -224,12 +266,16 @@ class BootService:
             self._modules_row(),
         ]
         if mode == "cluster":
-            # The cluster coordinator is not part of this core version yet; say so
-            # explicitly instead of hiding the rows (see features/high-availability*.md).
-            services.extend(
-                self._row(sid, UNAVAILABLE, "cluster_not_available") for sid in CLUSTER_SERVICES
-            )
+            services.extend(self._cluster_rows(db_online))
         self._stamp_since(services)
+
+        instance_id = None
+        try:
+            from core.components.cluster.logic.cluster_service import cluster_service
+
+            instance_id = cluster_service.instance_id
+        except Exception:  # pragma: no cover - defensive
+            pass
 
         online = sum(1 for s in services if s["status"] == ONLINE)
         return {
@@ -238,6 +284,7 @@ class BootService:
             "ready": self.phase == BootPhase.READY and not self.is_booting,
             "failed": self.phase == BootPhase.FAILED,
             "mode": mode,
+            "instance_id": instance_id,
             "vault_ui_state": vault_state,
             "started_at": self.started_at.isoformat(),
             "elapsed_s": round(time.monotonic() - self._started_mono, 1),

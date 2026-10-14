@@ -22,12 +22,49 @@ auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 # within 60s locks that key out, independent of the vault unseal limiter.
 # Only FAILED attempts are recorded; a successful login never counts against
 # the budget.
-_login_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60)
+_LOGIN_MAX_FAILURES = 5
+_LOGIN_WINDOW_S = 60
+# Kept for the single-process fallback when the cluster KV is unavailable.
+_login_limiter = SlidingWindowRateLimiter(max_attempts=_LOGIN_MAX_FAILURES, window_seconds=_LOGIN_WINDOW_S)
 
 
 def _login_rate_limit_key(username: str, request: Request) -> str:
+    # request.client.host is the real client only when uvicorn trusts the proxy
+    # (LYNDRIX_TRUSTED_PROXIES → FORWARDED_ALLOW_IPS); otherwise it is the LB.
     ip = request.client.host if request.client else "unknown"
     return f"{username.strip().lower()}|{ip}"
+
+
+def _login_bucket(rl_key: str) -> tuple[str, int]:
+    """Fixed-window counter key shared by every core instance via the cluster KV."""
+    import time as _time
+
+    now = int(_time.time())
+    window_start = now - now % _LOGIN_WINDOW_S
+    return f"login:fail:{rl_key}:{window_start}", _LOGIN_WINDOW_S - (now - window_start)
+
+
+async def _login_retry_after(rl_key: str) -> int:
+    """Seconds until another attempt is allowed (0 = allowed). Cluster-wide counter;
+    falls back to the in-process sliding window when the KV is unreachable."""
+    from core.components.cluster.logic.cluster_service import cluster_service
+
+    key, remaining = _login_bucket(rl_key)
+    try:
+        count = int(await cluster_service.kv_get(key) or 0)
+    except Exception:
+        return _login_limiter.retry_after(rl_key)
+    return max(1, remaining) if count >= _LOGIN_MAX_FAILURES else 0
+
+
+async def _login_record_failure(rl_key: str) -> None:
+    from core.components.cluster.logic.cluster_service import cluster_service
+
+    key, remaining = _login_bucket(rl_key)
+    try:
+        await cluster_service.kv_incr(key, ttl=max(1, remaining))
+    except Exception:
+        _login_limiter.record(rl_key)
 
 
 # Per-user background images live on the filesystem (no DB change). Existence on
@@ -153,7 +190,7 @@ async def login(payload: LoginRequest, request: Request):
     from core.components.auth.logic.api_key_service import api_key_service
 
     rl_key = _login_rate_limit_key(payload.username, request)
-    retry = _login_limiter.retry_after(rl_key)
+    retry = await _login_retry_after(rl_key)
     if retry > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -163,7 +200,7 @@ async def login(payload: LoginRequest, request: Request):
 
     result = await provider_registry.authenticate(payload.username, payload.password)
     if result is None:
-        _login_limiter.record(rl_key)
+        await _login_record_failure(rl_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -196,23 +233,34 @@ async def login(payload: LoginRequest, request: Request):
 # One-time SSO exchange codes: the OIDC callback mints a session token
 # server-side and hands the SPA a short-lived single-use code instead of
 # putting the token itself in a redirect URL (referrer/history leak).
-_SSO_EXCHANGE_TTL = 60.0
-_sso_exchange: Dict[str, dict] = {}
+# Stored in the cluster KV (in-memory in single mode) because the callback
+# and the SPA's token exchange may hit different core instances.
+_SSO_EXCHANGE_TTL = 60
 
 
-def create_sso_exchange_code(payload: dict) -> str:
+async def create_sso_exchange_code(payload: dict) -> str:
     """Store a login payload under a fresh one-time code (60s TTL)."""
     import secrets as _secrets
-    import time as _time
 
-    # opportunistic cleanup
-    now = _time.monotonic()
-    for k in [k for k, v in _sso_exchange.items() if v["expires"] < now]:
-        _sso_exchange.pop(k, None)
+    from core.components.cluster.logic.cluster_service import cluster_service
 
     code = _secrets.token_urlsafe(32)
-    _sso_exchange[code] = {"payload": payload, "expires": now + _SSO_EXCHANGE_TTL}
+    await cluster_service.kv_set(f"sso:code:{code}", payload, ttl=_SSO_EXCHANGE_TTL)
     return code
+
+
+async def _redeem_sso_exchange_code(code: str) -> Optional[dict]:
+    """Pop the payload for ``code`` — single use across every instance."""
+    from core.components.cluster.logic.cluster_service import cluster_service
+
+    key = f"sso:code:{code}"
+    payload = await cluster_service.kv_get(key)
+    if not isinstance(payload, dict):
+        return None
+    # delete() reports whether *we* removed it: a concurrent redeem loses.
+    if not await cluster_service.kv_delete(key):
+        return None
+    return payload
 
 
 @auth_router.get("/providers", summary="Login-page provider discovery")
@@ -275,12 +323,9 @@ class TokenExchangeRequest(BaseModel):
 @auth_router.post("/token-exchange", response_model=LoginResponse, summary="Redeem a one-time SSO code")
 async def sso_token_exchange(payload: TokenExchangeRequest):
     """Swap the single-use code from the SSO callback for the session token."""
-    import time as _time
-
-    entry = _sso_exchange.pop(payload.code, None)
-    if entry is None or entry["expires"] < _time.monotonic():
+    data = await _redeem_sso_exchange_code(payload.code)
+    if data is None:
         raise HTTPException(status_code=401, detail="Invalid or expired exchange code")
-    data = entry["payload"]
     return LoginResponse(
         token=data["token"],
         username=data["username"],

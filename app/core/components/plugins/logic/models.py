@@ -8,6 +8,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, JSON
 from core.components.database.logic.db_service import Base
 
 _ENDPOINT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_PLACEMENT_RE = re.compile(r"^(any|singleton|pinned:[a-z][a-z0-9_-]{0,30})$")
 
 # ==========================================
 # 1. PYDANTIC MODELS (In-Memory Validation)
@@ -188,6 +189,28 @@ class ModuleManifest(BaseModel):
         default=None,
         description="i18next-shaped translation namespace (locales/<ns>.<locale>.json) served to the React UI",
     )
+
+    # --- Cluster placement (core API >= 1.7, docs/ha/plugin-development.md) ---
+    #   any            — setup() runs on every instance (default; routes + stateless work)
+    #   singleton      — setup() runs everywhere (routes!), but ctx.on_lease callbacks
+    #                    are bound to ONE lease "plugin:<id>:singleton" held by one instance
+    #   pinned:<role>  — setup() runs only on instances whose LYNDRIX_INSTANCE_ROLES
+    #                    include <role>; other instances answer 503 "remote" for its routes
+    placement: str = Field(default="any", description="any | singleton | pinned:<role>")
+
+    @field_validator("placement")
+    @classmethod
+    def _validate_placement(cls, value: str) -> str:
+        value = (value or "any").strip().lower()
+        if not _PLACEMENT_RE.match(value):
+            raise ValueError(
+                f"placement '{value}' is invalid — use 'any', 'singleton' or 'pinned:<role>' (role: [a-z][a-z0-9_-]*)"
+            )
+        return value
+
+    @property
+    def pinned_role(self) -> Optional[str]:
+        return self.placement.split(":", 1)[1] if self.placement.startswith("pinned:") else None
 
 
 # ==========================================
