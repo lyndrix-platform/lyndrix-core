@@ -1189,26 +1189,37 @@ class ModuleManager:
             safe_name = repo.replace("-", "_")
             plugin_path = plugin_service.plugin_dir / safe_name
 
-            # Check DB state for auto_update preference
+            # Check DB state for auto_update preference. Copy the values out of
+            # the session: after commit() the row is expired and reading it
+            # outside the ``with`` raised DetachedInstanceError (seen on first
+            # boot with pinned plugins, which aborted the install handler).
             should_update = settings.LYNDRIX_PLUGINS_AUTO_UPDATE
-            state = None
+            state_found = False
+            state_installed: str | None = None
             if db_instance.SessionLocal:
                 with db_instance.SessionLocal() as session:
                     state = session.query(PluginState).filter(
                         (PluginState.repo_url == url) |
                         (PluginState.module_id.like(f"%{safe_name}%"))
                     ).first()
-                    if state and state.auto_update is not None:
-                        should_update = state.auto_update
                     if state:
+                        state_found = True
+                        state_installed = state.installed_version
+                        if state.auto_update is not None:
+                            should_update = state.auto_update
                         state.repo_url = url
                         state.desired_version = version
                         session.commit()
 
+            # Tags are "v1.4.0", manifests say "1.4.0" — compare without the prefix
+            # or a pinned plugin would be re-downloaded on every boot.
+            pinned = version != "latest" and (
+                not state_found or (state_installed or "").lstrip("v") != version.lstrip("v")
+            )
             if not plugin_path.exists():
                 log.info(f"RECONCILE: Installing missing desired plugin '{repo}' at '{version}'...")
                 await plugin_service.install_plugin(url, version=version)
-            elif version != "latest" and (not state or state.installed_version != version):
+            elif pinned:
                 log.info(f"RECONCILE: Updating desired plugin '{repo}' to pinned version '{version}'...")
                 await plugin_service.install_plugin(url, version=version, upgrade=True)
             elif version == "latest" and should_update:

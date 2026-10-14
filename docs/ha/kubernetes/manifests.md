@@ -167,7 +167,9 @@ spec:
       containers:
         - name: nginx
           image: ghcr.io/lyndrix-platform/lyndrix-ui:1.4.0
-          env: [{ name: LYNDRIX_BACKEND_URL, value: http://lyndrix-core:8081 }]   # the Service, never one pod
+          env:
+            - { name: LYNDRIX_BACKEND_URL, value: http://lyndrix-core.lyndrix.svc.cluster.local:8081 }   # FQDN — nginx's resolver ignores search domains
+            - { name: LYNDRIX_DNS_RESOLVER, value: "10.43.0.10" }              # CoreDNS; the image defaults to Docker's 127.0.0.11
           readinessProbe: { httpGet: { path: /, port: 80 }, periodSeconds: 5 }
 ```
 
