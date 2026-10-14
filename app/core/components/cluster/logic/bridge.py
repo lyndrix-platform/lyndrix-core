@@ -15,6 +15,7 @@ local unless the plugin says ``cluster=True`` on purpose.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from typing import Optional
 
 from core.bus import bus
@@ -25,6 +26,14 @@ from .coordinator import Coordinator
 log = get_logger("Core:Cluster:Bridge")
 
 ORIGIN_KEY = "_origin"
+
+# Set while a relayed event is being dispatched locally. Everything a handler
+# emits in reaction — synchronously, or from the task/thread the bus spawns for
+# it (asyncio.create_task and asyncio.to_thread copy the context) — is a
+# *derived* event and must not be published again: four instances each turning
+# one relayed "plugin:installed" into a fresh "notification:new" and bridging
+# that produced 16 toasts per browser for one install.
+RELAY_ORIGIN: ContextVar[Optional[str]] = ContextVar("lyndrix_relay_origin", default=None)
 
 # Core-owned topics every instance (and every SSE client) must see.
 CLUSTER_TOPICS = frozenset({
@@ -69,6 +78,8 @@ class ClusterBridge:
         """Called synchronously from ``bus.emit`` (possibly from a worker thread)."""
         if not self.attached or ORIGIN_KEY in payload:
             return
+        if RELAY_ORIGIN.get() is not None:
+            return  # derived from a relayed event — stays on this instance
         if not (forced or topic in CLUSTER_TOPICS):
             return
         loop = self._loop
@@ -93,4 +104,8 @@ class ClusterBridge:
         if origin == self.instance_id:
             return
         self.relayed += 1
-        bus.emit(topic, {**(payload or {}), ORIGIN_KEY: origin})
+        token = RELAY_ORIGIN.set(origin)
+        try:
+            bus.emit(topic, {**(payload or {}), ORIGIN_KEY: origin})
+        finally:
+            RELAY_ORIGIN.reset(token)

@@ -47,6 +47,44 @@ def test_bridge_publishes_allowlisted_and_forced_topics_only():
     assert bridge.published == 2
 
 
+def test_events_derived_from_a_relayed_event_are_not_published_again():
+    """A handler that reacts to a relayed event by emitting a bridged topic (e.g.
+    plugin:installed → notification:new) must not fan that reaction back out —
+    the originating instance already bridged its own notification."""
+    coord = RecordingCoordinator()
+    bridge = ClusterBridge(coord, "me")
+    seen_locally = []
+
+    def _reacts(payload):
+        seen_locally.append(payload)
+        bus.emit("notification:new", {"title": "derived", "from": payload.get(ORIGIN_KEY)})
+
+    async def _reacts_async(payload):
+        bus.emit("ui:needs_refresh", {"reason": "derived-async"})
+
+    _reacts.__qualname__ = f"bridge_test_reacts<{id(seen_locally)}>"
+    _reacts_async.__qualname__ = f"bridge_test_reacts_async<{id(seen_locally)}>"
+    bus.subscribe("plugin:installed")(_reacts)
+    bus.subscribe("plugin:installed")(_reacts_async)
+
+    async def run():
+        bridge.attach()
+        try:
+            coord.callbacks[0]("plugin:installed", {"repo": "x"}, "peer-1")
+            await asyncio.sleep(0.05)   # async handler task runs (context copied)
+            # A genuinely local event afterwards IS published.
+            bus.emit("notification:new", {"title": "local"})
+            await asyncio.sleep(0.05)
+        finally:
+            bridge.detach()
+            bus.unsubscribe("plugin:installed", _reacts)
+            bus.unsubscribe("plugin:installed", _reacts_async)
+
+    asyncio.run(run())
+    assert seen_locally == [{"repo": "x", ORIGIN_KEY: "peer-1"}]
+    assert coord.published == [("notification:new", {"title": "local"})]
+
+
 def test_remote_events_are_re_emitted_locally_with_origin():
     coord = RecordingCoordinator()
     bridge = ClusterBridge(coord, "me")

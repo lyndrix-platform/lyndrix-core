@@ -691,7 +691,8 @@ class PluginService:
             lock = self._install_locks[safe_repo_name] = asyncio.Lock()
         return lock
 
-    async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False):
+    async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False,
+                             notify: bool = True):
         """Downloads, extracts and registers a new plugin from GitHub or GitLab.
 
         Installs of the same repo are serialized per instance: the boot-time
@@ -700,19 +701,25 @@ class PluginService:
         the same second. Two concurrent ``shutil.move`` calls into
         ``/app/plugins/<name>`` ended with "File exists" for the loser. Under the
         lock a plain install of a plugin that is already on disk is a no-op.
+
+        ``notify=False`` (reconcile installs: boot-time LYNDRIX_PLUGINS_DESIRED,
+        cluster convergence) skips the user-facing ``plugin:installed`` event and
+        the "Plugin installed" notification — only the instance that executed the
+        operator's action announces it; N peers catching up stay silent.
         """
         try:
             safe_repo_name = self.validate_repo_url(github_url).repo.replace("-", "_")
         except Exception:
             # Let the real implementation produce the proper rejection + event.
-            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade)
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade, notify=notify)
         async with self._install_lock(safe_repo_name):
             if not upgrade and (self.plugin_dir / safe_repo_name / "entrypoint.py").exists():
                 log.info(f"INSTALL: '{safe_repo_name}' is already installed — duplicate install request skipped.")
                 return True
-            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade)
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade, notify=notify)
 
-    async def _install_plugin_unlocked(self, github_url: str, version: str = "latest", upgrade: bool = False):
+    async def _install_plugin_unlocked(self, github_url: str, version: str = "latest", upgrade: bool = False,
+                                       notify: bool = True):
         try:
             ref = self.validate_repo_url(github_url)
         except ValueError as exc:
@@ -871,7 +878,10 @@ class PluginService:
             # The ModuleManager will be listening for this.
             bus.emit("plugin:files_changed", {"action": "install", "name": safe_repo_name})
             log.info(f"SUCCESS: Plugin files for '{repo}' are in place. Notifying system.")
-            bus.emit("plugin:installed", {"repo": repo, "path": str(plugin_path)})
+            if notify:
+                bus.emit("plugin:installed", {"repo": repo, "path": str(plugin_path)})
+            else:
+                log.info(f"INSTALL: '{repo}' installed by reconcile — no user notification.")
             return True
 
         except Exception as e:

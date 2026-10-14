@@ -921,7 +921,7 @@ class ModuleManager:
                         version = row.get("installed_version") or row.get("desired_version") or "latest"
                         log.info(f"RECONCILE: installing '{mid}' from {row['repo_url']}@{version} ({trigger})")
                         try:
-                            ok = await plugin_service.install_plugin(row["repo_url"], version=version)
+                            ok = await plugin_service.install_plugin(row["repo_url"], version=version, notify=False)
                         except Exception as exc:
                             ok = False
                             log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
@@ -1274,15 +1274,17 @@ class ModuleManager:
             pinned = version != "latest" and (
                 not state_found or (state_installed or "").lstrip("v") != version.lstrip("v")
             )
+            # Reconcile installs are silent (notify=False): every instance runs this
+            # at boot, and N "Plugin installed" toasts per rollout are noise, not news.
             if not plugin_path.exists():
                 log.info(f"RECONCILE: Installing missing desired plugin '{repo}' at '{version}'...")
-                await plugin_service.install_plugin(url, version=version)
+                await plugin_service.install_plugin(url, version=version, notify=False)
             elif pinned:
                 log.info(f"RECONCILE: Updating desired plugin '{repo}' to pinned version '{version}'...")
-                await plugin_service.install_plugin(url, version=version, upgrade=True)
+                await plugin_service.install_plugin(url, version=version, upgrade=True, notify=False)
             elif version == "latest" and should_update:
                 log.info(f"RECONCILE: Updating desired plugin '{repo}' to latest...")
-                await plugin_service.install_plugin(url, version=version, upgrade=True)
+                await plugin_service.install_plugin(url, version=version, upgrade=True, notify=False)
             else:
                 log.debug(f"RECONCILE: Plugin '{repo}' already satisfies desired state.")
 

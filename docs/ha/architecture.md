@@ -79,6 +79,13 @@ event, a browser connected to instance B receives what happened on instance A.
 Why an allowlist: the moment a topic is bridged, every side-effecting subscriber runs on N
 instances. Plugin topics stay local unless the plugin opts in on purpose.
 
+Two rules keep one action from turning into N × N toasts: an event a handler emits *in reaction
+to a relayed event* (synchronously or from the task/thread spawned for it) is never published
+again — the originating instance already bridged its own reaction — and installs performed by a
+reconcile (boot-time `LYNDRIX_PLUGINS_DESIRED`, cluster convergence) are silent; only the instance
+that executed the operator's action emits `plugin:installed` and the "Plugin installed"
+notification, which then reaches every browser exactly once through the relay.
+
 ## Readiness and drain
 
 `GET /api/ready` is the one contract every load balancer and Kubernetes readiness probe uses. It

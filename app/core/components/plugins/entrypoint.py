@@ -110,10 +110,24 @@ def _register_lifecycle_notifications(ctx):
             severity="info",
         )
 
-    ctx.subscribe("plugin:installed")(_on_installed)
-    ctx.subscribe("plugin:install_failed")(_on_failed)
-    ctx.subscribe("plugin:rolled_back")(_on_rolled_back)
-    ctx.subscribe("plugin:update_available")(_on_update_available)
+    def _local_only(handler):
+        # Cluster: these topics are bridged, so a peer's event arrives here with
+        # payload["_origin"]. The peer already created the notification and
+        # notification:new is bridged too — creating it again here would double
+        # (×N instances) every toast and bell entry.
+        def _guarded(payload):
+            if (payload or {}).get("_origin"):
+                return
+            return handler(payload)
+
+        _guarded.__qualname__ = f"{handler.__qualname__}<local_only>"
+        _guarded.__module__ = handler.__module__
+        return _guarded
+
+    ctx.subscribe("plugin:installed")(_local_only(_on_installed))
+    ctx.subscribe("plugin:install_failed")(_local_only(_on_failed))
+    ctx.subscribe("plugin:rolled_back")(_local_only(_on_rolled_back))
+    ctx.subscribe("plugin:update_available")(_local_only(_on_update_available))
 
 
 def setup(ctx):

@@ -17,6 +17,7 @@
 | UI answers 502 on every `/api/*` (Kubernetes), nginx log "could not be resolved" | the UI's nginx resolves the backend via `LYNDRIX_DNS_RESOLVER` (default: Docker's 127.0.0.11) and ignores search domains | set the kube-dns IP and the Service FQDN in `LYNDRIX_BACKEND_URL` ([manifests](../kubernetes/manifests.md)) |
 | Vault pod crash-loops with "Failed to lock memory" (Kubernetes) | non-root container without ambient `IPC_LOCK` | `disable_mlock: true` in the Vault config |
 | First-boot plugin installs abort with `DetachedInstanceError` | core < 1.4.1 | upgrade; the plugins were still activated, only the post-install verification was skipped |
+| One plugin install shows N× "installed" toasts and N² bell entries | core < 1.4.5: every instance's reconcile install notified, and reactions to relayed events were bridged again | upgrade — reconcile installs are silent and derived events stay local |
 
 ## Collecting state
 
