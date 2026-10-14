@@ -273,6 +273,45 @@ Plugins do not automatically share secret space with each other.
 
 ---
 
+## Runtime status (startup sequence / maintenance window)
+
+A plugin whose warm-up takes a while (an initial probe sweep, a large import) or that needs a
+maintenance window reports it through the context instead of letting its endpoints time out:
+
+```python
+ctx.set_status("starting", message="Initial probe sweep", progress=(done, total), blocking=True)
+# ... work ...
+ctx.set_status("ready")
+
+async with ctx.maintenance("Re-importing inventory"):   # blocking=True by default
+    await asyncio.to_thread(self._reimport)
+```
+
+| Phase | Meaning |
+|---|---|
+| `starting` | warming up; optionally `progress=(done, total)` |
+| `ready` | normal operation (the default — a plugin that never calls `set_status` is ready) |
+| `degraded` | working with reduced function (never blocking) |
+| `maintenance` | temporarily unavailable on purpose |
+
+Effects of a **blocking** `starting`/`maintenance` status:
+
+- the core answers every route of the plugin with `503`, `Retry-After` and an
+  `X-Plugin-Runtime` header (JSON status) — public routes included;
+- the React shell shows a warm-up panel with message, progress and elapsed time instead of the
+  plugin UI and mounts the UI by itself when `ready` arrives;
+- `/api/health` does not call the plugin's `health()` while it is `starting`.
+
+A non-blocking status only adds a banner above the plugin UI. The status is broadcast as
+`plugin:runtime_status` (a core-owned topic, no manifest permission needed), exposed as
+`runtime` in `GET /api/plugins` and `/api/health`, coalesced to one progress update per second,
+and reset to `ready` when the plugin is disabled, unloaded or its setup fails. Guard the call with
+`getattr(ctx, "set_status", None)` when the plugin must still load on cores older than API 1.5.
+
+Related guard: the core caps every SQL statement on its pooled connections
+(`DB_STATEMENT_TIMEOUT_SECONDS`, default 60 s, MariaDB `max_statement_time`). Keep `health()` and
+per-request queries small and do bulk deletes in chunks.
+
 ## Event integration
 
 Plugins should communicate through the event bus via `ctx` instead of importing the global bus directly.
