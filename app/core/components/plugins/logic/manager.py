@@ -301,67 +301,12 @@ class ModuleManager:
         action = payload.get("action")
         if action == "install":
             module_name = payload.get("name")
-            log.info(f"MANAGER: Received install event for '{module_name}'. Loading module...")
-            existing_module_id = self._find_plugin_id_by_folder(module_name)
-            if not existing_module_id:
-                # Folder-name resolution can miss when an upgrade atomically swapped
-                # the on-disk folder or the folder name changed between versions.
-                # Fall back to resolving by the manifest id declared in the freshly
-                # installed files so we reload in place (which purges sys.modules and
-                # re-imports the NEW code) instead of hitting the already-registered
-                # guard in load_module and failing with a misleading error.
-                probed_id = self._read_plugin_manifest_id(module_name)
-                if probed_id and probed_id in self.registry:
-                    existing_module_id = probed_id
-                    log.info(
-                        f"MANAGER: Resolved already-loaded plugin '{module_name}' by manifest id "
-                        f"'{probed_id}' (folder lookup missed)."
-                    )
-            if existing_module_id:
-                log.info(
-                    f"MANAGER: Plugin folder '{module_name}' is already loaded as '{existing_module_id}'. Reloading in-place."
-                )
-                load_ok = await self.reload_module(existing_module_id, module_folder=module_name)
-            else:
-                load_ok = self.load_module(module_name, is_plugin=True)
-                if not load_ok:
-                    log.warning(
-                        f"MANAGER: Plugin '{module_name}' could not be loaded after install event."
-                    )
-
-            resolved_module_id = (
-                self._find_plugin_id_by_folder(module_name)
-                or self._read_plugin_manifest_id(module_name)
-            )
-
-            # Persist + activate (runs setup) before the health gate.
-            if load_ok and resolved_module_id:
-                # Standalone blocking DB write — keep it off the event loop.
-                # (_activate_saved_plugins still runs sync DB interleaved with
-                # loop-bound lifecycle work; separating those is a dedicated
-                # follow-up refactor, not offloaded here.)
-                await asyncio.to_thread(self._persist_plugin_state, resolved_module_id, True)
-                await self._activate_saved_plugins()
-                # Tell the other instances to converge on plugin_states (bridged topic).
-                bus.emit("plugin:desired_changed", {"plugin_id": resolved_module_id, "action": "installed"})
-
-            # Verification transaction: load + setup + health() must all pass; on
-            # failure auto-revert to the retained previous version (upgrades only).
-            verified = bool(
-                load_ok
-                and resolved_module_id
-                and await self._verify_after_install(resolved_module_id)
-            )
-            if verified:
-                # Push the new state to connected UIs. The fresh-install path
-                # (load_module) emits no ui:needs_refresh of its own, and the React
-                # client invalidates its plugin list + bundle caches only on
-                # plugin:state_changed — without these, a successful install stays
-                # invisible until a manual page reload.
-                bus.emit("plugin:state_changed", {"plugin_id": resolved_module_id, "action": "installed"})
-                bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
-            else:
-                await self._auto_revert(module_name, resolved_module_id)
+            # Two install events for the same folder within a second (operator
+            # upgrade + peer-triggered reconcile, or back-to-back reconciles) must
+            # not interleave: the second reload used to unload the module while
+            # the first was still persisting/verifying it.
+            async with self._lock_for(f"install:{module_name}"):
+                await self._handle_plugin_install(payload, module_name)
         elif action == "uninstall":
             module_id = payload.get("id")
             self.unload_module(module_id)
@@ -375,6 +320,80 @@ class ModuleManager:
             bus.emit("plugin:state_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "uninstalled"})
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} uninstalled."})
+
+    async def _handle_plugin_install(self, payload: dict, module_name: str):
+        """Load/reload, persist, verify (and auto-revert) a freshly installed folder.
+
+        ``payload["lead"]`` (default True) says whether this instance executed the
+        operator's action. A follower install (cluster reconcile converging on
+        ``plugin_states``) activates the files but never writes
+        ``installed_version`` — otherwise N instances at different stages of a
+        rollout rewrite the row with their own version and chase each other.
+        """
+        lead = bool(payload.get("lead", True))
+        log.info(f"MANAGER: Received install event for '{module_name}'. Loading module...")
+        existing_module_id = self._find_plugin_id_by_folder(module_name)
+        if not existing_module_id:
+            # Folder-name resolution can miss when an upgrade atomically swapped
+            # the on-disk folder or the folder name changed between versions.
+            # Fall back to resolving by the manifest id declared in the freshly
+            # installed files so we reload in place (which purges sys.modules and
+            # re-imports the NEW code) instead of hitting the already-registered
+            # guard in load_module and failing with a misleading error.
+            probed_id = self._read_plugin_manifest_id(module_name)
+            if probed_id and probed_id in self.registry:
+                existing_module_id = probed_id
+                log.info(
+                    f"MANAGER: Resolved already-loaded plugin '{module_name}' by manifest id "
+                    f"'{probed_id}' (folder lookup missed)."
+                )
+        if existing_module_id:
+            log.info(
+                f"MANAGER: Plugin folder '{module_name}' is already loaded as '{existing_module_id}'. Reloading in-place."
+            )
+            load_ok = await self.reload_module(existing_module_id, module_folder=module_name)
+        else:
+            load_ok = self.load_module(module_name, is_plugin=True)
+            if not load_ok:
+                log.warning(
+                    f"MANAGER: Plugin '{module_name}' could not be loaded after install event."
+                )
+
+        resolved_module_id = (
+            self._find_plugin_id_by_folder(module_name)
+            or self._read_plugin_manifest_id(module_name)
+        )
+
+        # Persist + activate (runs setup) before the health gate.
+        if load_ok and resolved_module_id:
+            # Standalone blocking DB write — keep it off the event loop.
+            # (_activate_saved_plugins still runs sync DB interleaved with
+            # loop-bound lifecycle work; separating those is a dedicated
+            # follow-up refactor, not offloaded here.)
+            await asyncio.to_thread(self._persist_plugin_state, resolved_module_id, True, set_version=lead)
+            await self._activate_saved_plugins()
+            # Tell the other instances to converge on plugin_states (bridged
+            # topic). Followers stay silent: the peers already follow the row.
+            if lead:
+                bus.emit("plugin:desired_changed", {"plugin_id": resolved_module_id, "action": "installed"})
+
+        # Verification transaction: load + setup + health() must all pass; on
+        # failure auto-revert to the retained previous version (upgrades only).
+        verified = bool(
+            load_ok
+            and resolved_module_id
+            and await self._verify_after_install(resolved_module_id)
+        )
+        if verified:
+            # Push the new state to connected UIs. The fresh-install path
+            # (load_module) emits no ui:needs_refresh of its own, and the React
+            # client invalidates its plugin list + bundle caches only on
+            # plugin:state_changed — without these, a successful install stays
+            # invisible until a manual page reload.
+            bus.emit("plugin:state_changed", {"plugin_id": resolved_module_id, "action": "installed"})
+            bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
+        else:
+            await self._auto_revert(module_name, resolved_module_id)
 
     def _delete_plugin_state(self, module_id: str) -> bool:
         """Delete the plugin_states row; True when it is gone (or never existed)."""
@@ -666,13 +685,23 @@ class ModuleManager:
                     continue
                 raise
 
-    def _persist_plugin_state(self, module_id: str, is_active: bool):
-        """Persist plugin activation without duplicating lifecycle work."""
-        if module_id not in self.registry or not db_instance.SessionLocal:
+    def _persist_plugin_state(self, module_id: str, is_active: bool, *, set_version: bool = False):
+        """Persist plugin activation without duplicating lifecycle work.
+
+        ``installed_version``/``desired_version`` move only with ``set_version=True``
+        — the instance that executed an operator install/upgrade/rollback leads
+        the row (see ``_handle_plugin_install``). Enable/disable, follower
+        installs and a locally reverted artifact (``reverted_from``) leave the
+        cluster's version alone. A missing row is always created from the loaded
+        manifest.
+        """
+        entry = self.registry.get(module_id)
+        if entry is None or not db_instance.SessionLocal:
             return
 
         self._ensure_plugin_state_schema()
-        manifest = self.registry[module_id]["manifest"]
+        manifest = entry["manifest"]
+        move_version = bool(set_version) and not entry.get("reverted_from")
 
         def _tx():
             with self._state_session() as session:
@@ -689,16 +718,15 @@ class ModuleManager:
                     session.add(db_state)
                 else:
                     db_state.is_active = is_active
-                    if not reverted_from:
+                    if move_version:
                         db_state.installed_version = manifest.version
                         db_state.desired_version = manifest.version
                     db_state.repo_url = manifest.repo_url or db_state.repo_url
                 session.commit()
 
-        reverted_from = self.registry[module_id].get("reverted_from")
         try:
             self._retry_state_write(_tx)
-            self.registry[module_id]["persisted"] = True
+            entry["persisted"] = True
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
 
@@ -720,6 +748,30 @@ class ModuleManager:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
             except Exception as emit_err:
                 log.error(f"BUS_ERROR: Failed to emit plugin:setup_failed for '{module_id}': {emit_err}")
+
+    @staticmethod
+    def _sync_row_version(db_state, manifest, entry: dict) -> None:
+        """Row sync policy for ``installed_version`` on activation.
+
+        Cluster mode: the row is the version the cluster was asked to run and is
+        written only by the instance that executed the operator's action
+        (``_persist_plugin_state(set_version=True)``). An instance whose loaded
+        artifact differs is *behind* (or locally reverted) and converges through
+        ``reconcile_cluster_state`` — it must never pull the row to its own
+        version, or N instances mid-rollout rewrite it in turns and every peer
+        downgrades/upgrades after them. Only an empty row is filled.
+
+        Single mode: the loaded artifact is the only truth (dev mounts, manual
+        drops) — record it, unless it is a locally reverted upgrade.
+        """
+        if db_state.installed_version == manifest.version:
+            return
+        if not db_state.installed_version:
+            db_state.installed_version = manifest.version
+            return
+        if settings.LYNDRIX_CLUSTER_MODE == "cluster" or entry.get("reverted_from"):
+            return
+        db_state.installed_version = manifest.version
 
     async def _activate_saved_plugins(self, payload=None):
         """Called when DB connects. Reads states and boots active plugins."""
@@ -779,9 +831,7 @@ class ModuleManager:
                     db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
                     if not db_state:  # pragma: no cover - inserted above; defensive
                         continue
-                    # A locally reverted artifact never moves the cluster's version down.
-                    if db_state.installed_version != manifest.version and not entry.get("reverted_from"):
-                        db_state.installed_version = manifest.version
+                    self._sync_row_version(db_state, manifest, entry)
                     if manifest.repo_url and db_state.repo_url != manifest.repo_url:
                         db_state.repo_url = manifest.repo_url
                     if not db_state.desired_version:
@@ -1076,7 +1126,8 @@ class ModuleManager:
                         version = row.get("installed_version") or row.get("desired_version") or "latest"
                         log.info(f"RECONCILE: installing '{mid}' from {row['repo_url']}@{version} ({trigger})")
                         try:
-                            ok = await plugin_service.install_plugin(row["repo_url"], version=version, notify=False)
+                            ok = await plugin_service.install_plugin(row["repo_url"], version=version,
+                                                                     notify=False, lead=False)
                         except Exception as exc:
                             ok = False
                             log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
@@ -1144,10 +1195,18 @@ class ModuleManager:
             return False
         if mid in self._reconcile_upgrading or not self._reconcile_install_allowed(mid):
             return False
+        # The files may already be swapped while the plugin:files_changed load is
+        # still queued (reconciles triggered by several peers within a second):
+        # downloading again would reload the module under the pending load.
+        on_disk = self._disk_version(entry)
+        if on_disk and on_disk.lstrip("vV") == want.lstrip("vV"):
+            log.debug(f"RECONCILE: '{mid}' already has {want} on disk — waiting for the pending load.")
+            return False
         self._reconcile_upgrading.add(mid)
         log.info(f"RECONCILE: '{mid}' runs {have} here, the cluster runs {want} — upgrading ({trigger}).")
         try:
-            ok = await plugin_service.install_plugin(row["repo_url"], version=want, upgrade=True, notify=False)
+            ok = await plugin_service.install_plugin(row["repo_url"], version=want, upgrade=True,
+                                                     notify=False, lead=False)
         except Exception as exc:
             ok = False
             log.error(f"RECONCILE: upgrade of '{mid}' to {want} failed: {exc}")
@@ -1159,6 +1218,22 @@ class ModuleManager:
             self._reconcile_install_backoff.pop(mid, None)
             summary.setdefault("upgraded", []).append(mid)
         return True
+
+    def _disk_version(self, entry: dict) -> str | None:
+        """``manifest.version`` of the artifact currently on disk for a loaded
+        entry (static read, no import) — differs from the loaded manifest while
+        an upgrade's files are swapped but not yet reloaded."""
+        module_file = getattr(entry.get("module"), "__file__", None)
+        if not module_file:
+            return None
+        try:
+            from core.components.plugins.logic.plugin_service import PluginService
+            entrypoint = Path(module_file).parent / "entrypoint.py"
+            if entrypoint.exists():
+                return PluginService._extract_manifest_field(str(entrypoint), "version")
+        except Exception as exc:
+            log.debug(f"RECONCILE: on-disk version probe failed: {exc}")
+        return None
 
     def get_manifests(self):
         return [entry["manifest"] for entry in self.registry.values()]

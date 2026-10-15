@@ -117,8 +117,8 @@ def _reconcile_env(monkeypatch, *, have: str, want: str, status: str = "remote")
     mgr = ModuleManager()
     calls = []
 
-    async def fake_install(url, version="latest", upgrade=False, notify=True):
-        calls.append({"url": url, "version": version, "upgrade": upgrade, "notify": notify})
+    async def fake_install(url, version="latest", upgrade=False, notify=True, lead=True):
+        calls.append({"url": url, "version": version, "upgrade": upgrade, "notify": notify, "lead": lead})
         return True
 
     monkeypatch.setattr(ps_mod.plugin_service, "install_plugin", fake_install)
@@ -137,8 +137,24 @@ def test_peer_upgrade_is_followed(monkeypatch):
     mgr, calls = _reconcile_env(monkeypatch, have="1.3.0", want="1.4.0")
     summary = asyncio.run(mgr.reconcile_cluster_state(trigger="test"))
     assert calls == [{"url": "https://github.com/lyndrix-platform/lyndrix-plugin-x", "version": "1.4.0",
-                      "upgrade": True, "notify": False}]
+                      "upgrade": True, "notify": False, "lead": False}]   # follower: never writes the row
     assert summary.get("upgraded") == ["lyndrix.plugin.x"]
+
+
+def test_peer_upgrade_waits_when_the_files_are_already_on_disk(monkeypatch, tmp_path):
+    """Several peers trigger reconciles within a second: once the new files are
+    swapped in, the pending plugin:files_changed load applies them — no second
+    download that would reload the module under the first."""
+    mgr, calls = _reconcile_env(monkeypatch, have="1.3.0", want="1.4.0")
+    folder = tmp_path / "lyndrix_plugin_x"
+    folder.mkdir()
+    (folder / "entrypoint.py").write_text(
+        'from core.api import ModuleManifest\nmanifest = ModuleManifest(id="lyndrix.plugin.x", name="X", '
+        'version="1.4.0", type="PLUGIN")\n'
+    )
+    mgr.registry["lyndrix.plugin.x"]["module"] = types.SimpleNamespace(__file__=str(folder / "entrypoint.py"))
+    summary = asyncio.run(mgr.reconcile_cluster_state(trigger="test"))
+    assert calls == [] and not summary.get("upgraded")
 
 
 def test_same_version_in_either_spelling_is_left_alone(monkeypatch):
@@ -204,12 +220,36 @@ def test_persist_state_keeps_row_version_after_a_local_revert(monkeypatch):
     manifest = types.SimpleNamespace(type="PLUGIN", version="0.1.0", id="lyndrix.plugin.r", repo_url="https://x/y")
     mgr.registry["lyndrix.plugin.r"] = {"status": "active", "manifest": manifest, "module": None, "context": None,
                                         "reverted_from": "0.2.0"}
-    mgr._persist_plugin_state("lyndrix.plugin.r", True)
+    mgr._persist_plugin_state("lyndrix.plugin.r", True, set_version=True)
     with Session() as s:
         row = s.get(PluginState, "lyndrix.plugin.r")
         assert row.installed_version == "0.2.0"          # the cluster still wants 0.2.0
-    # without the flag the same call records the loaded version
+    # a follower activation / enable-disable never moves the version either
     mgr.registry["lyndrix.plugin.r"].pop("reverted_from")
-    mgr._persist_plugin_state("lyndrix.plugin.r", True)
+    mgr._persist_plugin_state("lyndrix.plugin.r", False)
+    with Session() as s:
+        row = s.get(PluginState, "lyndrix.plugin.r")
+        assert row.installed_version == "0.2.0" and row.is_active is False
+    # only the instance that executed the operator's install leads the row
+    mgr._persist_plugin_state("lyndrix.plugin.r", True, set_version=True)
     with Session() as s:
         assert s.get(PluginState, "lyndrix.plugin.r").installed_version == "0.1.0"
+    # a module unloaded concurrently is tolerated
+    mgr.registry.pop("lyndrix.plugin.r")
+    mgr._persist_plugin_state("lyndrix.plugin.r", True, set_version=True)
+
+
+@pytest.mark.parametrize("mode,row,loaded,reverted,expected", [
+    ("cluster", "0.2.0", "0.1.0", None, "0.2.0"),     # behind the cluster → follow, never pull down
+    ("cluster", "0.1.0", "0.2.0", None, "0.1.0"),     # ahead (install in flight elsewhere) → leave it
+    ("cluster", None, "0.1.0", None, "0.1.0"),        # empty row → fill
+    ("single", "0.1.0", "0.2.0", None, "0.2.0"),      # single mode: the loaded artifact is the truth
+    ("single", "0.2.0", "0.1.0", "0.2.0", "0.2.0"),   # … unless it is a locally reverted upgrade
+])
+def test_row_version_sync_policy(monkeypatch, mode, row, loaded, reverted, expected):
+    monkeypatch.setattr(settings, "LYNDRIX_CLUSTER_MODE", mode)
+    db_state = types.SimpleNamespace(installed_version=row)
+    manifest = types.SimpleNamespace(version=loaded)
+    entry = {"reverted_from": reverted} if reverted else {}
+    ModuleManager._sync_row_version(db_state, manifest, entry)
+    assert db_state.installed_version == expected

@@ -10,7 +10,8 @@
     "section_apps": "Apps",
     "section_system": "System",
     "plugin_inactive": "Plugin inaktiv",
-    "plugin_no_route": "Keine UI-Route konfiguriert"
+    "plugin_no_route": "Keine UI-Route konfiguriert",
+    "section_services": "Dienste"
   },
   "shell": {
     "open_nav": "Navigation öffnen",
@@ -829,5 +830,11 @@
     "trusted_proxies": "Vertraute Proxys",
     "forwarded_seen": "X-Forwarded-For gesehen",
     "database": "Datenbank"
+  },
+  "external": {
+    "open_new_tab": "In neuem Tab öffnen",
+    "opens_new_tab": "Dieser Dienst öffnet sich in einem neuen Browser-Tab.",
+    "not_found": "Dieser Dienst ist nicht mehr registriert.",
+    "blocked_hint": "Seite bleibt leer? Der Dienst verweigert das Einbetten (X-Frame-Options / CSP) — in neuem Tab öffnen."
   }
 }

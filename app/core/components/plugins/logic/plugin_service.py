@@ -708,8 +708,15 @@ class PluginService:
         return lock
 
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False,
-                             notify: bool = True):
+                             notify: bool = True, lead: bool = True):
         """Downloads, extracts and registers a new plugin from GitHub or GitLab.
+
+        ``lead=False`` marks a *follower* install: this instance converges on a
+        version another instance already recorded in ``plugin_states`` (cluster
+        reconcile). The ModuleManager then loads and activates the files but
+        never writes ``installed_version`` — only the instance that executed
+        the operator's install/upgrade/rollback (or the identical
+        ``LYNDRIX_PLUGINS_DESIRED`` pin) leads the row.
 
         Installs of the same repo are serialized per instance: the boot-time
         desired-plugin reconcile, the reconcile that runs after every install
@@ -727,15 +734,17 @@ class PluginService:
             safe_repo_name = self.validate_repo_url(github_url).repo.replace("-", "_")
         except Exception:
             # Let the real implementation produce the proper rejection + event.
-            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade, notify=notify)
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade,
+                                                       notify=notify, lead=lead)
         async with self._install_lock(safe_repo_name):
             if not upgrade and (self.plugin_dir / safe_repo_name / "entrypoint.py").exists():
                 log.info(f"INSTALL: '{safe_repo_name}' is already installed — duplicate install request skipped.")
                 return True
-            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade, notify=notify)
+            return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade,
+                                                       notify=notify, lead=lead)
 
     async def _install_plugin_unlocked(self, github_url: str, version: str = "latest", upgrade: bool = False,
-                                       notify: bool = True):
+                                       notify: bool = True, lead: bool = True):
         try:
             ref = self.validate_repo_url(github_url)
         except ValueError as exc:
@@ -905,7 +914,7 @@ class PluginService:
 
             # 6. INTEGRATION: Announce the change via the event bus.
             # The ModuleManager will be listening for this.
-            bus.emit("plugin:files_changed", {"action": "install", "name": safe_repo_name})
+            bus.emit("plugin:files_changed", {"action": "install", "name": safe_repo_name, "lead": bool(lead)})
             log.info(f"SUCCESS: Plugin files for '{repo}' are in place. Notifying system.")
             if notify:
                 bus.emit("plugin:installed", {"repo": repo, "path": str(plugin_path)})

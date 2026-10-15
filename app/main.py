@@ -49,6 +49,7 @@ from core.components.cluster.api.cluster_api import cluster_router
 from core.components.cluster.logic.cluster_service import cluster_service
 from core.components.auth.api.users_api import users_router
 from core.components.plugins.api.plugins_api import plugins_router
+from core.components.plugins.api.nav_api import nav_router
 from core.components.settings.api.themes_api import themes_router
 from core.components.vault.api.vault_api import vault_api_router
 from core.components.sockets.api.socket_api import socket_router
@@ -508,6 +509,9 @@ app.include_router(users_router)
 # Plugin lifecycle and marketplace management.
 app.include_router(plugins_router)
 
+# Sidebar entries plugins register at runtime (core API >= 1.9).
+app.include_router(nav_router)
+
 # Theme management.
 app.include_router(themes_router)
 
@@ -800,6 +804,7 @@ async def startup_event():
     # suppresses on_event-registered handlers, which NiceGUI relies on).
     log.info("STARTUP: Lyndrix Core Engine is starting...")
     cluster_service.on_startup()
+    bus.bind_loop(asyncio.get_running_loop())  # emit() from worker threads hops onto this loop
     bus.emit("system:started", {})
 
 

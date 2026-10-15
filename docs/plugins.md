@@ -471,7 +471,10 @@ def setup(ctx):
 
 - `on_lease`: `acquired` fires when this instance obtains the lease, `lost` when a peer took it or
   the coordinator was unreachable for a full TTL — stop the work in `lost`. Leases are released on
-  `dispose()`.
+  `dispose()`. `ctx.release_lease(name)` (API 1.9) gives a wanted lease up at runtime — e.g. when a
+  setting excludes this instance from the work — and fires `lost` when it was held.
+- `ctx.emit` is thread-safe (core 1.7): a call from a worker thread (`asyncio.to_thread` code,
+  blocking Vault/DB helpers) is handed over to the application loop.
 - `ctx.lease(name)` is a one-shot lease for a piece of work; `ctx.is_leader`, `ctx.instance_id`,
   `ctx.cluster_size`, `ctx.roles`, `ctx.cluster_mode` for diagnostics and one-off tasks.
 - `placement="pinned:<role>"`: `setup()` runs only on instances with that role; the others answer
@@ -479,6 +482,35 @@ def setup(ctx):
 - Rules for cluster-safe plugins (idempotent locked DDL, tolerate MariaDB 1020 on concurrent
   writes, no in-process state peers need, standby-aware `health()`):
   [High Availability → For plugin developers](ha/plugin-development.md).
+
+## Navigation entries (API 1.9)
+
+A plugin whose pages are *data* — one entry per embedded external service, a per-site console, a
+saved dashboard — cannot declare them as `react_routes` in the manifest. It publishes sidebar
+entries at runtime instead:
+
+```python
+ctx.register_nav_entries([
+    {"id": "grafana", "label": "Grafana", "url": "https://grafana.example",
+     "icon": "insights", "open_mode": "iframe", "group": "Services",
+     "description": "Dashboards", "order": 10},
+])
+ctx.clear_nav_entries()       # same as register_nav_entries([])
+```
+
+- Each call **replaces** the plugin's previous set — always pass the complete list.
+- `url` is an absolute http(s) URL or a path on this origin; `open_mode` is `iframe` (the shell
+  embeds the page full-height at `/ext/<plugin>/<id>`) or `new_tab`; `group` names the sidebar
+  section (default `Services`); `icon` is a Material icon name.
+- Shells read `GET /api/nav`, which returns only entries of plugins the caller may see
+  (`plugin:<id>` grant, as in `/api/me/access`), and refetch on the `nav:changed` SSE topic.
+- Entries are **per instance**: register them from the shared database on every instance and
+  re-register when a peer announces a change (`ctx.emit(..., cluster=True)`). They never touch the
+  module registry, so the plugin set and its cluster fingerprint stay what is installed.
+- `dispose()` (disable/unload) removes the plugin's entries automatically.
+- Guard with `getattr(ctx, "register_nav_entries", None)` to stay loadable on older cores.
+
+Reference: `plugins/lyndrix-plugin-external-services` (`app/logic/routing.py`).
 
 ## Authentication extensions
 

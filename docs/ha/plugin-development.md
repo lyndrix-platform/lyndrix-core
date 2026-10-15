@@ -87,6 +87,10 @@ ctx.cluster_shard("probe", monitor_ids)                              # {instance
   `plugin:<id>:singleton` — use it when the plugin's background work is one unit.
 - `ctx.lease(name)` is a one-shot: it tries once for the TTL and releases on exit; if the keeper
   already holds the lease it reports `held=True` without touching it.
+- `ctx.release_lease(name)` (API ≥ 1.9) withdraws an `on_lease` interest at runtime. A held lease
+  is released at once, the plugin's `lost` callback fires (one "stop the work" path) and the
+  release is broadcast so a peer acquires it within about a second. Use it when a setting such as
+  monitoring's `probe_roles` excludes this instance — no plugin reload needed.
 
 ### Cluster events
 
@@ -94,6 +98,10 @@ ctx.cluster_shard("probe", monitor_ids)                              # {instance
 their local bus with `payload["_origin"] = <sender instance id>`. Use it for "my data changed,
 re-read it" — **never** to fan work out N times. Your own emit still reaches your own subscribers
 without `_origin`, so check it before reacting to avoid doing the work twice.
+
+`ctx.emit` may be called from a worker thread (core ≥ 1.7): the bus hands the call over to the
+application loop with `call_soon_threadsafe`, so subscribers — sync and async — always run on the
+loop. Older cores needed a manual `loop.call_soon_threadsafe` hop.
 
 ### Placement
 

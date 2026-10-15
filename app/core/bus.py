@@ -1,6 +1,7 @@
 import asyncio
 import inspect
-from typing import Dict, List, Callable, Set
+import threading
+from typing import Dict, List, Callable, Optional, Set
 from core.logger import get_logger, mask_secrets
 
 
@@ -10,6 +11,12 @@ class GlobalEventBus:
         self._subscriber_keys: Dict[str, Set[str]] = {}
         self.log = get_logger("Core:EventBus")
         self._active_tasks: Set[asyncio.Task] = set()
+        # The application loop and its thread, learned from the first emit() that
+        # runs on a loop (system:started). emit() from a worker thread
+        # (asyncio.to_thread writers, hvac/DB helpers) is handed over to this
+        # loop instead of calling asyncio.create_task() where there is none.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[int] = None
         # Topics that should not spam INFO logs
         self._noise_topics = ["system:metrics_update"]
         # Topics with sensitive payloads (never log data)
@@ -102,6 +109,24 @@ class GlobalEventBus:
             keys.discard(self._callback_key(callback))
         return removed
 
+    def bind_loop(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        """Remember the application loop (and its thread) emit() dispatches on.
+
+        Called automatically by the first emit() that runs on a loop; the
+        startup hook may call it explicitly. ``None`` forgets the binding
+        (tests that run several loops).
+        """
+        if loop is None:
+            self._loop, self._loop_thread = None, None
+            return
+        self._loop, self._loop_thread = loop, threading.get_ident()
+
+    def _off_loop(self) -> bool:
+        """True when called from a thread that is not the bound loop's thread."""
+        if self._loop is None or self._loop.is_closed():
+            return False
+        return threading.get_ident() != self._loop_thread
+
     def emit(self, topic: str, payload: dict = None, *, cluster: bool = False):
         """Dispatches an event to all subscribers, tracking async tasks.
 
@@ -110,9 +135,26 @@ class GlobalEventBus:
         allowlist are published regardless). A relayed event arrives on the
         peers' local buses with ``payload["_origin"] = <sender instance id>``
         and is never re-published. In ``single`` mode the flag is a no-op.
+
+        Thread-safe: an emit from a worker thread (``asyncio.to_thread`` code,
+        blocking Vault/DB helpers) is scheduled onto the application loop with
+        ``call_soon_threadsafe`` — subscribers always run on the loop, sync ones
+        included, and async ones get their task created where a loop exists.
         """
         if payload is None:
             payload = {}
+
+        if self._off_loop():
+            self._loop.call_soon_threadsafe(self._emit_on_loop, topic, payload, cluster)
+            return
+        if self._loop is None or self._loop.is_closed():
+            try:
+                self.bind_loop(asyncio.get_running_loop())
+            except RuntimeError:
+                pass  # no loop at all (unit tests, sync bootstrap) — dispatch inline
+        self._emit_on_loop(topic, payload, cluster)
+
+    def _emit_on_loop(self, topic: str, payload: dict, cluster: bool) -> None:
 
         if topic == "system:metrics_update":
             self.log.debug(f"METRICS: {topic}")

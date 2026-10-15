@@ -9,6 +9,7 @@ from core.bus import bus as global_bus
 from core.logger import get_logger
 from core.services import vault_instance
 from .models import ModuleManifest
+from .nav import nav_registry
 
 # Runtime phases a module may report via ``ctx.set_status``. ``blocking`` only
 # has an effect in the two transient phases.
@@ -326,6 +327,31 @@ class ModuleContext:
         """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""
         return _LeaseScope(self, self._lease_name(name), ttl)
 
+    def release_lease(self, name: str) -> bool:
+        """Stop contending for lease ``name`` registered with ``on_lease`` (API ≥ 1.9).
+
+        Drops this module's interest; if this instance holds the lease it is
+        released at once (a peer takes over on its next tick, the release is
+        broadcast so that happens within about a second) **and the module's
+        ``lost`` callback fires** so the one "stop the work" path runs. Use it
+        when a setting changed such that this instance must no longer run the
+        work (e.g. a narrowed ``probe_roles``) instead of asking for a plugin
+        reload. Returns ``True`` when an interest was registered.
+        """
+        full = self._lease_name(name)
+        mine = [entry for entry in self._leases if entry[0] == full]
+        if not mine:
+            return False
+        keeper = self._cluster().leases
+        for entry in mine:
+            self._leases.remove(entry)
+            try:
+                keeper.forget(full, acquired=entry[1], lost=entry[2], fire_lost=True)
+            except TypeError:  # keeper without fire_lost (should not happen in-tree)
+                keeper.forget(full, acquired=entry[1], lost=entry[2])
+        self.log.info("LEASE: gave up '%s'", full)
+        return True
+
     # --- WORK ASSIGNMENT / LOAD BALANCING (core API >= 1.8) ---
     # Ask the cluster which instances run a named workload and which share of a
     # key set is mine. Every instance computes the same answer locally (rendezvous
@@ -483,6 +509,11 @@ class ModuleContext:
             except Exception:
                 self.log.debug("DISPOSE: lease forget failed for '%s'", name, exc_info=True)
         self._leases.clear()
+        # Sidebar entries this module contributed disappear with it.
+        try:
+            nav_registry.clear(self.manifest.id)
+        except Exception:
+            self.log.debug("DISPOSE: nav clear failed", exc_info=True)
         # A disabled/unloaded module is not "starting" any more — never leave a
         # blocking status behind that would 503 the next incarnation's routes.
         self.reset_runtime()
@@ -552,6 +583,29 @@ class ModuleContext:
         from core.components.messaging.logic.gateway import messaging_gateway
         messaging_gateway.register(adapter)
         self.log.info("GATEWAY: Registered adapter '%s'.", adapter.provider_id)
+
+    # --- NAVIGATION ENTRIES (core API >= 1.9) ---
+
+    def register_nav_entries(self, entries: list) -> int:
+        """Publish sidebar entries for data this plugin manages (API ≥ 1.9).
+
+        Each entry is a dict ``{id, label, url, icon?, open_mode?, group?,
+        description?, order?}``: ``url`` is an absolute http(s) URL or a path on
+        this origin, ``open_mode`` is ``"iframe"`` (embedded full-page, default)
+        or ``"new_tab"``, ``group`` names the sidebar section (default
+        ``"Services"``). The call **replaces** this plugin's previous set — pass
+        the complete list each time (``[]`` removes everything). Shells read
+        ``GET /api/nav`` (filtered by the caller's plugin visibility) and refetch
+        on the ``nav:changed`` event. Entries are per instance; in a cluster
+        register them from the shared DB on every instance and re-register when
+        a peer announces a change. They are dropped automatically when the
+        plugin is disabled or unloaded. Returns the number of valid entries.
+        """
+        return nav_registry.register(self.manifest.id, entries)
+
+    def clear_nav_entries(self) -> None:
+        """Remove every sidebar entry this plugin registered."""
+        nav_registry.clear(self.manifest.id)
 
     # --- HTTP ROUTE REGISTRATION ---
 

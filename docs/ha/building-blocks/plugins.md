@@ -18,7 +18,18 @@ from the row's `installed_version` is upgraded (or rolled back) here as well, en
 applied without re-persisting, and a plugin that is loaded here but has no row any more is
 uninstalled here too.
 Reconcile installs are silent — only the instance that executed the operator's action announces
-the install. A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
+the install.
+
+**Who writes the version (core ≥ 1.7).** `installed_version` is *led* by exactly one party: the
+instance that executed the operator's install/upgrade/rollback (or the identical
+`LYNDRIX_PLUGINS_DESIRED` pin). Followers converging through the reconcile load and activate the
+files but never write the version; enable/disable only touches `is_active`; an instance whose
+loaded artifact differs from the row is behind and catches up, it never pulls the row to its own
+version. A local post-install verification failure auto-reverts the files on that instance only
+(`reverted_from`) and leaves the row alone, so the next reconcile retries the cluster's version.
+The verification itself waits up to 24 s for a plugin that is still bootstrapping. Before 1.7
+every activation wrote the loaded version back, and six instances mid-rollout rewrote the row in
+turns ("revert storm": every peer downgraded and upgraded after each other). A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
 right after the `LYNDRIX_PLUGINS_DESIRED` pass, so it serves every plugin before the first periodic
 pass; the periodic pass every five minutes catches missed events. The recorded version is
 downloaded as a tag in both spellings (`1.1.2` and `v1.1.2`). The preflight `plugin_artifacts`

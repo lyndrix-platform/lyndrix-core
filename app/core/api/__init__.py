@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.7
+Lyndrix Core Plugin API — Stable Surface v1.9
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -84,12 +84,31 @@ One code path for single and cluster mode::
     ctx.cluster_instances, ctx.has_live_role("runner")   # API >= 1.7.1: who is alive with which roles
     ctx.cluster_workers("probe", count=2, roles=["runner"])   # API >= 1.8: load balancing — which
     ctx.my_shard("probe", keys, count=2, roles=["runner"])    # instances run a workload / my share
+    ctx.release_lease("monitoring:prober")   # API >= 1.9: stop contending (fires ``lost`` when held)
+
+``ctx.emit`` is thread-safe since core 1.7: a call from a worker thread
+(``asyncio.to_thread`` code) is handed over to the application loop.
+
+Navigation entries (API 1.9)
+----------------------------
+A plugin whose pages are data (one entry per embedded service, console, …)
+publishes sidebar entries at runtime instead of manifest routes::
+
+    ctx.register_nav_entries([
+        {"id": "grafana", "label": "Grafana", "url": "https://grafana.example",
+         "icon": "insights", "open_mode": "iframe", "group": "Services"},
+    ])                     # replaces the plugin's previous set; [] removes all
+
+Shells read ``GET /api/nav`` (filtered by the caller's ``plugin:<id>`` grant)
+and refetch on ``nav:changed``; ``open_mode`` is ``iframe`` (embedded at
+``/ext/<plugin>/<id>``) or ``new_tab``. Entries are per instance — register
+them from the shared DB on every instance — and vanish with the plugin.
 
 Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.8.0"
+__api_version__ = "1.9.0"
 
 from typing import Any, Dict, Literal, Optional
 

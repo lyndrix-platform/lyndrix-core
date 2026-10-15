@@ -10,7 +10,8 @@
     "section_apps": "Apps",
     "section_system": "System",
     "plugin_inactive": "Plugin inactive",
-    "plugin_no_route": "No UI route configured"
+    "plugin_no_route": "No UI route configured",
+    "section_services": "Services"
   },
   "shell": {
     "open_nav": "Open navigation",
@@ -829,5 +830,11 @@
     "trusted_proxies": "Trusted proxies",
     "forwarded_seen": "X-Forwarded-For seen",
     "database": "Database"
+  },
+  "external": {
+    "open_new_tab": "Open in new tab",
+    "opens_new_tab": "This service opens in a new browser tab.",
+    "not_found": "This service is no longer registered.",
+    "blocked_hint": "Blank page? The service refuses to be embedded (X-Frame-Options / CSP) — open it in a new tab."
   }
 }

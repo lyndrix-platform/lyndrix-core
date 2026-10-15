@@ -83,29 +83,39 @@ class LeaseKeeper:
                 self._fire(acquired, name, "acquired")
         self._kick.set()
 
-    def forget(self, name: str, *, acquired: Callback = None, lost: Callback = None) -> None:
+    def forget(self, name: str, *, acquired: Callback = None, lost: Callback = None,
+               fire_lost: bool = False) -> None:
         """Drop a callback pair (or every interest in ``name`` when none given).
 
         When the last interest goes, a held lease is released so a peer can
-        take over immediately instead of after the TTL. The ``lost`` callback
-        is **not** fired for the removed pair — the owner is tearing down.
+        take over immediately instead of after the TTL. By default the ``lost``
+        callback is **not** fired for the removed pair — the owner is tearing
+        down. ``fire_lost=True`` (``ctx.release_lease``) fires it when the lease
+        was held, so the owner's single "stop the work" path runs and a peer
+        is told to take over at once.
         """
         entry = self._wanted.get(name)
         if entry is None:
             return
         if acquired is None and lost is None:
+            removed = list(entry.callbacks)
             entry.callbacks.clear()
         else:
+            removed = [cb for cb in entry.callbacks if cb == (acquired, lost)]
             entry.callbacks = [cb for cb in entry.callbacks if cb != (acquired, lost)]
+        was_held = name in self._held
         if not entry.callbacks:
             self._wanted.pop(name, None)
-            if name in self._held:
+            if was_held:
                 self._held.pop(name, None)
                 self._release_in_background(name)
                 self._notify(name, False)
+        if fire_lost and was_held:
+            for _acquired, lost_cb in removed:
+                self._fire(lost_cb, name, "lost")
 
     def _release_in_background(self, name: str) -> None:
-        coro = self._release_quietly(name)
+        coro = self._release_and_announce(name)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -211,6 +221,15 @@ class LeaseKeeper:
             await self._coordinator.release(name)
         except Exception as exc:
             log.debug("LEASE: quiet release of '%s' failed: %s", name, exc)
+
+    async def _release_and_announce(self, name: str) -> None:
+        """Release at the coordinator, then tell the peers so one of them
+        acquires the lease on the spot instead of on its next heartbeat."""
+        await self._release_quietly(name)
+        try:
+            bus.emit(RELEASED_TOPIC, {"name": name}, cluster=True)
+        except Exception:
+            log.debug("LEASE: release broadcast failed", exc_info=True)
 
     def _fire_all(self, name: str, event: str) -> None:
         entry = self._wanted.get(name)

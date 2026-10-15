@@ -122,3 +122,26 @@ def test_cluster_instances_describe_self_in_single_mode():
     assert set(me[0]["roles"]) == set(ctx.roles) and me[0]["alive"] is True
     assert ctx.has_live_role("api") is True
     assert ctx.has_live_role("no-such-role") is False
+
+
+def test_release_lease_fires_lost_and_frees_the_lease():
+    """API 1.9: a plugin gives a wanted lease up at runtime (e.g. narrowed
+    probe_roles) — its ``lost`` callback runs once and the lease is free."""
+    ctx = _ctx()
+    events = []
+    ctx.on_lease("test:release", acquired=lambda: events.append("acq"), lost=lambda: events.append("lost"))
+    try:
+        asyncio.run(cluster_service.leases.tick())
+        assert events == ["acq"] and ctx.holds_lease("test:release")
+        assert ctx.release_lease("test:release") is True
+        asyncio.run(asyncio.sleep(0.02))
+        assert events == ["acq", "lost"]
+        assert not cluster_service.leases.holds("test:release")
+        assert "test:release" not in cluster_service.leases.wanted
+        assert ctx.release_lease("test:release") is False   # nothing registered any more
+        # Wanting it again works like the first time.
+        ctx.on_lease("test:release", acquired=lambda: events.append("acq2"))
+        asyncio.run(cluster_service.leases.tick())
+        assert events == ["acq", "lost", "acq2"]
+    finally:
+        ctx.dispose()
