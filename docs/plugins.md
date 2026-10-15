@@ -502,8 +502,9 @@ ctx.clear_nav_entries()       # same as register_nav_entries([])
 - `url` is an absolute http(s) URL or a path on this origin; `open_mode` is `iframe` (the shell
   embeds the page full-height at `/ext/<plugin>/<id>`) or `new_tab`; `group` names the sidebar
   section (default `Services`); `icon` is a Material icon name.
-- Shells read `GET /api/nav`, which returns only entries of plugins the caller may see
-  (`plugin:<id>` grant, as in `/api/me/access`), and refetch on the `nav:changed` SSE topic.
+- Shells read `GET /api/nav` (`api:read`, like the plugin list), which returns only entries of
+  plugins the caller may see (`plugin:<id>` grant, as in `/api/me/access`), and refetch on the
+  `nav:changed` SSE topic.
 - Entries are **per instance**: register them from the shared database on every instance and
   re-register when a peer announces a change (`ctx.emit(..., cluster=True)`). They never touch the
   module registry, so the plugin set and its cluster fingerprint stay what is installed.
