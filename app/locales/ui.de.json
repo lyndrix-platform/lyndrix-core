@@ -752,6 +752,7 @@
     "retry_hint": "Anfragen werden mit 503 beantwortet und automatisch wiederholt.",
     "remote": "Remote",
     "panel_title_remote": "{{name}} läuft auf einer anderen Instanz",
+    "retry": "Erneut versuchen",
     "remote_hint": "Dieses Plugin ist an Instanzen mit der Rolle '{{role}}' gebunden. Öffne es über die Load-Balancer-Route, die auf diese Instanz zeigt."
   },
   "cluster": {

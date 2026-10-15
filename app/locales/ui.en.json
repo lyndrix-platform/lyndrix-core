@@ -752,6 +752,7 @@
     "retry_hint": "Requests are answered with 503 and retried automatically.",
     "remote": "Remote",
     "panel_title_remote": "{{name}} runs on another instance",
+    "retry": "Retry",
     "remote_hint": "This plugin is pinned to instances with the role '{{role}}'. Open it through the load balancer route that targets that instance."
   },
   "cluster": {
