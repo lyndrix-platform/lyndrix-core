@@ -82,12 +82,14 @@ One code path for single and cluster mode::
     async with ctx.lease("itsm:nightly") as held: ...   # one-shot lease
     ctx.is_leader, ctx.instance_id, ctx.cluster_size, ctx.roles, ctx.cluster_mode
     ctx.cluster_instances, ctx.has_live_role("runner")   # API >= 1.7.1: who is alive with which roles
+    ctx.cluster_workers("probe", count=2, roles=["runner"])   # API >= 1.8: load balancing — which
+    ctx.my_shard("probe", keys, count=2, roles=["runner"])    # instances run a workload / my share
 
 Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.7.1"
+__api_version__ = "1.8.0"
 
 from typing import Any, Dict, Literal, Optional
 

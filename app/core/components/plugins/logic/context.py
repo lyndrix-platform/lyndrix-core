@@ -326,6 +326,36 @@ class ModuleContext:
         """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""
         return _LeaseScope(self, self._lease_name(name), ttl)
 
+    # --- WORK ASSIGNMENT / LOAD BALANCING (core API >= 1.8) ---
+    # Ask the cluster which instances run a named workload and which share of a
+    # key set is mine. Every instance computes the same answer locally (rendezvous
+    # hashing over the live instance list), so no round trip and only the keys of
+    # a leaving/joining instance move. Recompute on ``cluster:changed``. At-least-
+    # once while heartbeat views differ — use a lease for exactly-once singletons.
+
+    def cluster_workers(self, name: str, count: int = 1, roles: list[str] | None = None) -> list[str]:
+        """The ``count`` live instances (optionally with one of ``roles``) that run ``name``."""
+        return self._cluster().assigner.workers(f"{self.manifest.id}:{name}", count, roles)
+
+    def is_worker(self, name: str, count: int = 1, roles: list[str] | None = None) -> bool:
+        """Is this instance one of the ``count`` workers of ``name``?"""
+        return self._cluster().assigner.is_worker(f"{self.manifest.id}:{name}", count, roles)
+
+    def cluster_shard(self, name: str, keys, count: int | None = None,
+                      roles: list[str] | None = None) -> dict[str, list]:
+        """Distribute ``keys`` over the workers of ``name`` → ``{instance_id: [keys]}``
+        (``count=None`` = every candidate)."""
+        return self._cluster().assigner.shard(f"{self.manifest.id}:{name}", keys, count, roles)
+
+    def my_shard(self, name: str, keys, count: int | None = None, roles: list[str] | None = None) -> list:
+        """The keys of ``keys`` this instance is responsible for. Example::
+
+            @ctx.subscribe("cluster:changed")
+            async def _rebalance(_):
+                svc.apply_assignment(ctx.my_shard("probe", svc.monitor_ids(), count=2, roles=["runner"]))
+        """
+        return self._cluster().assigner.my_shard(f"{self.manifest.id}:{name}", keys, count, roles)
+
     # --- EVENT BUS PROXY ---
 
     def subscribe(self, topic: str):

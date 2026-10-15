@@ -74,6 +74,11 @@ class ClusterService:
         self.leases.on_change = self._on_lease_change
         self.bridge = ClusterBridge(self.coordinator, self.instance_id)
         self.drain = DrainController(seconds=self.drain_seconds, on_drain=self._on_drain)
+        # Work assignment / load balancing for plugins (core API >= 1.8): which
+        # instances run a named workload, and which share of its keys is ours.
+        from .assignment import WorkAssigner
+
+        self.assigner = WorkAssigner(self)
 
         self.started = False
         self.start_error: Optional[str] = None
@@ -531,6 +536,7 @@ class ClusterService:
             "instances": [i.to_dict() for i in self._instances],
             "alive": len(alive),
             "leases": {"held": self.leases.held, "wanted": self.leases.wanted},
+            "work": self.assigner.report(),
             "preflight": {**self.preflight_summary(), "checks": self.preflight_results},
             "settings": {
                 "drain_seconds": self.drain_seconds,

@@ -53,6 +53,29 @@ async def _settings(payload):                            # instance when the ope
         svc.reload_settings()                            # re-read ctx.get_setting()/Vault here
 ```
 
+### Sharded work / load balancing (API ≥ 1.8)
+
+Work that can be spread over several instances — probing 200 hosts, polling 40 Docker hosts —
+does not need a lease per item. Ask the cluster which instances run a named workload and which
+share of the keys is yours:
+
+```python
+workers = ctx.cluster_workers("probe", count=2, roles=["runner"])   # ["docker-auto-runner", "…"]
+mine    = ctx.my_shard("probe", monitor_ids, count=2, roles=["runner"])  # my monitors
+ctx.is_worker("probe", count=2, roles=["runner"])                   # am I one of them?
+ctx.cluster_shard("probe", monitor_ids)                              # {instance_id: [ids]} over every candidate
+```
+
+- Every instance computes the **same answer locally** from the live instance list (rendezvous
+  hashing) — no round trip; only the keys of an instance that left or joined move.
+- `roles` filters the candidates (`None` = every live instance), draining instances are skipped,
+  `count` is capped by the live candidates; single mode answers with this instance.
+- Recompute on `cluster:changed` (membership) and apply the difference (start/stop work).
+  Results are at-least-once while heartbeat views differ for a few seconds — use a lease for
+  exactly-once singletons.
+- Settings → Cluster → *Work assignments* shows every workload asked about, its workers and
+  key counts.
+
 ### Leases
 
 - `acquired` fires when this instance obtains the lease (immediately in single mode), `lost`
