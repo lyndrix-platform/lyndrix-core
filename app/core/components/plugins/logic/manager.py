@@ -36,6 +36,8 @@ class ModuleManager:
         self._plugin_state_schema_ready = False
         # module_id → (failures, monotonic time of the next allowed install attempt)
         self._reconcile_install_backoff: dict = {}
+        # module_ids whose version upgrade (towards plugin_states) is in flight here
+        self._reconcile_upgrading: set = set()
         self._mounted_static_paths: set = set()
         # Per-module locks serialize reload/upgrade so two concurrent
         # plugin:files_changed events for the same plugin cannot interleave the
@@ -1008,6 +1010,10 @@ class ModuleManager:
                     entry = self.registry.get(mid)
                     if entry is None:
                         continue
+                # A peer upgraded (or rolled back) the plugin: plugin_states.installed_version
+                # moved while this instance still runs the old artifact → converge here too.
+                if row.get("repo_url") and await self._reconcile_version(mid, entry, row, plugin_service, trigger, summary):
+                    continue  # the upgrade path reloads + activates via plugin:files_changed
                 active_here = entry.get("status") in ("active", "initializing", "blocked", "remote")
                 if row["is_active"] and not active_here:
                     if self.toggle_module(mid, True, persist=False):
@@ -1045,6 +1051,33 @@ class ModuleManager:
             log.info(f"RECONCILE ({trigger}): {changed}")
             bus.emit("ui:needs_refresh", {"reason": "cluster plugin reconcile"})
         return summary
+
+    async def _reconcile_version(self, mid: str, entry: dict, row: dict, plugin_service, trigger: str, summary: dict) -> bool:
+        """Bring this instance's artifact to ``plugin_states.installed_version`` when
+        it differs from the loaded manifest (a peer upgraded or rolled back).
+        Returns True when an install was started — the caller skips the
+        enable/disable step, the reload after the swap applies the row's state."""
+        want = str(row.get("installed_version") or "").strip()
+        have = str(getattr(entry.get("manifest"), "version", "") or "").strip()
+        if not want or not have or want.lstrip("vV") == have.lstrip("vV"):
+            return False
+        if mid in self._reconcile_upgrading or not self._reconcile_install_allowed(mid):
+            return False
+        self._reconcile_upgrading.add(mid)
+        log.info(f"RECONCILE: '{mid}' runs {have} here, the cluster runs {want} — upgrading ({trigger}).")
+        try:
+            ok = await plugin_service.install_plugin(row["repo_url"], version=want, upgrade=True, notify=False)
+        except Exception as exc:
+            ok = False
+            log.error(f"RECONCILE: upgrade of '{mid}' to {want} failed: {exc}")
+        finally:
+            self._reconcile_upgrading.discard(mid)
+        if ok is False:
+            self._reconcile_install_failed(mid)
+        else:
+            self._reconcile_install_backoff.pop(mid, None)
+            summary.setdefault("upgraded", []).append(mid)
+        return True
 
     def get_manifests(self):
         return [entry["manifest"] for entry in self.registry.values()]

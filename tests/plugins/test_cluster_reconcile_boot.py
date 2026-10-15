@@ -106,3 +106,42 @@ def test_verify_still_fails_on_health_error_for_active_plugin():
     mgr = ModuleManager()
     mgr.registry["lyndrix.plugin.local"] = _entry("active")
     assert asyncio.run(mgr._verify_after_install("lyndrix.plugin.local")) is False
+
+
+# --- version drift: a peer upgraded → this instance follows ----------------------
+
+def _reconcile_env(monkeypatch, *, have: str, want: str, status: str = "remote"):
+    from core.components.database.logic import db_service
+    from core.components.plugins.logic import plugin_service as ps_mod
+
+    mgr = ModuleManager()
+    calls = []
+
+    async def fake_install(url, version="latest", upgrade=False, notify=True):
+        calls.append({"url": url, "version": version, "upgrade": upgrade, "notify": notify})
+        return True
+
+    monkeypatch.setattr(ps_mod.plugin_service, "install_plugin", fake_install)
+    monkeypatch.setattr(db_service.db_instance, "SessionLocal", object(), raising=False)
+    monkeypatch.setattr(db_service.db_instance, "is_connected", True, raising=False)
+    row = {"module_id": "lyndrix.plugin.x", "is_active": True, "installed_version": want,
+           "desired_version": want, "repo_url": "https://github.com/lyndrix-platform/lyndrix-plugin-x"}
+    monkeypatch.setattr(mgr, "_load_plugin_states", lambda: [row])
+    manifest = types.SimpleNamespace(type="PLUGIN", version=have, id="lyndrix.plugin.x")
+    mgr.registry["lyndrix.plugin.x"] = {"status": status, "manifest": manifest, "module": None,
+                                        "context": None, "persisted": True}
+    return mgr, calls
+
+
+def test_peer_upgrade_is_followed(monkeypatch):
+    mgr, calls = _reconcile_env(monkeypatch, have="1.3.0", want="1.4.0")
+    summary = asyncio.run(mgr.reconcile_cluster_state(trigger="test"))
+    assert calls == [{"url": "https://github.com/lyndrix-platform/lyndrix-plugin-x", "version": "1.4.0",
+                      "upgrade": True, "notify": False}]
+    assert summary.get("upgraded") == ["lyndrix.plugin.x"]
+
+
+def test_same_version_in_either_spelling_is_left_alone(monkeypatch):
+    mgr, calls = _reconcile_env(monkeypatch, have="1.4.0", want="v1.4.0", status="active")
+    asyncio.run(mgr.reconcile_cluster_state(trigger="test"))
+    assert calls == []
