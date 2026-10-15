@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from config import settings
-from core.theming.loader import load_theme_pack
+from core.theming.loader import _THEME_ID_RE, load_theme_pack
 from core.theming.models import ThemePack
 from core.theming.schema import TOKEN_VALUE_VALIDATORS
 
@@ -175,14 +175,21 @@ class ThemeEngine:
     def theme_dir(self, theme_id: str) -> Path:
         """Directory of ``theme_id``: an uploaded theme (shared storage) wins
         over a built-in one of the same id; unknown ids resolve to the built-in
-        path so callers get a consistent "not found" there."""
+        path so callers get a consistent "not found" there. Raises ``ValueError``
+        for anything but a single safe path component (``[A-Za-z0-9_-]+``) —
+        ids come straight from URLs and file names."""
+        if not _THEME_ID_RE.match(theme_id or ""):
+            raise ValueError(f"Invalid theme_id: {theme_id!r}")
         candidate = self.user_dir / theme_id
         if (candidate / "tokens.json").exists():
             return candidate
         return self.base_dir / theme_id
 
     def theme_exists(self, theme_id: str) -> bool:
-        return (self.theme_dir(theme_id) / "tokens.json").exists()
+        try:
+            return (self.theme_dir(theme_id) / "tokens.json").exists()
+        except ValueError:
+            return False
 
     def resolve_theme(self, theme_id: str | None = None) -> ThemePack:
         active_id = theme_id or settings.DEFAULT_THEME_ID

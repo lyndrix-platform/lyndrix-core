@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from core.api.security import ApiIdentity, require_permission
 from core.logger import get_logger
+from core.theming.loader import _THEME_ID_RE
 
 log = get_logger("Core:ThemesAPI")
 
@@ -22,8 +23,16 @@ def _engine():
 
 
 def _theme_dir(theme_id: str) -> Path:
-    """Built-in (image) or uploaded (shared ``STORAGE_DIR/themes``) theme directory."""
-    return _engine().theme_dir(theme_id)
+    """Built-in (image) or uploaded (shared ``STORAGE_DIR/themes``) theme directory.
+
+    404 for anything but a single safe id — the engine validates against
+    ``[A-Za-z0-9_-]+``, so a traversal attempt never touches the filesystem."""
+    if not _is_safe_component(theme_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return _engine().theme_dir(theme_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Not found")
 
 # Allowed image extensions for theme background assets (lowercase) → media type.
 _IMAGE_MEDIA_TYPES = {
@@ -152,7 +161,7 @@ async def upload_theme(
         raise HTTPException(status_code=422, detail="No file provided")
 
     theme_id = Path(file.filename).stem
-    if not theme_id or "/" in theme_id or theme_id.startswith("."):
+    if not _is_safe_component(theme_id) or not _THEME_ID_RE.match(theme_id):
         raise HTTPException(status_code=422, detail="Invalid theme ID derived from filename")
     if theme_id == "default":
         raise HTTPException(status_code=400, detail="Cannot overwrite the default theme")
@@ -220,6 +229,8 @@ async def delete_theme(
 ):
     if theme_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete the default theme")
+    if not _is_safe_component(theme_id) or not _THEME_ID_RE.match(theme_id):
+        raise HTTPException(status_code=404, detail=f"Theme '{theme_id}' not found")
 
     dest = _engine().user_dir / theme_id
     if not dest.exists():
