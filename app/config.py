@@ -212,6 +212,15 @@ class Settings(BaseSettings):
     # hint, leases are released and the process exits. Default: 0 in single
     # mode (today's behaviour), 10 in cluster mode.
     LYNDRIX_DRAIN_SECONDS: Optional[int] = None
+    # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
+    # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
+    # UI shows any instance's log from any instance; the leader keeps
+    # RETENTION_HOURS and at most MAX_PER_INSTANCE lines per instance.
+    LYNDRIX_LOG_DB_ENABLED: bool = True
+    LYNDRIX_LOG_DB_LEVEL: str = "INFO"
+    LYNDRIX_LOG_DB_EXCLUDE: str = "uvicorn.access"
+    LYNDRIX_LOG_DB_RETENTION_HOURS: int = 24
+    LYNDRIX_LOG_DB_MAX_PER_INSTANCE: int = 5000
     # Recycle pooled DB connections after this many seconds (proxies such as
     # MaxScale drop idle connections; 0 = never).
     DB_POOL_RECYCLE_SECONDS: int = 300

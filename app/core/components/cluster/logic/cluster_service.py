@@ -179,6 +179,13 @@ class ClusterService:
             self._hb_task = bus.create_tracked_task(self._heartbeat_loop(), name="cluster:heartbeat")
         self.started = True
         self.start_error = None
+        # Central log: ship this instance's log lines to the shared table (both modes).
+        try:
+            from .log_store import log_store
+
+            log_store.start(self.instance_id, lambda: self.is_leader)
+        except Exception:
+            log.debug("CLUSTER: log store not started", exc_info=True)
         log.info("CLUSTER: coordinator '%s' online (leader: %s)", self.driver, self.leader_id or "pending")
         self._emit_changed("started")
         if self.preflight_at is not None:

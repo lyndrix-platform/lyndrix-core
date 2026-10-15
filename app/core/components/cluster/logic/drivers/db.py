@@ -128,7 +128,10 @@ class DbCoordinator:
         """
         from core.components.database.logic.db_service import Base, db_instance
 
-        tables = [ClusterInstance.__table__, ClusterLease.__table__, ClusterKV.__table__, ClusterEvent.__table__]
+        from ..models import ClusterLog
+
+        tables = [ClusterInstance.__table__, ClusterLease.__table__, ClusterKV.__table__, ClusterEvent.__table__,
+                  ClusterLog.__table__]
         engine = self._engine_getter()
         with db_instance.advisory_lock("lyndrix_bootstrap", timeout=60):
             try:

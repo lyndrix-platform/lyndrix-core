@@ -60,6 +60,7 @@ nav:
           - Shared storage: ha/building-blocks/storage.md
           - Plugin artifacts & placement: ha/building-blocks/plugins.md
           - Frontend: ha/building-blocks/frontend.md
+          - Central log: ha/building-blocks/logs.md
       - Docker:
           - Overview & host layouts: ha/docker/index.md
           - The separate load balancer: ha/docker/load-balancer.md

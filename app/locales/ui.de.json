@@ -644,7 +644,12 @@
     "title": "Logs",
     "pause": "Pause",
     "resume": "Live",
-    "empty": "Noch keine Logzeilen für diese Quelle erfasst."
+    "empty": "Noch keine Logzeilen für diese Quelle erfasst.",
+    "all_sources": "alle Quellen",
+    "instance": "Instanz",
+    "local": "Diese Instanz (live)",
+    "all_instances": "Alle Instanzen",
+    "empty_store": "Noch keine gespeicherten Log-Zeilen für diese Auswahl."
   },
   "plugins_config": {
     "picker_title": "Gewünschte Plugins",
@@ -789,6 +794,8 @@
     "no_leases": "Derzeit wird keine Lease gehalten.",
     "release": "Freigeben",
     "release_hint": "Lease abgeben — eine andere Instanz übernimmt sie beim nächsten Heartbeat.",
+    "logs": "Logs",
+    "logs_hint": "Log dieser Instanz öffnen (gemeinsamer Log-Speicher)",
     "released": "Lease {{name}} freigegeben.",
     "not_held": "Lease {{name}} wurde nicht gehalten.",
     "wanted_here": "Auf dieser Instanz gewünscht",

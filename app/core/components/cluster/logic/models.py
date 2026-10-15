@@ -4,11 +4,11 @@ All timestamps are naive UTC **taken from the database clock** — instances nev
 compare their own wall clock against these columns, so clock drift between
 instances cannot steal or extend a lease.
 """
-from sqlalchemy import BigInteger, Column, DateTime, Integer, JSON, String
+from sqlalchemy import BigInteger, Column, DateTime, Integer, JSON, String, Text
 
 from core.components.database.logic.db_service import Base
 
-CLUSTER_TABLES = ("cluster_instances", "cluster_leases", "cluster_kv", "cluster_events")
+CLUSTER_TABLES = ("cluster_instances", "cluster_leases", "cluster_kv", "cluster_events", "cluster_logs")
 
 
 class ClusterInstance(Base):
@@ -59,3 +59,20 @@ class ClusterEvent(Base):
     payload = Column(JSON, nullable=True)
     origin = Column(String(100), nullable=False)
     created_at = Column(DateTime, nullable=False, index=True)
+
+
+class ClusterLog(Base):
+    """Central log: every instance ships its recent log lines here so the UI can
+    show the log of *any* instance (or all of them merged) from whichever
+    instance answers the request. The in-memory ring buffer stays the fast path
+    for the local instance; this table survives pod restarts and is pruned by
+    the leader (age + per-instance cap, see LYNDRIX_LOG_DB_*)."""
+
+    __tablename__ = "cluster_logs"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    instance_id = Column(String(100), nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, index=True)
+    source = Column(String(150), nullable=False, index=True)
+    level = Column(String(10), nullable=False)
+    message = Column(Text, nullable=False)

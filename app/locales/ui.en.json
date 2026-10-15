@@ -644,7 +644,12 @@
     "title": "Logs",
     "pause": "Pause",
     "resume": "Live",
-    "empty": "No log lines captured for this source yet."
+    "empty": "No log lines captured for this source yet.",
+    "all_sources": "all sources",
+    "instance": "Instance",
+    "local": "This instance (live)",
+    "all_instances": "All instances",
+    "empty_store": "No stored log lines for this selection yet."
   },
   "plugins_config": {
     "picker_title": "Desired plugins",
@@ -789,6 +794,8 @@
     "no_leases": "No leases are held right now.",
     "release": "Release",
     "release_hint": "Hand the lease over — another instance takes it on its next heartbeat.",
+    "logs": "Logs",
+    "logs_hint": "Open this instance's log (shared log store)",
     "released": "Lease {{name}} released.",
     "not_held": "Lease {{name}} was not held.",
     "wanted_here": "Wanted on this instance",

@@ -18,6 +18,9 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `DB_HOST` | `db` | 0 | the **single-writer endpoint** (MaxScale/ProxySQL/Service); the preflight warns when it is a Galera node addressed directly |
 | `DB_ALLOW_DIRECT_NODE` | `false` | 2 | silence that warning on purpose |
 | `DB_POOL_RECYCLE_SECONDS` | `300` | 1 | recycle pooled connections before a proxy drops them (0 = never) |
+| `LYNDRIX_LOG_DB_ENABLED` | `true` | 1 | ship this instance's log lines to the shared `cluster_logs` table ([central log](building-blocks/logs.md)) |
+| `LYNDRIX_LOG_DB_LEVEL` · `LYNDRIX_LOG_DB_EXCLUDE` | `INFO` · `uvicorn.access` | 2 | minimum level / excluded logger names (trailing `*` = prefix) |
+| `LYNDRIX_LOG_DB_RETENTION_HOURS` · `LYNDRIX_LOG_DB_MAX_PER_INSTANCE` | `24` · `5000` | 2 | the leader prunes by age and per-instance cap |
 | `DB_STATEMENT_TIMEOUT_SECONDS` | `60` | 0 | per-connection statement cap (API 1.5) |
 | `VAULT_URL` | `http://vault:8200` | 0 | load-balanced or active Vault endpoint |
 | `VAULT_NODES` | — | 2 | comma-separated list of every Vault node; today only health-checked by the preflight |

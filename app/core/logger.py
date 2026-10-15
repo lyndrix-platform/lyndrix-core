@@ -159,6 +159,18 @@ def setup_logging():
     memory_handler.setLevel(logging.DEBUG)
     root_logger.addHandler(memory_handler)
 
+    # 4. CLUSTER HANDLER — buffers lines for the shared cluster_logs table so the
+    # UI can show every instance's log from any instance (shipped once the DB is
+    # connected; see core/components/cluster/logic/log_store.py). INFO+ by default.
+    try:
+        from core.components.cluster.logic.log_store import cluster_log_handler
+
+        cluster_log_handler.setFormatter(formatter)
+        cluster_log_handler.setLevel(logging.INFO)
+        root_logger.addHandler(cluster_log_handler)
+    except Exception as exc:  # pragma: no cover - import order in exotic setups
+        logging.getLogger("Core:Logger").debug(f"cluster log handler not attached: {exc}")
+
     # Quiet down external loggers
     silent_loggers = ["uvicorn", "uvicorn.access", "sqlalchemy.engine", "hvac", "urllib3", "nicegui", "httpx"]
     for name in silent_loggers:
