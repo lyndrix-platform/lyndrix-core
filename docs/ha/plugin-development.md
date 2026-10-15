@@ -46,6 +46,11 @@ ctx.cluster_mode       # "single" | "cluster"
 ctx.cluster_instances  # [{"instance_id", "hostname", "roles", "alive", "is_self"}, ...] (API ≥ 1.7.1)
 ctx.has_live_role("runner")   # does any live instance carry the role? → report "no executor online"
 ctx.emit("myplugin:items_changed", {...}, cluster=True)   # reaches every instance
+
+@ctx.subscribe("plugin:settings_changed")                 # core ≥ 1.5.1, bridged: fires on every
+async def _settings(payload):                            # instance when the operator saves settings
+    if payload.get("plugin_id") == manifest.id:          # ({"plugin_id", "keys", "by"} — never values)
+        svc.reload_settings()                            # re-read ctx.get_setting()/Vault here
 ```
 
 ### Leases

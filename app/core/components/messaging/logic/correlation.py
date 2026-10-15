@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from pydantic import BaseModel
+from sqlalchemy import update
 
 from core.components.database.logic.db_service import db_instance
 from core.components.messaging.model.schemas import InboundMessage
@@ -138,38 +139,101 @@ class CorrelationStore:
         await asyncio.to_thread(_write)
         return pa
 
+    @staticmethod
+    def _row_to_action(record: PendingActionRecord) -> PendingAction:
+        return PendingAction(
+            correlation_id=UUID(record.correlation_id),
+            source_plugin_id=record.source_plugin_id,
+            resume_topic=record.resume_topic,
+            state_snapshot=record.state_json or {},
+            expires_at=record.expires_at,
+        )
+
     async def resolve(
         self, correlation_id: UUID, response: InboundMessage
     ) -> PendingAction | None:
-        """Mark a correlation as resolved; remove from cache and update DB."""
-        key = str(correlation_id)
-        pa  = self._cache.pop(key, None)
-        if pa is None:
-            log.warning("CorrelationStore.resolve: unknown correlation_id %s", key)
-            return None
+        """Mark a correlation as resolved — exactly once, cluster-wide.
 
-        # Update the DB row off the event loop (sync SQLAlchemy).
-        def _update() -> None:
+        The message may have been sent by another core instance (its cache has
+        the entry, ours does not), and the provider may deliver the click twice or
+        to two instances. The database row is therefore the arbiter: one
+        conditional ``UPDATE … WHERE resolved_at IS NULL`` — whoever gets
+        ``rowcount == 1`` handles the action, everyone else drops it. The local
+        cache only speeds up the common single-instance path.
+        """
+        key = str(correlation_id)
+        cached = self._cache.pop(key, None)
+
+        def _claim() -> tuple[str, PendingAction | None]:
             session = self._session()
             if not session:
-                return
+                return "nodb", None
             try:
+                now = datetime.now(timezone.utc)
+                res = session.execute(
+                    update(PendingActionRecord)
+                    .where(
+                        PendingActionRecord.correlation_id == key,
+                        PendingActionRecord.resolved_at.is_(None),
+                        PendingActionRecord.expires_at > now,
+                    )
+                    .values(resolved_at=now)
+                )
+                session.commit()
+                if res.rowcount != 1:
+                    return "lost", None
                 record = session.get(PendingActionRecord, key)
-                if record:
-                    record.resolved_at = datetime.now(timezone.utc)
-                    session.commit()
+                return "won", (self._row_to_action(record) if record else None)
             except Exception as exc:
-                log.warning("CorrelationStore.resolve: DB update failed: %s", exc)
+                log.warning("CorrelationStore.resolve: DB claim failed: %s", exc)
                 session.rollback()
+                return "error", None
             finally:
                 session.close()
 
-        await asyncio.to_thread(_update)
-        return pa
+        status, from_db = await asyncio.to_thread(_claim)
+        if status == "won":
+            return from_db or cached
+        if status == "lost":
+            if cached is not None:
+                log.info("CorrelationStore.resolve: %s was already resolved on another instance.", key)
+            else:
+                log.warning("CorrelationStore.resolve: unknown or expired correlation_id %s", key)
+            return None
+        # No database (tests, DB blip): fall back to the local cache.
+        if cached is None:
+            log.warning("CorrelationStore.resolve: unknown correlation_id %s", key)
+        return cached
 
     async def get(self, correlation_id: UUID) -> PendingAction | None:
-        """Look up a pending action without resolving it."""
-        return self._cache.get(str(correlation_id))
+        """Look up a pending action without resolving it (cache, then database —
+        the message may have been sent from another instance)."""
+        key = str(correlation_id)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        def _read() -> PendingAction | None:
+            session = self._session()
+            if not session:
+                return None
+            try:
+                record = session.get(PendingActionRecord, key)
+                if not record or record.resolved_at is not None:
+                    return None
+                expires = record.expires_at
+                if expires is not None and expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires is not None and expires <= datetime.now(timezone.utc):
+                    return None
+                return self._row_to_action(record)
+            except Exception as exc:
+                log.debug("CorrelationStore.get: DB read failed: %s", exc)
+                return None
+            finally:
+                session.close()
+
+        return await asyncio.to_thread(_read)
 
     async def expire_stale(self) -> int:
         """Remove expired entries from cache and DB. Returns count removed."""

@@ -441,6 +441,12 @@ async def update_plugin_settings(
         raise HTTPException(status_code=503, detail="Vault unavailable — settings were not persisted")
 
     log.info(f"API: Settings updated for '{plugin_id}' by '{identity.username}'.")
+    # Every instance (this one included) re-reads the plugin's settings — the
+    # values live in Vault, but a plugin that cached them at boot would otherwise
+    # keep the old ones until its next restart. Bridged topic; the payload never
+    # carries the values themselves.
+    bus.emit("plugin:settings_changed", {"plugin_id": plugin_id, "keys": list(coerced.keys()),
+                                         "by": identity.username}, cluster=True)
     return {"status": "ok", "plugin_id": plugin_id, "saved": list(coerced.keys())}
 
 
