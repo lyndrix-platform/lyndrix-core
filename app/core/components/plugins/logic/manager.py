@@ -414,37 +414,56 @@ class ModuleManager:
         failed/degraded state, and — if it implements one — its ``health(ctx)``
         must not report ``error``. A plugin with no health() passes on a clean
         load+setup."""
-        entry = self.registry.get(module_id)
-        if not entry:
-            log.warning(f"VERIFY: '{module_id}' is not loaded after install.")
-            return False
-        status = entry.get("status")
-        if status in ("failed", "degraded"):
-            log.warning(f"VERIFY: '{module_id}' is '{status}' after install.")
-            return False
-        if status == "remote":
-            # Pinned to a role this instance does not have: setup() never ran
-            # here, so health() would only report "not initialized". The files
-            # loaded and the manifest parsed — that is all this instance can verify.
-            log.info(f"VERIFY: '{module_id}' is pinned elsewhere (remote) — artifact verified, health skipped.")
-            return True
-        health_fn = getattr(entry.get("module"), "health", None)
-        if not callable(health_fn):
-            return True
-        try:
-            result = health_fn(entry.get("context"))
-            if inspect.isawaitable(result):
-                result = await result
-            if getattr(result, "status", "ok") == "error":
-                log.warning(
-                    f"VERIFY: health() reported 'error' for '{module_id}': "
-                    f"{getattr(result, 'details', {})}"
-                )
+        # A plugin may still be bootstrapping right after the swap (the reload is
+        # asynchronous; schema creation runs in the background on cluster-ready
+        # plugins; Vault not yet hydrated, …). One early "not loaded" or "error"
+        # must not revert a good upgrade — in a cluster that revert used to
+        # propagate to every instance through plugin_states. Give it a grace window.
+        pending = "not loaded"
+        for attempt in range(self._VERIFY_HEALTH_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(self._VERIFY_HEALTH_PAUSE_S)
+            entry = self.registry.get(module_id)
+            if not entry:
+                pending = "not loaded"
+                continue
+            status = entry.get("status")
+            if status in ("failed", "degraded"):
+                log.warning(f"VERIFY: '{module_id}' is '{status}' after install.")
                 return False
-            return True
-        except Exception as exc:
-            log.error(f"VERIFY: health() raised for '{module_id}': {exc}", exc_info=True)
-            return False
+            if status == "remote":
+                # Pinned to a role this instance does not have: setup() never ran
+                # here, so health() would only report "not initialized". The files
+                # loaded and the manifest parsed — that is all this instance can verify.
+                log.info(f"VERIFY: '{module_id}' is pinned elsewhere (remote) — artifact verified, health skipped.")
+                return True
+            if status == "initializing":
+                pending = "initializing"
+                continue
+            health_fn = getattr(entry.get("module"), "health", None)
+            if not callable(health_fn):
+                return True
+            try:
+                result = health_fn(entry.get("context"))
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:
+                log.error(f"VERIFY: health() raised for '{module_id}': {exc}", exc_info=True)
+                return False
+            if getattr(result, "status", "ok") != "error":
+                return True
+            pending = f"health error {getattr(result, 'details', {}) or {}}"
+        log.warning(
+            f"VERIFY: '{module_id}' did not become healthy within "
+            f"{self._VERIFY_HEALTH_ATTEMPTS * self._VERIFY_HEALTH_PAUSE_S:.0f}s "
+            f"({self._VERIFY_HEALTH_ATTEMPTS} checks): {pending}"
+        )
+        return False
+
+    # Post-install health gate: checks × pause = grace window for plugins whose
+    # bootstrap (DDL under the cluster lock, Vault reads) runs in the background.
+    _VERIFY_HEALTH_ATTEMPTS = 8
+    _VERIFY_HEALTH_PAUSE_S = 3.0
 
     async def _auto_revert(self, module_name: str, module_id):
         """Restore the retained previous version after a failed upgrade
@@ -460,6 +479,9 @@ class ModuleManager:
             f"AUTO-REVERT: verification failed for '{module_name}'; restoring previous version."
         )
         prev_version = plugin_service.previous_version(module_name)
+        failed_version = None
+        if module_id and module_id in self.registry:
+            failed_version = getattr(self.registry[module_id].get("manifest"), "version", None)
         # Drop the broken version from memory before swapping files back.
         if module_id and module_id in self.registry:
             self.unload_module(module_id)
@@ -469,6 +491,13 @@ class ModuleManager:
         importlib.invalidate_caches()
         self.load_module(module_name, is_plugin=True)
         restored_id = self._find_plugin_id_by_folder(module_name) or module_id
+        # Cluster: a LOCAL verification failure must not rewrite plugin_states — the
+        # row is the version the cluster was asked to run, and every other instance
+        # would otherwise follow this instance's downgrade. The flag keeps the row
+        # writers below from moving installed_version; the reconcile retries the
+        # upgrade here later (with the usual install back-off).
+        if restored_id and restored_id in self.registry and failed_version:
+            self.registry[restored_id]["reverted_from"] = failed_version
         if restored_id and db_instance.is_connected:
             await self._activate_saved_plugins()
         plugin_service._record_history(
@@ -660,11 +689,13 @@ class ModuleManager:
                     session.add(db_state)
                 else:
                     db_state.is_active = is_active
-                    db_state.installed_version = manifest.version
-                    db_state.desired_version = manifest.version
+                    if not reverted_from:
+                        db_state.installed_version = manifest.version
+                        db_state.desired_version = manifest.version
                     db_state.repo_url = manifest.repo_url or db_state.repo_url
                 session.commit()
 
+        reverted_from = self.registry[module_id].get("reverted_from")
         try:
             self._retry_state_write(_tx)
             self.registry[module_id]["persisted"] = True
@@ -748,7 +779,8 @@ class ModuleManager:
                     db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
                     if not db_state:  # pragma: no cover - inserted above; defensive
                         continue
-                    if db_state.installed_version != manifest.version:
+                    # A locally reverted artifact never moves the cluster's version down.
+                    if db_state.installed_version != manifest.version and not entry.get("reverted_from"):
                         db_state.installed_version = manifest.version
                     if manifest.repo_url and db_state.repo_url != manifest.repo_url:
                         db_state.repo_url = manifest.repo_url

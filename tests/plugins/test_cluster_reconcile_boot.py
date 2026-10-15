@@ -145,3 +145,71 @@ def test_same_version_in_either_spelling_is_left_alone(monkeypatch):
     mgr, calls = _reconcile_env(monkeypatch, have="1.4.0", want="v1.4.0", status="active")
     asyncio.run(mgr.reconcile_cluster_state(trigger="test"))
     assert calls == []
+
+
+# --- post-install gate tolerates a plugin that is still bootstrapping ---------------
+
+def test_verify_waits_for_a_bootstrapping_plugin(monkeypatch):
+    mgr = ModuleManager()
+    monkeypatch.setattr(ModuleManager, "_VERIFY_HEALTH_PAUSE_S", 0.01)
+    calls = {"n": 0}
+
+    class _Health:
+        def __init__(self, status):
+            self.status = status
+            self.details = {"reason": "tables_not_initialized"}
+
+    def health(ctx):
+        calls["n"] += 1
+        return _Health("error" if calls["n"] < 3 else "ok")  # ready on the third check
+
+    module = types.SimpleNamespace(health=health)
+    mgr.registry["lyndrix.plugin.boot"] = {"status": "active", "module": module, "context": None,
+                                           "manifest": types.SimpleNamespace(type="PLUGIN", version="0.2.0")}
+    assert asyncio.run(mgr._verify_after_install("lyndrix.plugin.boot")) is True
+    assert calls["n"] == 3
+
+
+def test_verify_still_fails_when_error_persists(monkeypatch):
+    mgr = ModuleManager()
+    monkeypatch.setattr(ModuleManager, "_VERIFY_HEALTH_PAUSE_S", 0.01)
+    monkeypatch.setattr(ModuleManager, "_VERIFY_HEALTH_ATTEMPTS", 3)
+    mgr.registry["lyndrix.plugin.bad"] = _entry("active")  # health() always "error"
+    assert asyncio.run(mgr._verify_after_install("lyndrix.plugin.bad")) is False
+
+
+# --- a local revert must not move plugin_states (the cluster's version) ---------------
+
+def test_persist_state_keeps_row_version_after_a_local_revert(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from core.components.database.logic import db_service
+    from core.components.plugins.logic.models import PluginState
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    PluginState.__table__.create(bind=engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(db_service.db_instance, "SessionLocal", Session, raising=False)
+    monkeypatch.setattr(db_service.db_instance, "is_connected", True, raising=False)
+    monkeypatch.setattr(db_service.db_instance, "engine", engine, raising=False)
+    with Session() as s:
+        s.add(PluginState(module_id="lyndrix.plugin.r", is_active=True, installed_version="0.2.0",
+                          desired_version="0.2.0", repo_url="https://x/y"))
+        s.commit()
+
+    mgr = ModuleManager()
+    monkeypatch.setattr(mgr, "_ensure_plugin_state_schema", lambda: None)
+    manifest = types.SimpleNamespace(type="PLUGIN", version="0.1.0", id="lyndrix.plugin.r", repo_url="https://x/y")
+    mgr.registry["lyndrix.plugin.r"] = {"status": "active", "manifest": manifest, "module": None, "context": None,
+                                        "reverted_from": "0.2.0"}
+    mgr._persist_plugin_state("lyndrix.plugin.r", True)
+    with Session() as s:
+        row = s.get(PluginState, "lyndrix.plugin.r")
+        assert row.installed_version == "0.2.0"          # the cluster still wants 0.2.0
+    # without the flag the same call records the loaded version
+    mgr.registry["lyndrix.plugin.r"].pop("reverted_from")
+    mgr._persist_plugin_state("lyndrix.plugin.r", True)
+    with Session() as s:
+        assert s.get(PluginState, "lyndrix.plugin.r").installed_version == "0.1.0"
