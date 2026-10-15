@@ -245,6 +245,8 @@ know about placement — orchestrator ≥ 1.3.0, monitoring ≥ 1.4.0).
    Then scale out; each new pod does the same at boot.
 
 Leave `LYNDRIX_PLUGINS_DESIRED` unset in a migrated cluster — the database already says what to
-run. A pinned plugin (orchestrator) installs fine but answers 503 `remote` and the preflight
-`roles` check fails until an instance with that role joins; the old Docker host can be that
-instance (same database and Vault, `LYNDRIX_INSTANCE_ROLES=runner`).
+run. The IaC Orchestrator (≥ 1.4) runs its control plane on every pod and executes only on
+instances with the `runner` role; the old Docker host can be that instance (same database and
+Vault, `LYNDRIX_INSTANCE_ROLES=api,runner`). Until a runner joins, the plugin reports `degraded`
+and queues jobs. (Orchestrator 1.3 was `pinned:runner`: 503 `remote` on the pods and a failing
+preflight `roles` check instead.)

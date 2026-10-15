@@ -45,7 +45,8 @@ Shipped plugins:
 | Plugin | Placement | Behaviour in a cluster |
 |---|---|---|
 | State Monitoring | `any` + lease `monitoring:prober` | every instance serves the API; exactly one probes; monitor changes are announced with `monitoring:monitors_changed` (`cluster=True`) |
-| IaC Orchestrator | `pinned:runner` | runs on the `runner` instance only; others answer 503 remote; route its paths there |
+| IaC Orchestrator (≥ 1.4) | `any` + role `runner` | control plane (API, UI data, webhooks, job queue, logs) on every instance from the shared DB; only instances with the `runner` role claim and execute jobs (Docker host) — no LB route needed; `degraded` while no runner is alive |
+| IaC Orchestrator (1.3) | `pinned:runner` | runs on the `runner` instance only; others answer 503 remote; route its paths there |
 | others | `any` | run on every instance; those with per-instance state (Docker Manager host list, Meeting Bingo games, Discord message map) are on the roadmap |
 
 ## Lyndrix settings
