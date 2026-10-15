@@ -15,6 +15,16 @@ log = logging.getLogger("Core:ThemeEngine")
 THEMES_BASE_DIR = Path(__file__).resolve().parents[2] / "assets" / "themes"
 
 
+def user_themes_dir() -> Path:
+    """Where uploaded themes live: ``STORAGE_DIR/themes``.
+
+    The built-in themes ship inside the image (``THEMES_BASE_DIR``); uploads
+    must survive an image update and be visible to every instance of a
+    cluster, so they go to the shared storage directory instead.
+    """
+    return Path(settings.STORAGE_DIR) / "themes"
+
+
 # --- Theming v2 Phase-1 token categories -----------------------------------
 # Exact defaults from the token contract — chosen to reproduce today's
 # hardcoded look, so a pack that omits a category (or a key within one)
@@ -156,17 +166,30 @@ _TOKEN_CATEGORIES: tuple[tuple[str, dict[str, str], dict[str, str]], ...] = (
 
 
 class ThemeEngine:
-    def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir or THEMES_BASE_DIR
+    def __init__(self, base_dir: Path | None = None, user_dir: Path | None = None):
+        self.base_dir = base_dir or THEMES_BASE_DIR          # built-in (read-only image)
+        self.user_dir = user_dir if user_dir is not None else user_themes_dir()  # uploads (shared storage)
         # plugin_id → {STYLE_KEY: "tailwind classes", ...}
         self._plugin_overrides: dict[str, dict[str, str]] = {}
+
+    def theme_dir(self, theme_id: str) -> Path:
+        """Directory of ``theme_id``: an uploaded theme (shared storage) wins
+        over a built-in one of the same id; unknown ids resolve to the built-in
+        path so callers get a consistent "not found" there."""
+        candidate = self.user_dir / theme_id
+        if (candidate / "tokens.json").exists():
+            return candidate
+        return self.base_dir / theme_id
+
+    def theme_exists(self, theme_id: str) -> bool:
+        return (self.theme_dir(theme_id) / "tokens.json").exists()
 
     def resolve_theme(self, theme_id: str | None = None) -> ThemePack:
         active_id = theme_id or settings.DEFAULT_THEME_ID
         try:
-            return load_theme_pack(self.base_dir, active_id)
+            return load_theme_pack(self.theme_dir(active_id).parent, active_id)
         except Exception:
-            return load_theme_pack(self.base_dir, settings.DEFAULT_THEME_ID)
+            return load_theme_pack(self.theme_dir(settings.DEFAULT_THEME_ID).parent, settings.DEFAULT_THEME_ID)
 
     def resolve_color(self, key: str, dark: bool, theme_id: str | None = None) -> str | None:
         theme = self.resolve_theme(theme_id)
@@ -347,7 +370,7 @@ class ThemeEngine:
             # mtime+size (mirrors the per-user background `?v=` cache-buster) so a
             # content change yields a new URL and busts the immutable cache.
             try:
-                st = (self.base_dir / active_id / "assets" / bg_file).stat()
+                st = (self.theme_dir(active_id) / "assets" / bg_file).stat()
                 url += f"?v={int(st.st_mtime)}-{st.st_size}"
             except OSError:
                 pass
@@ -412,14 +435,16 @@ class ThemeEngine:
         self._plugin_overrides[plugin_id] = dict(overrides)
 
     def list_available_themes(self) -> list[str]:
-        """Return all theme IDs available on disk."""
-        if not self.base_dir.exists():
-            return ["default"]
-        return sorted(
-            d.name
-            for d in self.base_dir.iterdir()
-            if d.is_dir() and (d / "tokens.json").exists()
-        )
+        """All theme IDs on disk: built-in ones plus uploads on the shared storage."""
+        ids: set[str] = set()
+        for root in (self.base_dir, self.user_dir):
+            try:
+                if not root.exists():
+                    continue
+                ids.update(d.name for d in root.iterdir() if d.is_dir() and (d / "tokens.json").exists())
+            except OSError:
+                continue
+        return sorted(ids) if ids else ["default"]
 
 
 @lru_cache(maxsize=1)

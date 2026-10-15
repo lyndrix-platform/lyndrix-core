@@ -1310,6 +1310,16 @@ class ModuleManager:
             except Exception as e:
                 log.warning(f"VENDORS: Could not clean up sys.path for '{module_id}': {e}")
 
+        # The plugin's API routes go with it: Starlette matches the first route,
+        # so a stale router left in place would keep answering (with handlers
+        # bound to the unloaded module and its disposed ORM classes → 500s)
+        # even after the reloaded plugin registered a fresh one.
+        try:
+            from core.api.router_registry import router_registry
+            router_registry.unmount(module_id)
+        except Exception as e:
+            log.warning(f"UNLOAD: could not unmount routes for '{module_id}': {e}")
+
         # --- ROBUST UNLOAD: Purge all submodules of the plugin from memory ---
         base_package_name = ".".join(entry["module"].__name__.split('.')[:-1])
         modules_to_delete = [m for m in sys.modules if m.startswith(base_package_name)]

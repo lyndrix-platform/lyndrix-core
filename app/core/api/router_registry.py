@@ -157,8 +157,15 @@ class PluginRouterRegistry:
         performs its own authentication (e.g. a webhook signature check).
         """
         with self._lock:
-            if module_id in self._routers:
-                log.warning("RouterRegistry: '%s' already has a registered router — replacing.", module_id)
+            replacing = module_id in self._routers
+        if replacing:
+            # A reloaded plugin registers a fresh router. The previous routes must
+            # go first: Starlette matches the first route, and include_router()
+            # appends — the stale handlers (closures over the unloaded module,
+            # whose ORM classes are disposed) would keep answering with 500s.
+            log.warning("RouterRegistry: '%s' already has a registered router — replacing.", module_id)
+            self.unmount(module_id)
+        with self._lock:
             self._routers[module_id] = router
             self._public[module_id] = public
             app = self._app

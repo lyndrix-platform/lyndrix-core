@@ -15,7 +15,15 @@ log = get_logger("Core:ThemesAPI")
 
 themes_router = APIRouter(prefix="/api/themes", tags=["Themes"])
 
-_THEMES_BASE_DIR = Path(__file__).resolve().parents[4] / "assets" / "themes"
+def _engine():
+    from core.theming import get_theme_engine
+
+    return get_theme_engine()
+
+
+def _theme_dir(theme_id: str) -> Path:
+    """Built-in (image) or uploaded (shared ``STORAGE_DIR/themes``) theme directory."""
+    return _engine().theme_dir(theme_id)
 
 # Allowed image extensions for theme background assets (lowercase) → media type.
 _IMAGE_MEDIA_TYPES = {
@@ -84,7 +92,7 @@ async def get_theme_asset(theme_id: str, filename: str):
     if media_type is None:
         raise HTTPException(status_code=404, detail="Not found")
 
-    asset_path = _THEMES_BASE_DIR / theme_id / "assets" / filename
+    asset_path = _theme_dir(theme_id) / "assets" / filename
     if not asset_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -106,12 +114,9 @@ async def get_theme_css_vars(
     theme_id: str,
     identity: ApiIdentity = Depends(require_permission("api:read")),
 ):
-    theme_dir = _THEMES_BASE_DIR / theme_id
-    if not theme_dir.exists():
+    if not _engine().theme_exists(theme_id):
         raise HTTPException(status_code=404, detail=f"Theme '{theme_id}' not found")
-    from core.theming import get_theme_engine
-
-    engine = get_theme_engine()
+    engine = _engine()
     return {
         "status": "ok",
         "theme_id": theme_id,
@@ -127,7 +132,7 @@ async def get_theme_detail(
     theme_id: str,
     identity: ApiIdentity = Depends(require_permission("api:read")),
 ):
-    theme_dir = _THEMES_BASE_DIR / theme_id
+    theme_dir = _theme_dir(theme_id)
     if not theme_dir.exists():
         raise HTTPException(status_code=404, detail=f"Theme '{theme_id}' not found")
     try:
@@ -161,7 +166,10 @@ async def upload_theme(
                     status_code=422,
                     detail="ZIP must contain tokens.json and components.json at root level",
                 )
-            dest = _THEMES_BASE_DIR / theme_id
+            # Uploads go to the shared storage (every cluster instance sees them,
+            # an image update keeps them); built-ins stay read-only in the image.
+            user_dir = _engine().user_dir
+            dest = user_dir / theme_id
             dest.mkdir(parents=True, exist_ok=True)
             zf.extract("tokens.json", dest)
             zf.extract("components.json", dest)
@@ -196,7 +204,7 @@ async def upload_theme(
     try:
         from core.theming.schema import validate_theme_pack
         from core.theming.loader import load_theme_pack
-        pack = load_theme_pack(_THEMES_BASE_DIR, theme_id)
+        pack = load_theme_pack(user_dir, theme_id)
         errors = validate_theme_pack(pack)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Theme validation failed: {exc}")
@@ -213,8 +221,10 @@ async def delete_theme(
     if theme_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete the default theme")
 
-    dest = _THEMES_BASE_DIR / theme_id
+    dest = _engine().user_dir / theme_id
     if not dest.exists():
+        if _engine().theme_exists(theme_id):
+            raise HTTPException(status_code=400, detail="Built-in themes cannot be deleted")
         raise HTTPException(status_code=404, detail=f"Theme '{theme_id}' not found")
 
     shutil.rmtree(dest)

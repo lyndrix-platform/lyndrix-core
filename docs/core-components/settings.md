@@ -89,6 +89,9 @@ Overrides are in-memory and apply only when that plugin's pages resolve styles w
 3. Select the theme in **Settings → Appearance**, or set `DEFAULT_THEME_ID=<your-id>`.
 
 Alternatively, upload a ZIP containing both JSON files via **Settings → Appearance → Upload Theme**.
+Uploaded themes are stored under `STORAGE_DIR/themes/<id>/` (shared storage — every cluster instance
+sees them and they survive an image update); the built-in themes stay read-only inside the image and
+cannot be deleted through the API. An uploaded theme with the same id as a built-in one takes precedence.
 
 ## Typography and font override
 
