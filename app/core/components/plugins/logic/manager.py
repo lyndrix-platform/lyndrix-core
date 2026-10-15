@@ -606,6 +606,37 @@ class ModuleManager:
                     except Exception as emit_err:
                         log.error(f"BUS_ERROR: Failed to emit plugin:setup_failed for '{module_id}': {emit_err}")
 
+    # plugin_states is written by every instance of a cluster (activation, toggles,
+    # reconcile). MariaDB ≥ 11.6 (innodb_snapshot_isolation=ON) answers a REPEATABLE
+    # READ transaction that updates a row a peer changed since its first read with
+    # error 1020 — so these short writes run READ COMMITTED and retry on 1020/1205/1213.
+    _STATE_RETRY_CODES = ("1020", "1205", "1213")
+
+    @staticmethod
+    def _state_session():
+        session = db_instance.SessionLocal()
+        try:
+            bind = session.get_bind()
+            if bind is not None and getattr(bind.dialect, "name", "") in ("mysql", "mariadb"):
+                session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+        except Exception as exc:
+            log.debug(f"plugin_states session: isolation not applied: {exc}")
+        return session
+
+    @classmethod
+    def _retry_state_write(cls, fn, attempts: int = 4):
+        import time as _time
+
+        for attempt in range(attempts):
+            try:
+                return fn()
+            except Exception as exc:
+                text_ = str(getattr(exc, "orig", exc))
+                if attempt + 1 < attempts and any(code in text_ for code in cls._STATE_RETRY_CODES):
+                    _time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+
     def _persist_plugin_state(self, module_id: str, is_active: bool):
         """Persist plugin activation without duplicating lifecycle work."""
         if module_id not in self.registry or not db_instance.SessionLocal:
@@ -614,8 +645,8 @@ class ModuleManager:
         self._ensure_plugin_state_schema()
         manifest = self.registry[module_id]["manifest"]
 
-        try:
-            with db_instance.SessionLocal() as session:
+        def _tx():
+            with self._state_session() as session:
                 db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
                 if not db_state:
                     db_state = PluginState(
@@ -633,6 +664,9 @@ class ModuleManager:
                     db_state.desired_version = manifest.version
                     db_state.repo_url = manifest.repo_url or db_state.repo_url
                 session.commit()
+
+        try:
+            self._retry_state_write(_tx)
             self.registry[module_id]["persisted"] = True
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
@@ -702,38 +736,50 @@ class ModuleManager:
                     session.rollback()
                     log.info(f"DB_RESTORE: plugin_states row for '{module_id}' was created by another instance.")
 
-        with db_instance.SessionLocal() as session:
-            for module_id, entry in list(self.registry.items()):
-                if entry["manifest"].type == "CORE":
-                    continue
+        # 1. Row sync in one short, retried transaction (no side effects inside):
+        #    record the version this instance loaded, read back the desired state.
+        def _sync_rows() -> dict:
+            states: dict = {}
+            with self._state_session() as session:
+                for module_id, entry in list(self.registry.items()):
+                    if entry["manifest"].type == "CORE":
+                        continue
+                    manifest = entry["manifest"]
+                    db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+                    if not db_state:  # pragma: no cover - inserted above; defensive
+                        continue
+                    if db_state.installed_version != manifest.version:
+                        db_state.installed_version = manifest.version
+                    if manifest.repo_url and db_state.repo_url != manifest.repo_url:
+                        db_state.repo_url = manifest.repo_url
+                    if not db_state.desired_version:
+                        db_state.desired_version = manifest.version
+                    states[module_id] = bool(db_state.is_active)
+                session.commit()
+            return states
 
-                manifest = entry["manifest"]
-                db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+        row_states = self._retry_state_write(_sync_rows)
 
-                if not db_state:  # pragma: no cover - inserted above; defensive
-                    continue
-                entry["persisted"] = True
-                db_state.installed_version = manifest.version
-                db_state.repo_url = manifest.repo_url or db_state.repo_url
-                if not db_state.desired_version:
-                    db_state.desired_version = manifest.version
-
-                if db_state.is_active:
-                    enabled_plugin_ids.append(module_id)
-                    if not self._check_dependencies_met(manifest):
-                        entry["status"] = "blocked"
-                        log.warning(
-                            f"DB_RESTORE: Plugin '{module_id}' is enabled but waiting for dependencies."
-                        )
-                    elif entry.get("status") != "active":
-                        log.info(f"DB_RESTORE: Activating plugin '{module_id}'")
-                        self._execute_setup(module_id)
-                else:
-                    if entry.get("status") != "disabled":
-                        log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
-                        entry["status"] = "disabled"
-
-            session.commit()
+        # 2. Apply the desired state (setup runs here, outside any transaction).
+        for module_id, entry in list(self.registry.items()):
+            if entry["manifest"].type == "CORE" or module_id not in row_states:
+                continue
+            manifest = entry["manifest"]
+            entry["persisted"] = True
+            if row_states[module_id]:
+                enabled_plugin_ids.append(module_id)
+                if not self._check_dependencies_met(manifest):
+                    entry["status"] = "blocked"
+                    log.warning(
+                        f"DB_RESTORE: Plugin '{module_id}' is enabled but waiting for dependencies."
+                    )
+                elif entry.get("status") != "active":
+                    log.info(f"DB_RESTORE: Activating plugin '{module_id}'")
+                    self._execute_setup(module_id)
+            else:
+                if entry.get("status") != "disabled":
+                    log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
+                    entry["status"] = "disabled"
 
         pending_enabled = set(enabled_plugin_ids)
         while pending_enabled:
@@ -792,8 +838,8 @@ class ModuleManager:
 
         # 1. Persist to DB
         if persist and db_instance.SessionLocal:
-            try:
-                with db_instance.SessionLocal() as session:
+            def _tx():
+                with self._state_session() as session:
                     db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
                     if not db_state:
                         db_state = PluginState(module_id=module_id, is_active=active)
@@ -801,6 +847,9 @@ class ModuleManager:
                     else:
                         db_state.is_active = active
                     session.commit()
+
+            try:
+                self._retry_state_write(_tx)
             except Exception as e:
                 log.error(f"DB_ERROR: Failed to save toggle state: {e}")
                 return False
