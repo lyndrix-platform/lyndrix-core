@@ -110,3 +110,15 @@ def test_runtime_status_carries_the_instance_id():
     finally:
         bus.unsubscribe(RUNTIME_STATUS_TOPIC, _listener)
     assert seen and seen[-1]["instance_id"] == cluster_service.instance_id
+
+
+def test_cluster_instances_describe_self_in_single_mode():
+    """core API 1.7.1: a role-split plugin asks who is alive with which roles."""
+    ctx = _ctx()
+    instances = ctx.cluster_instances
+    assert len(instances) >= 1
+    me = [i for i in instances if i["is_self"]]
+    assert me and me[0]["instance_id"] == ctx.instance_id
+    assert set(me[0]["roles"]) == set(ctx.roles) and me[0]["alive"] is True
+    assert ctx.has_live_role("api") is True
+    assert ctx.has_live_role("no-such-role") is False

@@ -264,6 +264,33 @@ class ModuleContext:
         """Roles of this instance (``LYNDRIX_INSTANCE_ROLES``)."""
         return list(self._cluster().roles)
 
+    @property
+    def cluster_instances(self) -> list[dict]:
+        """Every known core instance as ``{"instance_id", "hostname", "roles",
+        "alive", "is_self"}`` (core API ≥ 1.7.1). Lets a plugin whose work is
+        split by role (API everywhere, execution on ``runner`` instances) tell
+        the operator that no executor is online instead of queueing silently.
+        In single mode: a one-element list describing this instance."""
+        svc = self._cluster()
+        out = [
+            {
+                "instance_id": i.instance_id,
+                "hostname": getattr(i, "hostname", None),
+                "roles": list(getattr(i, "roles", None) or []),
+                "alive": bool(getattr(i, "alive", False)),
+                "is_self": bool(getattr(i, "is_self", False)),
+            }
+            for i in (getattr(svc, "_instances", None) or [])
+        ]
+        if not out:
+            out.append({"instance_id": svc.instance_id, "hostname": None,
+                        "roles": list(svc.roles), "alive": True, "is_self": True})
+        return out
+
+    def has_live_role(self, role: str) -> bool:
+        """``True`` when at least one live instance (this one included) has ``role``."""
+        return any(role in i["roles"] for i in self.cluster_instances if i["alive"])
+
     def _lease_name(self, name: str) -> str:
         # A singleton plugin is one unit of background work: every on_lease()
         # call binds to the plugin's single lease, whatever name it passes.

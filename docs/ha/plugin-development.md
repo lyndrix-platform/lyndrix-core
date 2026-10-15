@@ -43,6 +43,8 @@ ctx.instance_id        # LYNDRIX_INSTANCE_ID
 ctx.cluster_size       # live instances (1 in single mode)
 ctx.roles              # LYNDRIX_INSTANCE_ROLES of this instance
 ctx.cluster_mode       # "single" | "cluster"
+ctx.cluster_instances  # [{"instance_id", "hostname", "roles", "alive", "is_self"}, ...] (API ≥ 1.7.1)
+ctx.has_live_role("runner")   # does any live instance carry the role? → report "no executor online"
 ctx.emit("myplugin:items_changed", {...}, cluster=True)   # reaches every instance
 ```
 
