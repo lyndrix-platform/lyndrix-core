@@ -198,6 +198,7 @@ def _require_visible(notif_id: str, username: str) -> Dict[str, Any]:
     or broadcasts (``user_id is None``). Anything else 404s — never reveal that an
     id belonging to another user exists. Prevents write-side IDOR on read/dismiss.
     """
+    notification_service.refresh_from_db()   # an id a peer instance created must resolve here too
     match = next(
         (n for n in list(notification_service.history) if n.get("id") == notif_id),
         None,
@@ -230,8 +231,10 @@ def _public_view(n: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# The handlers below are sync ``def`` on purpose (core 1.8): the service reads
+# and writes the shared store, so FastAPI runs them in its threadpool.
 @notifications_router.get("", summary="List the current user's notifications")
-async def list_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+def list_notifications(identity: ApiIdentity = Depends(require_api_auth)):
     visible = _visible_for(identity)
     return {
         "notifications": [_public_view(n) for n in visible],
@@ -240,7 +243,7 @@ async def list_notifications(identity: ApiIdentity = Depends(require_api_auth)):
 
 
 @notifications_router.post("/{notif_id}/read", summary="Mark a notification as read")
-async def read_notification(
+def read_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
@@ -250,14 +253,14 @@ async def read_notification(
 
 
 @notifications_router.post("/read-all", summary="Mark all visible notifications as read")
-async def read_all_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+def read_all_notifications(identity: ApiIdentity = Depends(require_api_auth)):
     for n in _visible_for(identity):
         notification_service.mark_read(identity.username, n["id"])
     return {"status": "ok"}
 
 
 @notifications_router.delete("/{notif_id}", summary="Dismiss a notification")
-async def dismiss_notification(
+def dismiss_notification(
     notif_id: str,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
@@ -268,7 +271,7 @@ async def dismiss_notification(
 
 
 @notifications_router.delete("", summary="Clear all visible notifications")
-async def clear_notifications(identity: ApiIdentity = Depends(require_api_auth)):
+def clear_notifications(identity: ApiIdentity = Depends(require_api_auth)):
     # Per-user clear: only hides notifications for this user; shared broadcasts
     # remain in the store for everyone else.
     notification_service.clear_for_user(identity.username)

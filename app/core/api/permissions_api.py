@@ -34,6 +34,7 @@ Routes (mounted under ``/api/permissions``)::
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -195,7 +196,38 @@ async def list_permission_catalog(
         "count": len(perms),
         "categories": reg.categories(),
         "permissions": perms,
+        # core 1.8: which permissions holding one of them already includes
+        # (mirrors access_service.has_permission and the /me/access umbrella).
+        "implies": _implications([p["id"] for p in perms]),
     }
+
+
+_UMBRELLA_RE = re.compile(r"^plugin:[^:]+$")
+
+
+def _implications(ids: List[str]) -> Dict[str, List[str]]:
+    """``{permission: [permissions it already includes]}``.
+
+    - ``api:read`` / ``api:write`` satisfy every ``plugin:<id>:api:read`` /
+      ``:api:write`` (the per-plugin compat fallback in ``has_permission``).
+    - the umbrella ``plugin:<id>`` grants visibility and every ``plugin:<id>:*``
+      (routes, api scopes, declared permissions) — as ``/me/access`` derives it.
+    One level deep; shells show an included permission as "contained in …".
+    """
+    out: Dict[str, List[str]] = {}
+    known = set(ids)
+    reads = sorted(i for i in known if i.startswith("plugin:") and i.endswith(":api:read"))
+    writes = sorted(i for i in known if i.startswith("plugin:") and i.endswith(":api:write"))
+    if reads:
+        out["api:read"] = reads
+    if writes:
+        out["api:write"] = writes
+    for pid in sorted(known):
+        if _UMBRELLA_RE.match(pid):
+            children = sorted(i for i in known if i.startswith(pid + ":"))
+            if children:
+                out[pid] = children
+    return out
 
 
 # ── Roles (manifest-declared bundles — read-only reference) ─────────────────
@@ -489,17 +521,86 @@ async def get_user_permissions(
     # direct grant — keeps the response field accurate for the same reason.
     from_groups = sorted(effective_set - set(extra))
 
+    # core 1.8: registry roles directly on the user + what each group brings,
+    # so a shell can say "contained in role X / via group Y".
+    from core.components.auth.logic.access_service import SYSTEM_FLAGS
+    from core.components.auth.logic.role_registry import role_registry
+
+    assigned_roles = [r for r in roles if r not in SYSTEM_FLAGS and role_registry.get(r) is not None]
+    groups_detail = []
+    if groups:
+        for grp in _group_service().get_all():
+            if grp.name in groups:
+                groups_detail.append({
+                    "name": grp.name,
+                    "roles": sorted(grp.roles or []),
+                    "permissions": sorted(grp.permissions or []),
+                })
+
     return {
         "status": "ok",
         "user": {
             "username": str(user.username),
             "roles": roles,
+            "assigned_roles": assigned_roles,
             "groups": groups,
+            "groups_detail": groups_detail,
             "extra_permissions": extra,
             "from_groups": from_groups,
             "effective_permissions": effective,
         },
     }
+
+
+def _assign_user_role(username: str, role_id: str, identity: ApiIdentity, *, add: bool) -> dict:
+    from core.components.auth.logic.access_service import SYSTEM_FLAGS
+    from core.components.auth.logic.role_registry import role_registry
+
+    if role_id in SYSTEM_FLAGS:
+        raise HTTPException(status_code=400, detail="System flags are managed through PATCH /api/users/{username}")
+    try:
+        role_registry.scan_from_manifests()
+    except Exception:
+        pass
+    if role_registry.get(role_id) is None:
+        raise HTTPException(status_code=404, detail=f"Role '{role_id}' not found")
+    user = _user_service().get_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if str(user.username).lower() == str(identity.username).lower():
+        raise HTTPException(status_code=403, detail="Cannot change your own roles")
+    roles = set(user.roles or [])
+    if add:
+        roles.add(role_id)
+    else:
+        roles.discard(role_id)
+    if not _user_service().update_roles(str(user.username), sorted(roles)):
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    log.info(f"PERMISSIONS: role '{role_id}' {'assigned to' if add else 'removed from'} '{username}' by '{identity.username}'.")
+    return {"status": "ok", "username": str(user.username), "role_id": role_id,
+            "assigned_roles": sorted(r for r in roles if r not in SYSTEM_FLAGS)}
+
+
+@permissions_router.post(
+    "/users/{username}/roles/{role_id}", summary="Assign a registry role directly to a user (core 1.8)"
+)
+async def assign_user_role(
+    username: str,
+    role_id: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    return _assign_user_role(username, role_id, identity, add=True)
+
+
+@permissions_router.delete(
+    "/users/{username}/roles/{role_id}", summary="Remove a directly assigned registry role from a user"
+)
+async def unassign_user_role(
+    username: str,
+    role_id: str,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    return _assign_user_role(username, role_id, identity, add=False)
 
 
 @permissions_router.put(

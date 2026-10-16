@@ -27,7 +27,16 @@ files but never write the version; enable/disable only touches `is_active`; an i
 loaded artifact differs from the row is behind and catches up, it never pulls the row to its own
 version. A local post-install verification failure auto-reverts the files on that instance only
 (`reverted_from`) and leaves the row alone, so the next reconcile retries the cluster's version.
-The verification itself waits up to 24 s for a plugin that is still bootstrapping. Before 1.7
+The verification itself waits up to 24 s for a plugin that is still bootstrapping.
+
+**One notification per operation (core ≥ 1.8).** The API call opens a `plugin_operations` row
+with every live instance as participant; each instance records its outcome
+(`plugin_operation_instances`), the last report closes the operation and produces the single
+notification. Followers emit no user-facing events of their own, the leader alone announces
+`plugin:update_available`, and the notification store itself is the shared database
+(`notifications`, `notification_user_states`) so the bell is identical on every instance.
+`GET /api/plugins/operations` shows the per-instance outcomes; participants without a report are
+closed as `skipped` after 10 minutes. Before 1.7
 every activation wrote the loaded version back, and six instances mid-rollout rewrote the row in
 turns ("revert storm": every peer downgraded and upgraded after each other). A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
 right after the `LYNDRIX_PLUGINS_DESIRED` pass, so it serves every plugin before the first periodic

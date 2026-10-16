@@ -88,3 +88,15 @@ def test_visibility_filter_keeps_everything_for_superadmin_and_system():
     assert _visible_plugins(ident, ["a", "b"]) == ["a", "b"]
     ident = SimpleNamespace(is_system=False, roles=["superadmin"], username="root")
     assert _visible_plugins(ident, ["a"]) == ["a"]
+
+
+def test_route_entries_point_into_the_shell():
+    """API 1.10: open_mode 'route' = an in-shell path (NavLink), never an external URL."""
+    reg = NavRegistry()
+    n = reg.register("p", [
+        {"id": "all", "label": "All services", "url": "/apps/lyndrix-plugin-x/overview", "open_mode": "route"},
+        {"id": "bad", "label": "Bad", "url": "https://example.com", "open_mode": "route"},   # skipped
+    ])
+    assert n == 1
+    (entry,) = reg.entries(["p"])
+    assert entry["id"] == "all" and entry["open_mode"] == "route"

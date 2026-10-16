@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -66,6 +67,21 @@ class CustomRepoRequest(BaseModel):
 def _manager():
     from core.components.plugins.logic.manager import module_manager
     return module_manager
+
+
+def _tracker():
+    from core.components.plugins.logic.operations import operation_tracker
+    return operation_tracker
+
+
+def _repo_name_for(entry: dict, plugin_id: str) -> str:
+    """On-disk folder of a loaded plugin (the key the install flow reports under)."""
+    import pathlib
+
+    module = (entry or {}).get("module")
+    if module and getattr(module, "__file__", None):
+        return pathlib.Path(module.__file__).parent.name
+    return plugin_id.split(".")[-1]
 
 
 def _plugin_service():
@@ -180,12 +196,19 @@ async def install_plugin(
     # a rejected URL surfaces as 422 to the caller — install runs as a
     # background task afterwards, where a raised error would only be logged.
     try:
-        svc.validate_repo_url(payload.url)
+        ref = svc.validate_repo_url(payload.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Install queued for '{payload.url}' v{payload.version} by '{identity.username}'.")
+    # Cluster-wide operation (core 1.8): every live instance reports its outcome,
+    # the operator gets one notification when all did.
+    op_id = await asyncio.to_thread(
+        _tracker().start, plugin_id=None, repo_name=ref.repo.replace("-", "_"), action="install",
+        version=payload.version, requested_by=identity.username,
+    )
     background_tasks.add_task(svc.install_plugin, payload.url, payload.version, False)
-    return {"status": "ok", "action": "install_queued", "url": payload.url, "version": payload.version}
+    return {"status": "ok", "action": "install_queued", "url": payload.url, "version": payload.version,
+            "operation_id": op_id}
 
 
 @plugins_router.post("/{plugin_id}/upgrade", summary="Upgrade a plugin to a specific version")
@@ -208,8 +231,13 @@ async def upgrade_plugin(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Upgrade queued for '{plugin_id}' v{payload.version} by '{identity.username}'.")
+    op_id = await asyncio.to_thread(
+        _tracker().start, plugin_id=plugin_id, repo_name=_repo_name_for(mgr.registry[plugin_id], plugin_id),
+        action="upgrade", version=payload.version, requested_by=identity.username,
+    )
     background_tasks.add_task(svc.install_plugin, repo_url, payload.version, True)
-    return {"status": "ok", "action": "upgrade_queued", "plugin_id": plugin_id, "version": payload.version}
+    return {"status": "ok", "action": "upgrade_queued", "plugin_id": plugin_id, "version": payload.version,
+            "operation_id": op_id}
 
 
 @plugins_router.post("/{plugin_id}/uninstall", summary="Uninstall a plugin")
@@ -450,6 +478,69 @@ async def update_plugin_settings(
     return {"status": "ok", "plugin_id": plugin_id, "saved": list(coerced.keys())}
 
 
+@plugins_router.get("/operations", summary="Cluster-wide plugin operations (install/upgrade/rollback progress)")
+async def list_operations(
+    active: bool = False,
+    limit: int = 20,
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
+):
+    """One row per operator action with the outcome of every participating
+    instance (core 1.8). ``active=true`` → running ones only. Live updates:
+    SSE ``plugin:operation_changed``."""
+    ops = await asyncio.to_thread(_tracker().list, active_only=active, limit=limit)
+    return {"status": "ok", "count": len(ops), "operations": ops}
+
+
+@plugins_router.get("/operations/{operation_id}", summary="One plugin operation with its per-instance outcomes")
+async def get_operation(
+    operation_id: int,
+    identity: ApiIdentity = Depends(require_permission("admin:read")),
+):
+    op = await asyncio.to_thread(_tracker().get, operation_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail=f"Operation {operation_id} not found")
+    return {"status": "ok", "operation": op}
+
+
+@plugins_router.post("/upgrade-all", summary="Upgrade every plugin that has a newer release")
+async def upgrade_all_plugins(
+    background_tasks: BackgroundTasks,
+    identity: ApiIdentity = Depends(require_permission("admin:write")),
+):
+    """Starts one cluster-wide operation per plugin whose newest release tag is
+    newer than the loaded version (as reported by ``update_available`` in
+    GET /api/plugins) and runs the upgrades one after another."""
+    mgr = _manager()
+    svc = _plugin_service()
+    targets: list[tuple[str, str, str, str]] = []
+    for mid, entry in list(mgr.registry.items()):
+        manifest = entry.get("manifest")
+        if manifest is None or manifest.type != "PLUGIN" or not getattr(manifest, "repo_url", None):
+            continue
+        latest, available = svc.latest_version_info(mid, str(manifest.version))
+        if available and latest:
+            targets.append((mid, manifest.repo_url, latest, _repo_name_for(entry, mid)))
+    started = []
+    for mid, _url, latest, repo_name in targets:
+        op_id = await asyncio.to_thread(
+            _tracker().start, plugin_id=mid, repo_name=repo_name, action="upgrade",
+            version=latest, requested_by=identity.username,
+        )
+        started.append({"plugin_id": mid, "version": latest, "operation_id": op_id})
+
+    async def _run_all():
+        for mid, url, latest, _repo in targets:
+            try:
+                await svc.install_plugin(url, latest, True)
+            except Exception as exc:
+                log.error(f"API: upgrade-all: '{mid}' → {latest} failed: {exc}")
+
+    if targets:
+        log.info(f"API: upgrade-all by '{identity.username}': {[t[0] for t in targets]}")
+        background_tasks.add_task(_run_all)
+    return {"status": "ok", "count": len(started), "started": started}
+
+
 @plugins_router.post("/{plugin_id}/rollback", summary="Roll a plugin back to its previous version")
 async def rollback_plugin(
     plugin_id: str,
@@ -474,12 +565,16 @@ async def rollback_plugin(
     if not svc.has_previous(repo_name):
         raise HTTPException(status_code=409, detail="No previous version to roll back to")
 
+    op_id = await asyncio.to_thread(
+        _tracker().start, plugin_id=plugin_id, repo_name=repo_name, action="rollback",
+        version=svc.previous_version(repo_name), requested_by=identity.username,
+    )
     ok = await svc.rollback_plugin(plugin_id, repo_name)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Rollback failed for '{plugin_id}'")
 
     log.info(f"API: Plugin '{plugin_id}' rolled back by '{identity.username}'.")
-    return {"status": "ok", "plugin_id": plugin_id, "action": "rolled_back"}
+    return {"status": "ok", "plugin_id": plugin_id, "action": "rolled_back", "operation_id": op_id}
 
 
 # NOTE: This route must be declared AFTER all specific sub-paths (marketplace, versions,

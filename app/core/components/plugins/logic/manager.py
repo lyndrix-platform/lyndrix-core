@@ -12,6 +12,7 @@ from core.logger import get_logger
 from core.bus import bus
 from core.components.database.logic.db_service import db_instance
 from .models import ModuleManifest, PluginState, PluginVersionHistory
+from .models import PluginOperation, PluginOperationInstance
 from .context import ModuleContext
 from config import settings
 from core.i18n import register_client_namespace, register_plugin_locales
@@ -392,8 +393,32 @@ class ModuleManager:
             # invisible until a manual page reload.
             bus.emit("plugin:state_changed", {"plugin_id": resolved_module_id, "action": "installed"})
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
+            await self._report_operation(resolved_module_id, module_name, "done", None)
         else:
-            await self._auto_revert(module_name, resolved_module_id)
+            reverted = await self._auto_revert(module_name, resolved_module_id)
+            entry = self.registry.get(resolved_module_id) if resolved_module_id else None
+            detail = (
+                (entry or {}).get("error_message")
+                or ("could not be loaded" if not load_ok else "verification failed")
+            )
+            await self._report_operation(
+                resolved_module_id, module_name, "reverted" if reverted else "failed", detail,
+            )
+
+    async def _report_operation(self, plugin_id, repo_name, status: str, message) -> None:
+        """Tell the cluster-wide operation (if one tracks this plugin) how this
+        instance fared — the lead and every follower report the same way."""
+        try:
+            from .operations import operation_tracker
+
+            entry = self.registry.get(plugin_id) if plugin_id else None
+            version = getattr((entry or {}).get("manifest"), "version", None)
+            await asyncio.to_thread(
+                operation_tracker.report, plugin_id=plugin_id, repo_name=repo_name,
+                status=status, message=message, version=version,
+            )
+        except Exception:
+            log.debug("OPS: operation report failed", exc_info=True)
 
     def _delete_plugin_state(self, module_id: str) -> bool:
         """Delete the plugin_states row; True when it is gone (or never existed)."""
@@ -493,7 +518,7 @@ class ModuleManager:
                 f"AUTO-REVERT: verification failed for '{module_name}' and no previous version "
                 f"is retained; leaving it in place for manual intervention."
             )
-            return
+            return False
         log.warning(
             f"AUTO-REVERT: verification failed for '{module_name}'; restoring previous version."
         )
@@ -506,7 +531,7 @@ class ModuleManager:
             self.unload_module(module_id)
         if not plugin_service.restore_previous(module_name):
             log.error(f"AUTO-REVERT: restore failed for '{module_name}'.")
-            return
+            return False
         importlib.invalidate_caches()
         self.load_module(module_name, is_plugin=True)
         restored_id = self._find_plugin_id_by_folder(module_name) or module_id
@@ -522,6 +547,7 @@ class ModuleManager:
         plugin_service._record_history(
             restored_id, module_name, prev_version, action="upgrade", outcome="reverted",
         )
+        return True
         bus.emit("plugin:rolled_back",
                  {"repo": module_name, "module_id": restored_id, "version": prev_version})
         bus.emit("plugin:install_failed",
@@ -1133,6 +1159,7 @@ class ModuleManager:
                             log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
                         if ok is False:
                             self._reconcile_install_failed(mid)
+                            await self._report_operation(mid, None, "failed", f"download/install of {version} failed on this instance")
                         else:
                             self._reconcile_install_backoff.pop(mid, None)
                             summary["installed"].append(mid)
@@ -1214,6 +1241,7 @@ class ModuleManager:
             self._reconcile_upgrading.discard(mid)
         if ok is False:
             self._reconcile_install_failed(mid)
+            await self._report_operation(mid, None, "failed", f"download/install of {want} failed on this instance")
         else:
             self._reconcile_install_backoff.pop(mid, None)
             summary.setdefault("upgraded", []).append(mid)
@@ -1593,6 +1621,10 @@ class ModuleManager:
             with db_instance.engine.begin() as connection:
                 PluginState.__table__.create(bind=connection, checkfirst=True)
                 PluginVersionHistory.__table__.create(bind=connection, checkfirst=True)
+                # Cluster-wide operations (core 1.8): one row per operator action
+                # plus one per participating instance.
+                PluginOperation.__table__.create(bind=connection, checkfirst=True)
+                PluginOperationInstance.__table__.create(bind=connection, checkfirst=True)
                 inspector = sqlalchemy_inspect(connection)
                 existing_columns = {
                     column["name"] for column in inspector.get_columns(PluginState.__tablename__)

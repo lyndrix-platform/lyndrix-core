@@ -25,7 +25,7 @@ from core.logger import get_logger
 log = get_logger("Core:Nav")
 
 NAV_CHANGED_TOPIC = "nav:changed"
-OPEN_MODES = ("iframe", "new_tab")
+OPEN_MODES = ("iframe", "new_tab", "route")   # route: a path inside the shell (API 1.10)
 DEFAULT_GROUP = "Services"
 DEFAULT_ICON = "open_in_browser"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -38,7 +38,7 @@ class NavEntry:
     label: str
     url: str                      # absolute http(s) URL or a path on this origin
     icon: str = DEFAULT_ICON      # Material icon name (mapped by the shell)
-    open_mode: str = "iframe"     # iframe (embedded page) | new_tab
+    open_mode: str = "iframe"     # iframe (embedded page) | new_tab | route (in-shell path)
     group: str = DEFAULT_GROUP    # sidebar section label
     description: Optional[str] = None
     order: int = 0
@@ -59,6 +59,8 @@ def _coerce(plugin_id: str, raw: dict) -> NavEntry:
     open_mode = str(raw.get("open_mode") or "iframe")
     if open_mode not in OPEN_MODES:
         raise ValueError(f"entry {entry_id!r}: open_mode must be one of {OPEN_MODES}")
+    if open_mode == "route" and not url.startswith("/"):
+        raise ValueError(f"entry {entry_id!r}: open_mode 'route' needs an in-shell path (e.g. /apps/<plugin>/…)")
     try:
         order = int(raw.get("order") or 0)
     except (TypeError, ValueError):

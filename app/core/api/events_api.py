@@ -46,6 +46,7 @@ _AUTH_TOPICS = frozenset({
     "plugin:install_failed",
     "plugin:update_available",
     "nav:changed",
+    "plugin:operation_changed",
     "ui:needs_refresh",
     "system:metrics_update",
     "vault:status_changed",

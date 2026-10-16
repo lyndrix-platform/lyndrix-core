@@ -81,6 +81,22 @@ class UserService:
     # Extra permissions (direct grants, not via groups)
     # ------------------------------------------------------------------
 
+    def update_roles(self, username: str, roles: List[str]) -> bool:
+        """Replace ``User.roles`` (system flags + registry roles, core 1.8)."""
+        with db_instance.SessionLocal() as s:
+            user = s.query(User).filter(User.username == username).first()
+            if user is None:
+                return False
+            user.roles = sorted(set(roles))
+            s.commit()
+        try:
+            from . import access_service
+
+            access_service.invalidate_cache(username)
+        except Exception:
+            pass
+        return True
+
     def update_extra_permissions(self, username: str, permissions: List[str]) -> bool:
         with db_instance.SessionLocal() as s:
             user = s.query(User).filter(User.username == username).first()

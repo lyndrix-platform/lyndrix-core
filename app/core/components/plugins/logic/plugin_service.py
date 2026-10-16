@@ -414,6 +414,8 @@ class PluginService:
                 log.info(
                     f"UPDATES: {module_id} has an update: {manifest.version} -> {latest_tag}"
                 )
+                if not self._announces_updates():
+                    continue  # the leader tells the operator (one notification per plugin)
                 bus.emit("plugin:update_available", {
                     "plugin_id": module_id,
                     "current_version": str(manifest.version),
@@ -876,6 +878,7 @@ class PluginService:
                         "plugin:install_failed",
                         {"repo": repo, "error": "identity_mismatch"},
                     )
+                    await self._report_operation_failure(safe_repo_name, "identity_mismatch")
                     return False
 
             # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes).
@@ -933,10 +936,37 @@ class PluginService:
             if plugin_path.exists() and not upgrade:
                 shutil.rmtree(plugin_path, ignore_errors=True)
             bus.emit("plugin:install_failed", {"repo": repo, "error": str(e)})
+            await self._report_operation_failure(safe_repo_name, str(e))
             return False
         finally:
             if staging_base.exists():
                 shutil.rmtree(staging_base, ignore_errors=True)
+
+    @staticmethod
+    async def _report_operation_failure(repo_name: str, message: str) -> None:
+        """This instance could not even get the files in place — tell the
+        cluster-wide operation (core 1.8) so it does not wait for a load report."""
+        try:
+            from .operations import operation_tracker
+
+            await asyncio.to_thread(
+                operation_tracker.report, plugin_id=None, repo_name=repo_name,
+                status="failed", message=message[:500],
+            )
+        except Exception:
+            log.debug("OPS: failure report skipped", exc_info=True)
+
+    @staticmethod
+    def _announces_updates() -> bool:
+        """Only one instance announces a newer release — the leader (single
+        mode: always). Every instance still *checks*, so the update badge in
+        /api/plugins is consistent wherever the request lands."""
+        try:
+            from core.components.cluster.logic.cluster_service import cluster_service
+
+            return cluster_service.mode != "cluster" or bool(cluster_service.is_leader)
+        except Exception:
+            return True
 
     async def _install_requirements(self, plugin_path: Path, timeout: int = 300):
         """Installs plugin vendor dependencies with a timeout."""

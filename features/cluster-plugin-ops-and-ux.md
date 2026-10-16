@@ -1,6 +1,6 @@
 # Feature-Plan: Cluster-weite Plugin-Operationen, Plugin-UX und Rechteverwaltung
 
-**Status:** 🚧 in Umsetzung (begonnen 2026-10-16)
+**Status:** 🚧 in Umsetzung (begonnen 2026-10-16) — WS1/WS2/WS3 Core+Shell umgesetzt (Core 1.8.0, Shell 1.6.0), WS4/WS5 in Arbeit
 **Auslöser:** Marvin, 2026-10-16 — nach dem Rollout von Core 1.7.x im k3s-Cluster:
 Benachrichtigungs-Sturm bei Plugin-Installationen über mehrere Knoten, fehlendes „Alle
 aktualisieren“, kein einheitlicher Einstieg in die Plugin-Einstellungen, External Services ohne

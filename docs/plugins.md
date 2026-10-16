@@ -483,6 +483,23 @@ def setup(ctx):
   writes, no in-process state peers need, standby-aware `health()`):
   [High Availability → For plugin developers](ha/plugin-development.md).
 
+## Cluster-wide operations (core 1.8)
+
+An install, upgrade or rollback triggered through the API is one *operation* for the whole
+cluster: the leading instance opens it with every live instance as participant, every instance
+reports its outcome once it loaded (or failed to load) the files — the lead directly, the followers
+through the reconcile — and the last report closes it. The operator gets **one** notification
+("'state_monitoring' upgrade → 1.6.1 on 6/6 instance(s)" or the failed/unreported instances).
+
+- `GET /api/plugins/operations?active=true&limit=20` and `GET /api/plugins/operations/{id}` list
+  operations with their per-instance outcomes; SSE `plugin:operation_changed` reports progress.
+- `POST /api/plugins/upgrade-all` upgrades every plugin whose newest release tag is newer than the
+  loaded version (one operation each, run one after another).
+- Participants that never report are closed as `skipped` by the leader after 10 minutes, so an
+  operation cannot stay "running" forever.
+- Plugin authors see nothing of this — `health()` after `setup()` decides the instance's outcome,
+  exactly as before (the verification waits up to 24 s for a bootstrapping plugin).
+
 ## Navigation entries (API 1.9)
 
 A plugin whose pages are *data* — one entry per embedded external service, a per-site console, a
@@ -500,8 +517,13 @@ ctx.clear_nav_entries()       # same as register_nav_entries([])
 
 - Each call **replaces** the plugin's previous set — always pass the complete list.
 - `url` is an absolute http(s) URL or a path on this origin; `open_mode` is `iframe` (the shell
-  embeds the page full-height at `/ext/<plugin>/<id>`) or `new_tab`; `group` names the sidebar
-  section (default `Services`); `icon` is a Material icon name.
+  embeds the page full-height at `/ext/<plugin>/<id>`), `new_tab`, or `route` (API 1.10: a path
+  inside the shell such as `/apps/<plugin>/<route>` — use it to expose an optional page of your own
+  React UI without a permanent sidebar tab); `group` names the sidebar section (default
+  `Services`); `icon` is a Material icon name.
+- The shell lists a plugin itself only when one of its `react_routes` has `sidebar_visible: true`;
+  a React UI that only consists of a settings page is reached through the header gear and the
+  Plugins page (`settings_ui_route`).
 - Shells read `GET /api/nav` (`api:read`, like the plugin list), which returns only entries of
   plugins the caller may see (`plugin:<id>` grant, as in `/api/me/access`), and refetch on the
   `nav:changed` SSE topic.

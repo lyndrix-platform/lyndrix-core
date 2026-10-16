@@ -24,6 +24,17 @@ def _is_superadmin(identity: ApiIdentity) -> bool:
     return identity.is_system or "superadmin" in identity.roles
 
 
+def _registry_role_exists(role_id: str) -> bool:
+    """A plugin/core-declared role (core 1.8: assignable directly on a user)."""
+    try:
+        from core.components.auth.logic.role_registry import role_registry
+
+        role_registry.scan_from_manifests()
+        return role_registry.get(role_id) is not None
+    except Exception:
+        return False
+
+
 def _same_username(a: Optional[str], b: Optional[str]) -> bool:
     """Case-insensitive username equality.
 
@@ -186,11 +197,13 @@ async def create_user(
     # them out, and only the two known values are accepted at all.
     requested_roles = sorted(set(payload.roles or []))
     if requested_roles:
-        unknown = [r for r in requested_roles if r not in _ASSIGNABLE_ROLES]
+        unknown = [r for r in requested_roles if r not in _ASSIGNABLE_ROLES and not _registry_role_exists(r)]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown role(s): {', '.join(unknown)}")
-        if not _is_superadmin(identity):
-            raise HTTPException(status_code=403, detail="Only a superadmin may assign roles at creation")
+        # Registry roles (plugin bundles) need admin:write only; the system flags
+        # stay a superadmin privilege.
+        if (set(requested_roles) & _ASSIGNABLE_ROLES) and not _is_superadmin(identity):
+            raise HTTPException(status_code=403, detail="Only a superadmin may assign system roles at creation")
 
     # Argon2 is CPU/memory-heavy; run it off the event loop so a user create
     # never blocks every other client (same rule as change_password).
@@ -274,9 +287,14 @@ async def update_user(
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
 
     if roles_changed:
-        if not _is_superadmin(identity):
-            raise HTTPException(status_code=403, detail="Only a superadmin may change roles")
-        unknown = [r for r in payload.roles if r not in _ASSIGNABLE_ROLES]
+        # Core 1.8: User.roles carries the system flags AND registry roles
+        # (plugin-declared bundles). Flags stay superadmin-only; registry roles
+        # need admin:write (checked above) and must exist in the registry.
+        requested = set(payload.roles or [])
+        current_flags = set(current.roles or []) & _ASSIGNABLE_ROLES
+        if (requested & _ASSIGNABLE_ROLES) != current_flags and not _is_superadmin(identity):
+            raise HTTPException(status_code=403, detail="Only a superadmin may change system roles")
+        unknown = [r for r in requested if r not in _ASSIGNABLE_ROLES and not _registry_role_exists(r)]
         if unknown:
             raise HTTPException(
                 status_code=400, detail=f"Unknown role(s): {', '.join(sorted(set(unknown)))}"

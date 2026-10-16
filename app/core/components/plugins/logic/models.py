@@ -293,3 +293,32 @@ class PluginNotificationEndpoint(Base):
     declared_defaults = Column(Text, nullable=True)
     discovered_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class PluginOperation(Base):
+    """One operator-triggered plugin install/upgrade/rollback as the *cluster*
+    works through it (core 1.8). The leading instance opens it with every live
+    instance as participant; each instance reports its own outcome in
+    ``PluginOperationInstance``; whoever closes the last participant closes the
+    operation and emits exactly one ``plugin:operation_finished``."""
+    __tablename__ = "plugin_operations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plugin_id = Column(String(100), index=True, nullable=True)      # known after the first load
+    repo_name = Column(String(150), index=True, nullable=True)      # folder name (safe repo name)
+    action = Column(String(20), nullable=False)                     # install | upgrade | rollback
+    version = Column(String(50), nullable=True)
+    requested_by = Column(String(100), nullable=True)
+    requested_at = Column(DateTime, nullable=False)
+    status = Column(String(20), nullable=False, default="running")  # running | done | partial | failed
+    finished_at = Column(DateTime, nullable=True)
+    summary = Column(Text, nullable=True)                           # JSON {done, failed, pending}
+
+
+class PluginOperationInstance(Base):
+    __tablename__ = "plugin_operation_instances"
+
+    operation_id = Column(Integer, primary_key=True)
+    instance_id = Column(String(120), primary_key=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending | done | failed | reverted | skipped
+    message = Column(Text, nullable=True)
+    updated_at = Column(DateTime, nullable=False)

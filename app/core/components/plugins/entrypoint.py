@@ -16,6 +16,7 @@ manifest = ModuleManifest(
             "git:status_update", "system:boot_complete",
             "plugin:installed", "plugin:install_failed", "plugin:rolled_back",
             "plugin:update_available", "plugin:uninstall_failed",
+            "plugin:operation_finished",
         ],
         "emit": ["git:sync", "notification:routed"],
     },
@@ -60,8 +61,55 @@ def _register_lifecycle_notifications(ctx):
     UI client disconnecting during a long install/upgrade — the gap that made
     install confirmations silently vanish ("skipped notify after client teardown")."""
 
+    def _tracked(repo: str) -> bool:
+        """A cluster-wide operation (core 1.8) tracks this repo: the per-event
+        notification would be a duplicate of the one the operation produces."""
+        try:
+            from .logic.operations import operation_tracker
+
+            return operation_tracker.has_running(repo_name=str(repo).replace("-", "_"))
+        except Exception:
+            return False
+
+    def _on_operation_finished(payload):
+        p = payload or {}
+        name = p.get("plugin_id") or p.get("repo_name") or "plugin"
+        version = p.get("version") or "latest"
+        action = p.get("action") or "install"
+        done, total = int(p.get("done") or 0), int(p.get("total") or 0)
+        failed = p.get("failed") or []
+        pending = p.get("pending") or []
+        if p.get("status") == "done":
+            ctx.notify(
+                "plugin_installed",
+                payload=p,
+                notification_id=f"plugin_{name}",
+                title="Plugin installed" if action == "install" else "Plugin updated",
+                body=f"'{name}' {action} → {version} on {done}/{total} instance(s).",
+                severity="success",
+            )
+            return
+        parts = [f"'{name}' {action} → {version}: {done}/{total} instance(s) ok."]
+        if failed:
+            parts.append("Failed: " + ", ".join(
+                f"{f.get('instance_id')} ({f.get('status')}{': ' + str(f.get('message'))[:80] if f.get('message') else ''})"
+                for f in failed
+            ))
+        if pending:
+            parts.append("No report from: " + ", ".join(pending))
+        ctx.notify(
+            "plugin_install_failed",
+            payload=p,
+            notification_id=f"plugin_{name}",
+            title="Plugin update incomplete" if done else "Plugin install failed",
+            body=" ".join(parts),
+            severity="warning" if done else "error",
+        )
+
     def _on_installed(payload):
         repo = (payload or {}).get("repo", "plugin")
+        if _tracked(repo):
+            return
         ctx.notify(
             "plugin_installed",
             payload=payload or {},
@@ -74,6 +122,8 @@ def _register_lifecycle_notifications(ctx):
     def _on_failed(payload):
         repo = (payload or {}).get("repo", "plugin")
         error = (payload or {}).get("error", "unknown error")
+        if _tracked(repo):
+            return
         ctx.notify(
             "plugin_install_failed",
             payload=payload or {},
@@ -101,6 +151,8 @@ def _register_lifecycle_notifications(ctx):
     def _on_rolled_back(payload):
         repo = (payload or {}).get("repo", "plugin")
         version = (payload or {}).get("version")
+        if _tracked(repo):
+            return
         ctx.notify(
             "plugin_rolled_back",
             payload=payload or {},
@@ -139,6 +191,7 @@ def _register_lifecycle_notifications(ctx):
         _guarded.__module__ = handler.__module__
         return _guarded
 
+    ctx.subscribe("plugin:operation_finished")(_local_only(_on_operation_finished))
     ctx.subscribe("plugin:installed")(_local_only(_on_installed))
     ctx.subscribe("plugin:install_failed")(_local_only(_on_failed))
     ctx.subscribe("plugin:uninstall_failed")(_local_only(_on_uninstall_failed))
@@ -159,3 +212,20 @@ def setup(ctx):
 
     # Durable, gateway-routed lifecycle notifications.
     _register_lifecycle_notifications(ctx)
+
+    # Cluster-wide operations: participants that never report are closed by
+    # the leader after a timeout so an operation can never hang "running".
+    async def _sweep_operations():
+        import asyncio
+
+        from .logic.operations import operation_tracker
+
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if getattr(ctx, "is_leader", True) and operation_tracker.available():
+                    await asyncio.to_thread(operation_tracker.sweep_timeouts)
+            except Exception as exc:
+                ctx.log.debug(f"OPS: sweep failed: {exc}")
+
+    ctx.create_task(_sweep_operations(), name="plugins:operation_sweep")

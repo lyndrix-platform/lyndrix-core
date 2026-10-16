@@ -44,6 +44,7 @@ CLUSTER_TOPICS = frozenset({
     "plugin:install_failed",
     "plugin:update_available",
     "plugin:settings_changed",
+    "plugin:operation_changed",
     "ui:needs_refresh",
     "notification:new",
     "settings:changed",

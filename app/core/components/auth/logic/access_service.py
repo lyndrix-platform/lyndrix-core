@@ -32,6 +32,8 @@ log = get_logger("Core:AccessService")
 # 5s keeps admin edits near-instant while collapsing per-request DB queries.
 _CACHE_TTL_SECONDS = 5.0
 _cache: dict[str, tuple[float, FrozenSet[str]]] = {}
+# User.roles entries that are platform flags, never registry roles.
+SYSTEM_FLAGS = frozenset({"superadmin", "bot"})
 
 
 def invalidate_cache(username: Optional[str] = None) -> None:
@@ -71,6 +73,11 @@ def get_effective_permissions(username: str) -> FrozenSet[str]:
                         perms.update(grp.permissions or [])
                         perms.update(role_registry.expand_roles(grp.roles or []))
                 perms.update(user.extra_permissions or [])
+                # Registry roles assigned directly on the user (core 1.8); the
+                # system flags superadmin/bot are not roles and expand to nothing.
+                perms.update(role_registry.expand_roles(
+                    [r for r in (user.roles or []) if r not in SYSTEM_FLAGS]
+                ))
     except Exception as exc:  # pragma: no cover — defensive: authz must not 500
         log.warning(f"ACCESS: failed to resolve permissions for '{username}': {exc}")
         return frozenset()
