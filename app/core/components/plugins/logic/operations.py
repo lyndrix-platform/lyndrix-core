@@ -35,7 +35,7 @@ log = get_logger("Core:PluginOps")
 
 CHANGED_TOPIC = "plugin:operation_changed"
 FINISHED_TOPIC = "plugin:operation_finished"
-TERMINAL_STATES = ("done", "failed", "reverted", "skipped")
+TERMINAL_STATES = ("done", "failed", "reverted", "skipped", "gone")   # gone = instance left the cluster
 DEFAULT_TIMEOUT_S = 600
 # A report attaches to the newest *running* operation of the plugin that is
 # younger than this; an older running one is stale (closed by the sweep soon).
@@ -148,6 +148,7 @@ class OperationTracker:
         me = instance_id or self.instance_id()
         now = _utcnow()
         cutoff = now - timedelta(seconds=MATCH_WINDOW_S)
+        live = set(self.live_instances())
 
         def _tx():
             with self._session() as s:
@@ -175,6 +176,7 @@ class OperationTracker:
                 row.updated_at = now
                 s.flush()
                 rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
+                self._mark_gone(rows, live, now)
                 finished = self._maybe_close(op, rows, now)
                 s.commit()
                 return op.id, op.plugin_id, op.status, finished, self._counts(rows)
@@ -217,10 +219,20 @@ class OperationTracker:
         now = _utcnow()
         cutoff = now - timedelta(seconds=max_age_s)
         finished_payloads: list[dict] = []
+        live = set(self.live_instances())
 
         def _tx() -> int:
             closed = 0
             with self._session() as s:
+                # Instances that left (a rollout replaced the pods) never report:
+                # mark them gone on every running operation, which may close it.
+                for op in s.query(PluginOperation).filter(PluginOperation.status == "running").all():
+                    rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
+                    if self._mark_gone(rows, live, now):
+                        payload = self._maybe_close(op, rows, now)
+                        if payload is not None:
+                            finished_payloads.append(payload)
+                            closed += 1
                 stale = s.query(PluginOperation).filter(
                     PluginOperation.status == "running", PluginOperation.requested_at < cutoff,
                 ).all()
@@ -282,7 +294,21 @@ class OperationTracker:
 
     @staticmethod
     def _counts(rows) -> tuple[int, int]:
-        return sum(1 for r in rows if r.status == "done"), len(rows)
+        """(done, total) — instances that left the cluster do not count."""
+        active = [r for r in rows if r.status != "gone"]
+        return sum(1 for r in active if r.status == "done"), len(active)
+
+    @staticmethod
+    def _mark_gone(rows, live: set, now: datetime) -> bool:
+        """Pending participants that are not alive any more → ``gone``. Returns True when any changed."""
+        changed = False
+        for r in rows:
+            if r.status == "pending" and live and r.instance_id not in live:
+                r.status = "gone"
+                r.message = "instance left the cluster"
+                r.updated_at = now
+                changed = True
+        return changed
 
     def _maybe_close(self, op: PluginOperation, rows, now: datetime) -> Optional[dict]:
         """Close ``op`` when every participant is terminal; returns the finished payload."""
@@ -294,16 +320,18 @@ class OperationTracker:
             for r in sorted(rows, key=lambda r: r.instance_id) if r.status in ("failed", "reverted")
         ]
         pending = sorted(r.instance_id for r in rows if r.status == "skipped")
+        total = sum(1 for r in rows if r.status != "gone")
         if failed or pending:
             op.status = "partial" if done else "failed"
         else:
             op.status = "done"
         op.finished_at = now
-        op.summary = json.dumps({"done": done, "failed": failed, "pending": pending})
+        op.summary = json.dumps({"done": done, "failed": failed, "pending": pending,
+                                 "gone": sorted(r.instance_id for r in rows if r.status == "gone")})
         return {
             "operation_id": op.id, "plugin_id": op.plugin_id, "repo_name": op.repo_name,
             "action": op.action, "version": op.version, "requested_by": op.requested_by,
-            "status": op.status, "done": len(done), "total": len(rows), "failed": failed, "pending": pending,
+            "status": op.status, "done": len(done), "total": total, "failed": failed, "pending": pending,
         }
 
     @staticmethod

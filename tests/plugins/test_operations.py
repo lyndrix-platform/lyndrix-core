@@ -148,3 +148,16 @@ def test_instance_already_at_the_requested_version_reports_done(tracker, events,
     manifest.version = "1.3.0"
     asyncio.run(mgr._report_already_current())
     assert t.get(op_id)["done"] == 1
+
+
+def test_instances_that_left_the_cluster_do_not_block_an_operation(tracker, events, monkeypatch):
+    """A rollout replaced a pod after the operation opened: the old pod never
+    reports — it is marked gone and the operation closes on the live ones."""
+    t, _ = tracker
+    op_id = t.start(plugin_id="p.roll", repo_name="roll", action="upgrade", version="2", requested_by="admin")
+    monkeypatch.setattr(t, "live_instances", lambda: ["a"])          # b is gone now
+    t.report(plugin_id="p.roll", repo_name=None, status="done")        # a reports
+    fin = events[FINISHED_TOPIC][-1]
+    assert fin["operation_id"] == op_id and fin["status"] == "done" and fin["done"] == 1 and fin["total"] == 1
+    op = t.get(op_id)
+    assert {i["instance_id"]: i["status"] for i in op["instances"]} == {"a": "done", "b": "gone"}

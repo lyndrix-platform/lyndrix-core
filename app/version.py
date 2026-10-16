@@ -9,9 +9,9 @@ Usage::
 
 from datetime import datetime
 
-__version__: str = "1.8.4"
-__version_info__: tuple[int, int, int] = (1, 4, 8)
-__release_date__: str = "2026-10-14"
+__version__: str = "1.9.0"
+__version_info__: tuple[int, int, int] = (1, 9, 0)
+__release_date__: str = "2026-10-16"
 __codename__: str = "First Light"
 
 # Captured at module import time → effectively tracks application start
