@@ -122,3 +122,29 @@ def test_report_without_an_operation_is_a_noop(tracker, events):
     assert t.report(plugin_id="p.none", repo_name="none", status="done") is None
     assert events[FINISHED_TOPIC] == [] and events[CHANGED_TOPIC] == []
     assert ops_mod.operation_tracker.available() in (True, False)   # module singleton importable
+
+
+def test_instance_already_at_the_requested_version_reports_done(tracker, events, monkeypatch):
+    """Re-issued upgrade / files already in place: nothing installs on that
+    instance, so the reconcile reports it done instead of leaving it pending."""
+    import asyncio
+    import types
+
+    from core.components.plugins.logic.manager import ModuleManager
+
+    t, _ = tracker
+    monkeypatch.setattr(ops_mod, "operation_tracker", t)
+    monkeypatch.setattr(t, "instance_id", lambda: "b")
+    op_id = t.start(plugin_id="lyndrix.plugin.cur", repo_name="cur", action="upgrade", version="v1.4.0",
+                    requested_by="admin")
+    mgr = ModuleManager()
+    manifest = types.SimpleNamespace(type="PLUGIN", version="1.4.0", id="lyndrix.plugin.cur", repo_url="https://x/y")
+    mgr.registry["lyndrix.plugin.cur"] = {"status": "active", "manifest": manifest, "module": None, "context": None}
+    asyncio.run(mgr._report_already_current())
+    op = t.get(op_id)
+    assert {i["instance_id"]: i["status"] for i in op["instances"]} == {"a": "pending", "b": "done"}
+    # a second pass changes nothing; a different loaded version reports nothing
+    asyncio.run(mgr._report_already_current())
+    manifest.version = "1.3.0"
+    asyncio.run(mgr._report_already_current())
+    assert t.get(op_id)["done"] == 1

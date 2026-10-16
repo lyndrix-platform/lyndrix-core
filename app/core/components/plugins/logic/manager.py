@@ -1205,11 +1205,37 @@ class ModuleManager:
                     self.unload_module(mid)
                 summary["unloaded"].append(mid)
 
+        await self._report_already_current()
         changed = {k: v for k, v in summary.items() if v}
         if changed:
             log.info(f"RECONCILE ({trigger}): {changed}")
             bus.emit("ui:needs_refresh", {"reason": "cluster plugin reconcile"})
         return summary
+
+    async def _report_already_current(self) -> None:
+        """An operation asks for a version this instance already runs (the
+        operator re-issued an upgrade, or the files were in place before the
+        operation opened): nothing gets installed here, so nothing would ever
+        report — tell the operation this instance is done."""
+        try:
+            from .operations import operation_tracker
+
+            if not operation_tracker.available():
+                return
+            me = operation_tracker.instance_id()
+            for op in await asyncio.to_thread(operation_tracker.list, active_only=True, limit=50):
+                mine = next((i for i in op["instances"] if i["instance_id"] == me), None)
+                if mine is not None and mine["status"] != "pending":
+                    continue
+                entry = self.registry.get(op.get("plugin_id") or "")
+                have = str(getattr((entry or {}).get("manifest"), "version", "") or "")
+                want = str(op.get("version") or "")
+                if not entry or not have or not want or want == "latest":
+                    continue
+                if have.lstrip("vV") == want.lstrip("vV") and entry.get("status") in ("active", "remote"):
+                    await self._report_operation(op["plugin_id"], op.get("repo_name"), "done", "already at this version")
+        except Exception:
+            log.debug("OPS: already-current report failed", exc_info=True)
 
     async def _reconcile_version(self, mid: str, entry: dict, row: dict, plugin_service, trigger: str, summary: dict) -> bool:
         """Bring this instance's artifact to ``plugin_states.installed_version`` when
