@@ -63,6 +63,7 @@ services:
       - ../../plugins/lyndrix-plugin-docker-manager:/app/plugins/docker_manager
       - ../../plugins/lyndrix-plugin-entity-registry:/app/plugins/entity_registry
       - ../../plugins/lyndrix-plugin-itsm:/app/plugins/itsm
+      - ../../plugins/lyndrix-plugin-ai-assistant:/app/plugins/ai_assistant
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env.dev
