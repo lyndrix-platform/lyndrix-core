@@ -81,8 +81,13 @@ class PluginService:
         self._watcher_task: asyncio.Task | None = None
         # Background update-checker state: module_id -> newest release tag
         # seen. Deliberately in-memory (cheap to recompute shortly after every
-        # boot; same convention as _tag_cache) — no PluginState column.
+        # boot; same convention as _tag_cache). The cluster-wide truth is the
+        # plugin_states.latest_version column the leader writes (core 1.8.1);
+        # _latest_from_db() reads it back with a short cache so every instance
+        # answers /api/plugins with the same update badge.
         self._latest_known: dict[str, str] = {}
+        self._latest_db: dict[str, str] = {}
+        self._latest_db_at: float = 0.0
         self._update_checker_task: asyncio.Task | None = None
 
     def _extract_repo_info(self, github_url: str):
@@ -373,14 +378,20 @@ class PluginService:
     async def _check_all_updates(self):
         """Compare every installed plugin against its newest release tag.
 
-        Reuses get_plugin_versions (900s tag cache) — at most one tags-API
-        call per repo per cache window. Transitions to 'newer available' emit
-        plugin:update_available (SSE → React badge) and a persisted bell entry.
+        Cluster: only the leader checks (one set of tags-API calls per cluster
+        instead of one per instance — the unauthenticated GitHub limit is 60
+        requests/hour per egress IP). It records the newest tag in
+        plugin_states.latest_version for every instance to read and emits
+        plugin:update_available (bridged) on a new 'newer available' transition.
+        Reuses get_plugin_versions (900s tag cache).
         """
         from packaging.version import InvalidVersion, Version
 
         from .manager import module_manager
 
+        if not self._announces_updates():
+            return
+        found: dict[str, str] = {}
         for module_id, entry in list(module_manager.registry.items()):
             manifest = entry.get("manifest")
             if manifest is None or getattr(manifest, "type", "PLUGIN") != "PLUGIN":
@@ -406,6 +417,7 @@ class PluginService:
             latest_v, latest_tag = max(parsed, key=lambda p: p[0])
             previous = self._latest_known.get(module_id)
             self._latest_known[module_id] = latest_tag
+            found[module_id] = latest_tag
             try:
                 current_v = Version(str(manifest.version).lstrip("v"))
             except InvalidVersion:
@@ -414,13 +426,60 @@ class PluginService:
                 log.info(
                     f"UPDATES: {module_id} has an update: {manifest.version} -> {latest_tag}"
                 )
-                if not self._announces_updates():
-                    continue  # the leader tells the operator (one notification per plugin)
                 bus.emit("plugin:update_available", {
                     "plugin_id": module_id,
                     "current_version": str(manifest.version),
                     "latest_version": latest_tag,
                 })
+        if found:
+            await asyncio.to_thread(self._store_latest, found)
+
+    def _store_latest(self, found: dict[str, str]) -> None:
+        """Persist the newest tags (blocking) so every instance shows them."""
+        from datetime import datetime, timezone
+
+        from core.components.database.logic.db_service import db_instance
+        from .models import PluginState
+
+        if not (db_instance.is_connected and db_instance.SessionLocal):
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            with db_instance.SessionLocal() as s:
+                for module_id, latest in found.items():
+                    row = s.get(PluginState, module_id)
+                    if row is not None:
+                        row.latest_version = latest
+                        row.latest_checked_at = now
+                s.commit()
+            self._latest_db.update(found)
+            self._latest_db_at = time.time()
+        except Exception as exc:
+            log.debug(f"UPDATES: could not store latest versions: {exc}")
+
+    def _latest_from_db(self, max_age_s: float = 60.0) -> dict[str, str]:
+        """``{module_id: latest_tag}`` from plugin_states (cached ``max_age_s``)."""
+        if time.time() - self._latest_db_at < max_age_s:
+            return self._latest_db
+        from core.components.database.logic.db_service import db_instance
+        from .models import PluginState
+
+        self._latest_db_at = time.time()
+        if not (db_instance.is_connected and db_instance.SessionLocal):
+            return self._latest_db
+        try:
+            with db_instance.SessionLocal() as s:
+                rows = s.query(PluginState.module_id, PluginState.latest_version).all()
+            self._latest_db = {mid: ver for mid, ver in rows if ver}
+        except Exception as exc:
+            log.debug(f"UPDATES: could not read latest versions: {exc}")
+        return self._latest_db
+
+    def note_latest(self, module_id: str, latest_tag: str | None) -> None:
+        """A peer (the leader) announced a newer tag — remember it right away."""
+        if module_id and latest_tag:
+            self._latest_known[module_id] = str(latest_tag)
+            self._latest_db[module_id] = str(latest_tag)
 
     def latest_version_info(self, module_id: str, current_version: str) -> tuple[str | None, bool]:
         """(latest_tag, update_available) from the in-memory check — no I/O.
@@ -430,7 +489,7 @@ class PluginService:
         """
         from packaging.version import InvalidVersion, Version
 
-        latest = self._latest_known.get(module_id)
+        latest = self._latest_known.get(module_id) or self._latest_from_db().get(module_id)
         if not latest:
             return None, False
         try:
@@ -958,9 +1017,9 @@ class PluginService:
 
     @staticmethod
     def _announces_updates() -> bool:
-        """Only one instance announces a newer release — the leader (single
-        mode: always). Every instance still *checks*, so the update badge in
-        /api/plugins is consistent wherever the request lands."""
+        """Only one instance checks for and announces newer releases — the
+        leader (single mode: always). The result lives in plugin_states so the
+        update badge in /api/plugins is the same wherever the request lands."""
         try:
             from core.components.cluster.logic.cluster_service import cluster_service
 

@@ -229,6 +229,10 @@ class PluginState(Base):
     desired_version = Column(String(50), nullable=True)
     repo_url = Column(String(500), nullable=True)
     auto_update = Column(Boolean, default=False)
+    # Newest release tag the (leader's) update check found, so every instance
+    # shows the same update badge (core 1.8.1).
+    latest_version = Column(String(50), nullable=True)
+    latest_checked_at = Column(DateTime, nullable=True)
 
 
 class PluginVersionHistory(Base):

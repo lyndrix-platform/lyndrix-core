@@ -1612,6 +1612,8 @@ class ModuleManager:
             "desired_version": "VARCHAR(50) NULL",
             "repo_url": "VARCHAR(500) NULL",
             "auto_update": "BOOLEAN DEFAULT 0",
+            "latest_version": "VARCHAR(50) NULL",
+            "latest_checked_at": "DATETIME NULL",
         }
 
         # Same cross-instance lock as the IAM bootstrap: DDL from two booting

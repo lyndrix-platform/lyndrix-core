@@ -191,6 +191,14 @@ def _register_lifecycle_notifications(ctx):
         _guarded.__module__ = handler.__module__
         return _guarded
 
+    def _on_peer_update_available(payload):
+        # Bridged from the leader: remember the newest tag at once so this
+        # instance's /api/plugins badge matches without waiting for the DB cache.
+        p = payload or {}
+        if p.get("_origin"):
+            plugin_service.note_latest(p.get("plugin_id"), p.get("latest_version"))
+
+    ctx.subscribe("plugin:update_available")(_on_peer_update_available)
     ctx.subscribe("plugin:operation_finished")(_local_only(_on_operation_finished))
     ctx.subscribe("plugin:installed")(_local_only(_on_installed))
     ctx.subscribe("plugin:install_failed")(_local_only(_on_failed))
