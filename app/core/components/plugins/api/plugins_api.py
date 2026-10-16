@@ -110,7 +110,10 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         version=manifest.version,
         description=getattr(manifest, "description", None),
         type=manifest.type,
-        is_active=entry.get("status") == "active",
+        # "remote" = enabled cluster-wide but pinned to a role this instance lacks: the
+        # shell must still list it (sidebar, launchpad, toggle) — its UI and API are
+        # reached through the load balancer route of the pinned instance.
+        is_active=entry.get("status") in ("active", "remote"),
         repo_url=getattr(manifest, "repo_url", None),
         ui_route=getattr(manifest, "ui_route", None),
         icon=getattr(manifest, "icon", None),
