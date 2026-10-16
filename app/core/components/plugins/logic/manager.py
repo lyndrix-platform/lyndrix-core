@@ -334,6 +334,9 @@ class ModuleManager:
         lead = bool(payload.get("lead", True))
         log.info(f"MANAGER: Received install event for '{module_name}'. Loading module...")
         existing_module_id = self._find_plugin_id_by_folder(module_name)
+        await self._report_operation(
+            existing_module_id or self._read_plugin_manifest_id(module_name), module_name, "installing", None,
+        )
         if lead:
             # Record the version the cluster is moving to BEFORE the (async) reload:
             # a reconcile that runs meanwhile — periodic, or triggered by a peer —
@@ -1381,6 +1384,21 @@ class ModuleManager:
 
         self._teardown_ui(module_id)
         entry = self.registry[module_id]
+
+        # Run the plugin's own teardown first (reload/upgrade/uninstall used to
+        # skip it — only disable called it): background work the plugin started
+        # itself (asyncio.create_task, schedulers) otherwise survives the swap
+        # and keeps running against disposed ORM classes. Async hooks run as a
+        # tracked task; the new incarnation may start meanwhile — hooks must
+        # tolerate that (stop flags, bounded waits).
+        module = entry.get("module")
+        if entry.get("status") not in ("remote",) and callable(getattr(module, "teardown", None)):
+            try:
+                result = module.teardown(entry.get("context"))
+                if inspect.isawaitable(result):
+                    bus.create_tracked_task(result, name=f"module_teardown:{module_id}")
+            except Exception as e:
+                log.warning(f"UNLOAD: teardown of '{module_id}' raised: {e}")
 
         # Dispose bus subscriptions + background tasks owned by this module so a
         # reloaded/uninstalled plugin's stale handlers stop firing (and its

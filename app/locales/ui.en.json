@@ -928,6 +928,8 @@
     "instance_done": "done",
     "instance_failed": "failed",
     "instance_reverted": "reverted",
-    "instance_skipped": "no report"
+    "instance_skipped": "no report",
+    "instance_installing": "installing",
+    "instance_gone": "left the cluster"
   }
 }

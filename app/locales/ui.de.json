@@ -928,6 +928,8 @@
     "instance_done": "fertig",
     "instance_failed": "fehlgeschlagen",
     "instance_reverted": "zurückgesetzt",
-    "instance_skipped": "keine Rückmeldung"
+    "instance_skipped": "keine Rückmeldung",
+    "instance_installing": "installiert",
+    "instance_gone": "Cluster verlassen"
   }
 }

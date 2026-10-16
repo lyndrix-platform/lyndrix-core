@@ -1065,8 +1065,17 @@ class PluginService:
         vendor_dir.mkdir(exist_ok=True)
 
         try:
+            # Wheels are cached on the storage directory: in a cluster that is the
+            # shared mount, so the second instance installs from cache instead of
+            # downloading (and compiling) everything again.
+            cache_dir = Path(getattr(settings, "STORAGE_DIR", "/data/storage")) / ".pip-cache"
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_args = ["--cache-dir", str(cache_dir)]
+            except OSError:
+                cache_args = []
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install",
+                sys.executable, "-m", "pip", "install", *cache_args,
                 "--target", str(vendor_dir),
                 "--no-input",
                 "-r", str(req_file),

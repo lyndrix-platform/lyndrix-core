@@ -38,8 +38,12 @@ with every live instance as participant; each instance records its outcome
 notification. Followers emit no user-facing events of their own, the leader alone announces
 `plugin:update_available`, and the notification store itself is the shared database
 (`notifications`, `notification_user_states`) so the bell is identical on every instance.
-`GET /api/plugins/operations` shows the per-instance outcomes; participants without a report are
-closed as `skipped` after 10 minutes. Before 1.7
+`GET /api/plugins/operations` shows the per-instance outcomes (`installing` while an instance works).
+The timeout is activity based: an operation closes when no participant reported anything for
+10 minutes (hard cap 60 min) — a plugin with heavy requirements legitimately keeps six instances
+busy for minutes; pip wheels are cached under `STORAGE_DIR/.pip-cache` (shared in a cluster) so
+the followers install from cache. Instances replaced by a rollout meanwhile are marked `gone` and
+do not block the operation. Before 1.7
 every activation wrote the loaded version back, and six instances mid-rollout rewrote the row in
 turns ("revert storm": every peer downgraded and upgraded after each other). A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
 right after the `LYNDRIX_PLUGINS_DESIRED` pass, so it serves every plugin before the first periodic

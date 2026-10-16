@@ -36,7 +36,9 @@ log = get_logger("Core:PluginOps")
 CHANGED_TOPIC = "plugin:operation_changed"
 FINISHED_TOPIC = "plugin:operation_finished"
 TERMINAL_STATES = ("done", "failed", "reverted", "skipped", "gone")   # gone = instance left the cluster
-DEFAULT_TIMEOUT_S = 600
+PROGRESS_STATES = ("installing",)                                     # alive and working — never times out
+DEFAULT_TIMEOUT_S = 600          # no participant activity for this long → close
+HARD_TIMEOUT_S = 3600            # … but never run longer than this
 # A report attaches to the newest *running* operation of the plugin that is
 # younger than this; an older running one is stale (closed by the sweep soon).
 MATCH_WINDOW_S = 3600
@@ -141,9 +143,10 @@ class OperationTracker:
     def report(self, *, plugin_id: Optional[str], repo_name: Optional[str], status: str,
                message: Optional[str] = None, version: Optional[str] = None,
                instance_id: Optional[str] = None) -> Optional[int]:
-        """Record this instance's outcome for the newest running operation of the
-        plugin; closes the operation when every participant reported."""
-        if not self.available() or status not in TERMINAL_STATES:
+        """Record this instance's outcome (or progress, ``installing``) for the
+        newest running operation of the plugin; closes the operation when every
+        participant reported a terminal state."""
+        if not self.available() or status not in TERMINAL_STATES + PROGRESS_STATES:
             return None
         me = instance_id or self.instance_id()
         now = _utcnow()
@@ -217,31 +220,35 @@ class OperationTracker:
         if not self.available():
             return 0
         now = _utcnow()
-        cutoff = now - timedelta(seconds=max_age_s)
         finished_payloads: list[dict] = []
         live = set(self.live_instances())
 
         def _tx() -> int:
             closed = 0
             with self._session() as s:
-                # Instances that left (a rollout replaced the pods) never report:
-                # mark them gone on every running operation, which may close it.
-                for op in s.query(PluginOperation).filter(PluginOperation.status == "running").all():
+                running = s.query(PluginOperation).filter(PluginOperation.status == "running").all()
+                for op in running:
                     rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
+                    # Instances that left (a rollout replaced the pods) never report:
+                    # mark them gone, which may close the operation on the live ones.
                     if self._mark_gone(rows, live, now):
                         payload = self._maybe_close(op, rows, now)
                         if payload is not None:
                             finished_payloads.append(payload)
                             closed += 1
-                stale = s.query(PluginOperation).filter(
-                    PluginOperation.status == "running", PluginOperation.requested_at < cutoff,
-                ).all()
-                for op in stale:
-                    rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
+                            continue
+                    # Timeout is activity based: a plugin with heavy requirements
+                    # keeps six instances busy for minutes (pip into vendor/) —
+                    # as long as someone reports progress the operation lives on.
+                    last = max([op.requested_at] + [r.updated_at for r in rows if r.updated_at])
+                    idle_for = (now - last).total_seconds()
+                    age = (now - op.requested_at).total_seconds()
+                    if idle_for < max_age_s and age < HARD_TIMEOUT_S:
+                        continue
                     for row in rows:
                         if row.status not in TERMINAL_STATES:
                             row.status = "skipped"
-                            row.message = f"no report within {max_age_s}s"
+                            row.message = f"no report within {int(idle_for)}s"
                             row.updated_at = now
                     payload = self._maybe_close(op, rows, now)
                     if payload is not None:

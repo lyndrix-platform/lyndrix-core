@@ -11,7 +11,6 @@ Run inside the lyndrix-core runtime (deps + a writable /app), e.g.:
 import asyncio
 import textwrap
 
-import pytest
 
 from core.components.plugins.logic.plugin_service import PluginService
 from core.components.plugins.logic.manager import ModuleManager
@@ -109,3 +108,25 @@ def test_verify_fails_when_health_reports_error(tmp_path):
 def test_verify_fails_when_not_loaded(tmp_path):
     mgr = _mgr()
     assert asyncio.run(mgr._verify_after_install("missing")) is False
+
+
+def test_unload_runs_the_plugin_teardown_hook():
+    """Reload/upgrade/uninstall must run teardown like disable does — background
+    work a plugin started itself otherwise survives the swap (monitoring jobs
+    kept running against disposed ORM classes after an upgrade)."""
+    import types
+
+    from core.components.plugins.logic.manager import ModuleManager
+    from core.components.plugins.logic.models import ModuleManifest, ModulePermissions
+
+    mgr = ModuleManager()
+    seen = []
+    module = types.SimpleNamespace(
+        __name__="plugins.test_teardown_probe.entrypoint", __file__="/nonexistent/plugins/test_teardown_probe/entrypoint.py",
+        teardown=lambda ctx: seen.append(ctx),
+    )
+    manifest = ModuleManifest(id="lyndrix.plugin.test_teardown", name="TD", version="0.0.1", type="PLUGIN",
+                              permissions=ModulePermissions(emit=[], subscribe=[]))
+    mgr.registry["lyndrix.plugin.test_teardown"] = {"manifest": manifest, "module": module, "context": None, "status": "active"}
+    assert mgr.unload_module("lyndrix.plugin.test_teardown") is True
+    assert seen == [None] and "lyndrix.plugin.test_teardown" not in mgr.registry
