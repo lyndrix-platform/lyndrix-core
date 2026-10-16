@@ -185,6 +185,29 @@ class AuthService:
                         pass  # column already present — nothing to do
                     else:
                         log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
+        self._migrate_users_id_type()
+
+    def _migrate_users_id_type(self):
+        """Databases created before 1.1 have ``users.id`` as INT AUTO_INCREMENT while the
+        model has used a String(36) UUID since; on such a schema every ORM user insert
+        fails (MariaDB 1366 "Incorrect integer value" / 1265 "Data truncated"). Widen the
+        column in place — nothing references ``users.id`` by foreign key, existing rows
+        keep their numeric ids as strings. MariaDB/MySQL only; idempotent."""
+        if db_instance.engine.dialect.name not in ("mysql", "mariadb"):
+            return
+        with db_instance.engine.connect() as conn:
+            try:
+                row = conn.execute(text(
+                    "SELECT DATA_TYPE FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'id'"
+                )).first()
+                if row is None or str(row[0]).lower() not in ("int", "bigint", "smallint", "mediumint", "tinyint"):
+                    return
+                conn.execute(text("ALTER TABLE `users` MODIFY COLUMN `id` VARCHAR(36) NOT NULL"))
+                conn.commit()
+                log.info("MIGRATE: users.id widened from integer to VARCHAR(36) (UUID ids).")
+            except Exception as e:
+                log.warning(f"MIGRATE: Could not migrate users.id to VARCHAR(36): {e}")
 
     def _initialize_providers(self):
         """Register all configured authentication providers with the provider registry."""
