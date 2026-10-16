@@ -17,7 +17,9 @@
     "open_nav": "Open navigation",
     "toggle_sidebar": "Toggle sidebar",
     "loading_plugin": "Loading plugin…",
-    "plugin_settings": "Settings: {{name}}"
+    "plugin_settings": "Settings: {{name}}",
+    "plugin_settings_desc_route": "Open the configuration page of this plugin",
+    "plugin_settings_desc_dialog": "Edit the settings of this plugin"
   },
   "settings": {
     "title": "Settings",
@@ -787,7 +789,8 @@
   },
   "plugin_settings": {
     "title": "{{name}} — Settings",
-    "none": "This plugin has no configurable settings."
+    "none": "This plugin has no configurable settings.",
+    "subtitle": "Settings stored by the core (Vault) for"
   },
   "plugin_actions": {
     "section": "Actions",

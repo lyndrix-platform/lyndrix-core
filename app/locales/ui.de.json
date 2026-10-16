@@ -17,7 +17,9 @@
     "open_nav": "Navigation öffnen",
     "toggle_sidebar": "Menü ein-/ausklappen",
     "loading_plugin": "Plugin wird geladen…",
-    "plugin_settings": "Einstellungen: {{name}}"
+    "plugin_settings": "Einstellungen: {{name}}",
+    "plugin_settings_desc_route": "Konfigurationsseite dieses Plugins öffnen",
+    "plugin_settings_desc_dialog": "Einstellungen dieses Plugins bearbeiten"
   },
   "settings": {
     "title": "Einstellungen",
@@ -787,7 +789,8 @@
   },
   "plugin_settings": {
     "title": "{{name}} — Einstellungen",
-    "none": "Dieses Plugin hat keine konfigurierbaren Einstellungen."
+    "none": "Dieses Plugin hat keine konfigurierbaren Einstellungen.",
+    "subtitle": "Vom Core (Vault) verwaltete Einstellungen für"
   },
   "plugin_actions": {
     "section": "Aktionen",
