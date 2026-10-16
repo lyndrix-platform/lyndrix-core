@@ -21,6 +21,19 @@
     "plugin_settings_desc_route": "Konfigurationsseite dieses Plugins öffnen",
     "plugin_settings_desc_dialog": "Einstellungen dieses Plugins bearbeiten"
   },
+  "panels": {
+    "launcher": "Panels",
+    "launcher_hint": "Schwebende Fenster deiner Plugins",
+    "open": "Panel öffnen",
+    "close": "Schließen",
+    "minimize": "Minimieren",
+    "restore": "Wiederherstellen",
+    "pin": "Anpinnen – beim nächsten Login wieder öffnen",
+    "unpin": "Lösen",
+    "resize": "Größe ändern",
+    "state_open": "offen",
+    "empty": "Noch kein Plugin stellt ein Panel bereit."
+  },
   "settings": {
     "title": "Einstellungen",
     "subtitle": "Systemkonfiguration und Darstellung",

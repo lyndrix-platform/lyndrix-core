@@ -143,6 +143,8 @@ class MyRecord(Base):
 | `auto_enable_on_install` | recommended | Whether the plugin auto-activates on install — **default is `False`; the manifest defaults to not activating until configured** |
 | `repo_url` | recommended | Source repository URL — used for update checks and marketplace metadata — must point to the canonical `lyndrix-platform` org URL |
 | `notification_endpoints` | as needed | List of `NotificationEndpoint`s the plugin can route through the central [Notification Router](core-components/notification-router.md) |
+| `panels` | optional | Floating, per-user pinnable shell windows rendered from the plugin's React bundle — `[{id, label, icon, description?, default_size?, permission?}]` (see *Panels*, API 1.11) |
+| `ai_instructions` | optional | Markdown the plugin hands to the AI assistant about itself (purpose, API paths, vocabulary, cautions; max 20 kB). Never served to shells — read through `core.api.module_registry` (API 1.11) |
 
 ### Settings actions (API 1.6)
 
@@ -534,6 +536,81 @@ ctx.clear_nav_entries()       # same as register_nav_entries([])
 - Guard with `getattr(ctx, "register_nav_entries", None)` to stay loadable on older cores.
 
 Reference: `plugins/lyndrix-plugin-external-services` (`app/logic/routing.py`).
+
+## Panels (API 1.11)
+
+A **panel** is a floating window the React shell hosts *above every page* — a chat, a live log, a
+quick form. The user opens it from the launcher in the header, drags and resizes it, minimises,
+pins or closes it; the shell remembers all of that **per user** and across devices. The content is
+the plugin's own React bundle, so a plugin needs `react_ui=True` and a built `ui_bundle.js`.
+
+```python
+manifest = ModuleManifest(
+    ...,
+    react_ui=True,
+    panels=[
+        {
+            "id": "chat",                       # slug [a-z][a-z0-9_-]{0,40}, unique per plugin
+            "label": "Assistant",               # title-bar text (required)
+            "icon": "smart_toy",                # Material icon name (default "extension")
+            "description": "Ask the AI about this installation",      # optional, launcher hint
+            "default_size": {"width": 420, "height": 560},            # optional, px (min 320×240)
+            "permission": "plugin:lyndrix.plugin.ai_assistant:api:read",  # optional extra gate
+        },
+    ],
+)
+```
+
+- Invalid declarations fail manifest validation (`ValueError`), exactly like the other manifest
+  fields. `panels` is part of `PluginOut` (`GET /api/plugins`).
+- **Visibility.** The launcher lists a panel when the caller may see the plugin (`plugin:<id>`
+  grant, as for sidebar entries) *and* — if `permission` is set — holds that permission too.
+  Enforcement still happens in the plugin's API; the flag only decides what is offered.
+- **The `panel` prop.** The shell mounts the bundle's `PluginApp` with one optional prop:
+
+  ```tsx
+  // What the shell passes — nothing when the plugin is rendered as a page.
+  interface PluginPanelContext { id: string; pluginId: string }
+
+  export default function PluginApp({ panel }: { panel?: PluginPanelContext }) {
+    if (panel?.id === 'chat') return <ChatView compact />   // panel-aware: compact layout
+    return <FullPage />                                     // page route (and unknown panels)
+  }
+  ```
+
+  A plugin that ignores the prop simply shows its default view inside the window — existing
+  bundles keep working unchanged. The same bundle instance serves pages and panels, so keep
+  module-level state panel-agnostic (two mounts can be alive at once).
+- **Per-user state** lives in the account preferences document (`GET/PUT /api/me/preferences`,
+  deep-merged server-side) under the `panels` namespace, one entry per `"<plugin_id>/<panel_id>"`:
+  `{open, pinned, minimized, x, y, width, height, z}`. The shell writes it debounced; position and
+  size are always restored, `open` is restored only for **pinned** panels (an unpinned panel is
+  closed again on the next login). Plugins never touch this document.
+- **Lifecycle.** The window remounts its content on `plugin:state_changed` for the plugin (same as
+  a page route); warm-up (`ctx.set_status(..., blocking=True)`) and `pinned:<role>` "remote" states
+  render the same stand-ins as a page. Below the `md` breakpoint open panels appear as a bottom
+  sheet (no drag/resize).
+- Guard nothing: the field is ignored by older cores (unknown manifest fields are dropped by the
+  validator), so declaring `panels` is safe for plugins that also run on cores < 1.9.
+
+### `module_registry` (API 1.11)
+
+Plugins that need to know about *other* plugins — the AI assistant collects every plugin's
+`ai_instructions` — read the loaded manifests through a read-only view instead of reaching into
+`core.components.plugins.*`:
+
+```python
+from core.api import module_registry
+
+for m in module_registry.get_manifests():          # List[ModuleManifest]
+    if m.ai_instructions:
+        write_instruction_file(m.id, m.ai_instructions)
+module_registry.get("lyndrix.plugin.itsm")         # ModuleManifest | None
+module_registry.is_active("lyndrix.plugin.itsm")   # loaded *and* active
+```
+
+It is a view: no loading, enabling or mutation. Treat the result as optional data — another
+plugin may be absent or disabled — and refresh it on `plugin:state_changed`.
 
 ## Authentication extensions
 

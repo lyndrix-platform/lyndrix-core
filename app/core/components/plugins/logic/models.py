@@ -9,6 +9,10 @@ from core.components.database.logic.db_service import Base
 
 _ENDPOINT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _PLACEMENT_RE = re.compile(r"^(any|singleton|pinned:[a-z][a-z0-9_-]{0,30})$")
+# Panel ids are slugs: they end up in preference keys (``<plugin>/<panel>``) and DOM ids.
+_PANEL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,40}$")
+# ``ai_instructions`` is Markdown handed to the AI assistant — keep it a note, not a book.
+_AI_INSTRUCTIONS_MAX_CHARS = 20_000
 
 # ==========================================
 # 1. PYDANTIC MODELS (In-Memory Validation)
@@ -198,6 +202,25 @@ class ModuleManifest(BaseModel):
     #                    include <role>; other instances answer 503 "remote" for its routes
     placement: str = Field(default="any", description="any | singleton | pinned:<role>")
 
+    # --- Panels (core API >= 1.11) ---
+    # Floating, per-user pinnable windows the React shell hosts above every page.
+    # The shell loads the plugin's own React bundle into the window and renders
+    # ``<PluginApp panel={{id, pluginId}} />`` — a plugin that ignores the prop
+    # shows its default view; a panel-aware one switches to a compact view.
+    # Shape: {id (slug), label, icon (Material name), description?,
+    #         default_size?: {width, height} (px), permission?}.
+    panels: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Floating shell windows [{id, label, icon, description?, default_size?, permission?}]",
+    )
+    # Markdown a plugin hands to the AI assistant about itself (purpose, API
+    # paths, vocabulary, cautions). Collected by the assistant plugin through
+    # ``core.api.module_registry``; never served to the shell.
+    ai_instructions: Optional[str] = Field(
+        default=None,
+        description="Markdown instructions for the AI assistant about this plugin (max 20 kB)",
+    )
+
     @field_validator("placement")
     @classmethod
     def _validate_placement(cls, value: str) -> str:
@@ -205,6 +228,64 @@ class ModuleManifest(BaseModel):
         if not _PLACEMENT_RE.match(value):
             raise ValueError(
                 f"placement '{value}' is invalid — use 'any', 'singleton' or 'pinned:<role>' (role: [a-z][a-z0-9_-]*)"
+            )
+        return value
+
+    @field_validator("panels")
+    @classmethod
+    def _validate_panels(cls, value: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normalise and validate panel declarations (invalid → ValueError)."""
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in value or []:
+            if not isinstance(raw, dict):
+                raise ValueError(f"panel declaration must be a mapping, got {type(raw).__name__}")
+            pid = raw.get("id")
+            if not isinstance(pid, str) or not _PANEL_ID_RE.match(pid):
+                raise ValueError(f"panel id {pid!r} must be a slug ([a-z][a-z0-9_-]{{0,40}})")
+            if pid in seen:
+                raise ValueError(f"panel id '{pid}' is declared twice")
+            seen.add(pid)
+            label = raw.get("label")
+            if not isinstance(label, str) or not label.strip():
+                raise ValueError(f"panel '{pid}': 'label' is required")
+            icon = raw.get("icon", "extension")
+            if not isinstance(icon, str) or not icon.strip():
+                raise ValueError(f"panel '{pid}': 'icon' must be a Material icon name")
+            panel: Dict[str, Any] = {"id": pid, "label": label.strip(), "icon": icon.strip()}
+            description = raw.get("description")
+            if description is not None:
+                if not isinstance(description, str):
+                    raise ValueError(f"panel '{pid}': 'description' must be a string")
+                panel["description"] = description
+            size = raw.get("default_size")
+            if size is not None:
+                if not isinstance(size, dict):
+                    raise ValueError(f"panel '{pid}': 'default_size' must be {{width, height}}")
+                dims: Dict[str, int] = {}
+                for dim in ("width", "height"):
+                    n = size.get(dim)
+                    # bool is an int subclass — reject it explicitly.
+                    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+                        raise ValueError(f"panel '{pid}': default_size.{dim} must be a positive integer")
+                    dims[dim] = n
+                panel["default_size"] = dims
+            permission = raw.get("permission")
+            if permission is not None:
+                if not isinstance(permission, str) or not permission.strip():
+                    raise ValueError(f"panel '{pid}': 'permission' must be a permission id")
+                panel["permission"] = permission.strip()
+            out.append(panel)
+        return out
+
+    @field_validator("ai_instructions")
+    @classmethod
+    def _validate_ai_instructions(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if len(value) > _AI_INSTRUCTIONS_MAX_CHARS:
+            raise ValueError(
+                f"ai_instructions is {len(value)} characters — keep it under {_AI_INSTRUCTIONS_MAX_CHARS}"
             )
         return value
 

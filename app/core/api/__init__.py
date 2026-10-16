@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.10
+Lyndrix Core Plugin API — Stable Surface v1.11
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -105,11 +105,48 @@ and refetch on ``nav:changed``; ``open_mode`` is ``iframe`` (embedded at
 such as ``/apps/<plugin>/<route>``). Entries are per instance — register them
 from the shared DB on every instance — and vanish with the plugin.
 
+Panels (API 1.11)
+-----------------
+A plugin declares floating, per-user pinnable windows that the React shell
+hosts above every page (launcher in the header, position/size/open state
+remembered per user in ``/api/me/preferences`` under ``panels``)::
+
+    manifest = ModuleManifest(..., react_ui=True, panels=[
+        {"id": "chat", "label": "Assistant", "icon": "smart_toy",
+         "description": "Ask the AI about this installation",
+         "default_size": {"width": 420, "height": 560},
+         "permission": "plugin:lyndrix.plugin.ai_assistant:api:read"},   # optional
+    ])
+
+The shell loads the plugin's own React bundle into the window and renders
+``<PluginApp panel={{ id: "chat", pluginId: "<manifest.id>" }} />``. A plugin
+that ignores the ``panel`` prop shows its default view; a panel-aware one
+switches to a compact layout. ``panels`` is part of ``PluginOut`` (``GET
+/api/plugins``); ids are slugs (``[a-z][a-z0-9_-]{0,40}``).
+
+``ModuleManifest.ai_instructions`` (API 1.11) is Markdown a plugin hands to
+the AI assistant about itself (purpose, API paths, vocabulary, cautions; max
+20 kB). It is NOT served to shells.
+
+module_registry (API 1.11)
+--------------------------
+A read-only view of the loaded manifests for plugins that need to know about
+other plugins (the AI assistant collects every ``ai_instructions``)::
+
+    from core.api import module_registry
+    for m in module_registry.get_manifests():      # List[ModuleManifest]
+        ...
+    module_registry.get("lyndrix.plugin.itsm")     # ModuleManifest | None
+    module_registry.is_active("lyndrix.plugin.itsm")
+
+It is a view, not the manager: no loading, enabling or registry mutation.
+Treat the data as optional — another plugin may be absent or disabled.
+
 Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.10.0"
+__api_version__ = "1.11.0"
 
 from typing import Any, Dict, Literal, Optional
 
@@ -179,6 +216,41 @@ plugin_service = _lazy("core.components.plugins.logic.plugin_service.plugin_serv
 # ctx.* accessors; this is for dashboards/diagnostics.
 cluster_service = _lazy("core.components.cluster.logic.cluster_service.cluster_service")
 
+
+class _ModuleRegistryView:
+    """Read-only window onto the module manager's registry (API 1.11).
+
+    Deliberately NOT the whole ``ModuleManager``: plugins get the loaded
+    manifests and activation state, nothing that loads, enables or mutates
+    modules. Resolves the manager lazily (circular imports at module load).
+    """
+
+    @staticmethod
+    def _manager():
+        from core.components.plugins.logic.manager import module_manager
+
+        return module_manager
+
+    def get_manifests(self) -> list:
+        """Manifests of every loaded module (core components and plugins)."""
+        return list(self._manager().get_manifests())
+
+    def get(self, module_id: str):
+        """Manifest of one loaded module, or ``None`` when it is not loaded."""
+        entry = self._manager().registry.get(module_id)
+        return entry.get("manifest") if entry else None
+
+    def is_active(self, module_id: str) -> bool:
+        """Whether the module is loaded *and* active (not disabled/failed/remote)."""
+        entry = self._manager().registry.get(module_id)
+        return bool(entry) and entry.get("status") == "active"
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "<ModuleRegistryView (read-only)>"
+
+
+module_registry = _ModuleRegistryView()
+
 # Theming — stable plugin surface
 # Import after services to avoid circular-import issues at module load time.
 from ui.theme import UIStyles  # noqa: E402
@@ -242,6 +314,8 @@ __all__ = [
     "monitor_service",
     "plugin_service",
     "cluster_service",
+    # Read-only manifests of loaded modules (API 1.11)
+    "module_registry",
     # Theming
     "UIStyles",
     "ThemeEngine",

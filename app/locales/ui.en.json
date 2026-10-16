@@ -21,6 +21,19 @@
     "plugin_settings_desc_route": "Open the configuration page of this plugin",
     "plugin_settings_desc_dialog": "Edit the settings of this plugin"
   },
+  "panels": {
+    "launcher": "Panels",
+    "launcher_hint": "Floating windows of your plugins",
+    "open": "Open panel",
+    "close": "Close",
+    "minimize": "Minimize",
+    "restore": "Restore",
+    "pin": "Pin — reopen on next login",
+    "unpin": "Unpin",
+    "resize": "Resize",
+    "state_open": "open",
+    "empty": "No plugin provides a panel yet."
+  },
   "settings": {
     "title": "Settings",
     "subtitle": "System configuration and appearance",

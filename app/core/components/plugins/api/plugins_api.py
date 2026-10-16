@@ -42,6 +42,11 @@ class PluginOut(BaseModel):
     # Cluster placement (core API ≥ 1.7): any | singleton | pinned:<role>.
     # status == "remote" means it is pinned to a role this instance lacks.
     placement: str = "any"
+    # Floating shell windows the plugin declares (core API ≥ 1.11):
+    # [{id, label, icon, description?, default_size?: {width, height}, permission?}].
+    # ``ai_instructions`` is deliberately NOT part of this model — it is for the
+    # AI assistant plugin (core.api.module_registry), not for shells.
+    panels: List[dict] = []
 
 
 class PluginSettingsUpdate(BaseModel):
@@ -121,6 +126,7 @@ def _to_plugin_out(module_id: str, entry: dict) -> PluginOut:
         log_source=f"{'Core' if manifest.type == 'CORE' else 'Plugin'}:{manifest.name}",
         runtime=_manager().get_runtime(module_id),
         placement=getattr(manifest, "placement", "any") or "any",
+        panels=list(getattr(manifest, "panels", None) or []),
     )
 
 
