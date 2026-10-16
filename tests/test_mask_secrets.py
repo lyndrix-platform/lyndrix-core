@@ -16,16 +16,17 @@ def test_env_var_pairs_keep_names_and_mask_values():
     out = mask_secrets(payload)
     env = out["args"]["env_vars"]
     assert env[0] == {"key": "LYNDRIX_AI_BRIDGE_TOKEN", "value": "********"}
-    # inside an env list every value is masked, the name stays readable
     assert env[1] == {"key": "LYNDRIX_API_URL", "value": "********"}
     assert out["args"]["image"] == "ghcr.io/x/runner:latest"
-    assert "s3cr3t" not in repr(out)
+    assert "s3cr3t" not in repr(out) and "8081" not in repr(out)
 
 
-def test_pairs_outside_env_lists_mask_by_name_only():
-    items = [{"key": "GITLAB_TOKEN", "value": "abc"}, {"key": "color", "value": "blue"}]
-    out = mask_secrets({"items": items})["items"]
-    assert out[0]["value"] == "********" and out[1]["value"] == "blue"
+def test_pair_keys_that_are_not_env_names_are_masked_too():
+    # a secret sitting in a "key" field (identifier-like) must not become readable
+    out = mask_secrets({"items": [{"key": "lyk_SDvV2DuC0abc", "value": "x", "label": "runner"},
+                                  {"key": "color", "value": "blue"}]})["items"]
+    assert out[0] == {"label": "runner", "key": "********", "value": "********"}
+    assert out[1] == {"key": "********", "value": "********"}
 
 
 def test_plain_sensitive_keys_still_masked():

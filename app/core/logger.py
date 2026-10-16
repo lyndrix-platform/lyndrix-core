@@ -81,7 +81,9 @@ _SENSITIVE_MARKERS = ("token", "password", "passwd", "secret", "private_key", "a
 # Dict keys whose content is a list of environment variables: every value is masked,
 # the names stay readable (``docker:spawn`` requests, runner env, ...).
 _ENV_CONTAINERS = {"env_vars", "env", "environment"}
-_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}")
+# Environment-variable style names (SCREAMING_SNAKE). Anything else that sits in a
+# ``key`` field could itself be a secret (API keys are identifier-like too) and stays masked.
+_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
 def _sensitive_name(name: str) -> bool:
@@ -94,15 +96,16 @@ def mask_secrets(obj, *, in_env: bool = False):
 
     Reused by both the log formatter and the event bus so payload dicts are
     redacted by key name before they are stringified for logging. ``{key, value}``
-    pairs (environment-variable style) keep the *name* readable and mask the value
-    when the name is secret-bearing — or always inside an env-var list — so a
-    ``docker:spawn`` request never prints a token.
+    pairs (environment-variable style) always mask the *value*; the *name* stays
+    readable only when it looks like an env-var name (``LYNDRIX_API_URL``), so a
+    ``docker:spawn`` request shows which variables were set but never a token.
     """
     if isinstance(obj, dict):
         key_name = obj.get("key")
-        if "value" in obj and isinstance(key_name, str) and _IDENTIFIER_RE.fullmatch(key_name):
-            masked = "********" if (in_env or _sensitive_name(key_name)) else mask_secrets(obj["value"])
-            return {**{k: v for k, v in obj.items() if k != "value"}, "value": masked}
+        if "value" in obj and isinstance(key_name, str):
+            name = key_name if _ENV_NAME_RE.fullmatch(key_name) else "********"
+            return {**{k: mask_secrets(v) for k, v in obj.items() if k not in ("key", "value")},
+                    "key": name, "value": "********"}
         return {
             k: "********" if (isinstance(k, str) and k.lower() in SENSITIVE_KEYS)
             else mask_secrets(v, in_env=isinstance(k, str) and k.lower() in _ENV_CONTAINERS)
