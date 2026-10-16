@@ -612,6 +612,41 @@ module_registry.is_active("lyndrix.plugin.itsm")   # loaded *and* active
 It is a view: no loading, enabling or mutation. Treat the result as optional data — another
 plugin may be absent or disabled — and refresh it on `plugin:state_changed`.
 
+## AI instructions (API 1.12)
+
+A plugin describes itself to the AI assistant in two tiers — and stays the single
+source of truth for both:
+
+- `ai_instructions` (manifest, API 1.11): one short paragraph — what the plugin is for
+  and when an assistant should reach for it. Not in `PluginOut`; read through
+  `core.api.module_registry`.
+- `ai_instructions_route` (manifest, API 1.12): the path below the plugin's API prefix
+  where the plugin serves its **full operating guide**, by convention `/ai/instructions`.
+  The route is the plugin's own and answers
+  `{"plugin_id", "version", "format": "markdown", "markdown": "<guide>"}` — read live
+  from a Markdown file in the plugin repo (e.g. `ai/INSTRUCTIONS.md`), so the text is
+  always the running version's and nothing is copied anywhere:
+
+```python
+manifest = ModuleManifest(..., ai_instructions="GitOps control plane … reach for it to …",
+                          ai_instructions_route="/ai/instructions")
+
+@router.get("/ai/instructions")
+async def ai_instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
+    path = Path(__file__).resolve().parents[1] / "ai" / "INSTRUCTIONS.md"
+    text = await asyncio.to_thread(lambda: path.read_text(encoding="utf-8") if path.is_file() else "")
+    return {"plugin_id": PLUGIN_ID, "version": manifest.version, "format": "markdown", "markdown": text}
+```
+
+The core only indexes: `GET /api/ai/plugins` (`api:read`) returns
+`{"generated_at", "plugins": [{id, name, version, status (active|remote), purpose,
+instructions_url}]}` built purely from the registry — no plugin knowledge, no stored
+bodies; a plugin with neither field does not appear. `module_registry.status(id)` (API
+1.12) exposes the registry status for in-process consumers. The AI assistant plugin
+generates its `CLAUDE.md` from this index and fetches a guide on demand, cached per
+plugin version. Older cores ignore the new manifest field (no `min_core_version` bump
+needed for the field alone).
+
 ## Authentication extensions
 
 Plugins can register custom authentication providers at runtime through the event bus.

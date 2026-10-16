@@ -13,6 +13,7 @@ _PLACEMENT_RE = re.compile(r"^(any|singleton|pinned:[a-z][a-z0-9_-]{0,30})$")
 _PANEL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,40}$")
 # ``ai_instructions`` is Markdown handed to the AI assistant — keep it a note, not a book.
 _AI_INSTRUCTIONS_MAX_CHARS = 20_000
+_AI_ROUTE_RE = re.compile(r"^/[A-Za-z0-9_\-./]{1,120}$")
 
 # ==========================================
 # 1. PYDANTIC MODELS (In-Memory Validation)
@@ -220,6 +221,16 @@ class ModuleManifest(BaseModel):
         default=None,
         description="Markdown instructions for the AI assistant about this plugin (max 20 kB)",
     )
+    # --- AI instructions, full guide (core API >= 1.12) ---
+    # ``ai_instructions`` stays the short purpose ("what I am for, when to reach for
+    # me"). The full operating guide is served by the plugin itself at this path
+    # below its API prefix (convention "/ai/instructions"), as JSON
+    # {plugin_id, version, format: "markdown", markdown}. The core only indexes
+    # it (GET /api/ai/plugins) — it never stores or embeds the text.
+    ai_instructions_route: Optional[str] = Field(
+        default=None,
+        description="Path below /api/plugins/<id> that serves the full AI guide, e.g. '/ai/instructions'",
+    )
 
     @field_validator("placement")
     @classmethod
@@ -277,6 +288,18 @@ class ModuleManifest(BaseModel):
                 panel["permission"] = permission.strip()
             out.append(panel)
         return out
+
+    @field_validator("ai_instructions_route")
+    @classmethod
+    def _validate_ai_instructions_route(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        value = str(value).strip()
+        if not _AI_ROUTE_RE.match(value) or ".." in value:
+            raise ValueError(
+                f"ai_instructions_route '{value}' is invalid — a path like '/ai/instructions' below the plugin API prefix"
+            )
+        return value.rstrip("/") or None
 
     @field_validator("ai_instructions")
     @classmethod

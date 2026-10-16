@@ -146,7 +146,7 @@ Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.11.0"
+__api_version__ = "1.12.0"
 
 from typing import Any, Dict, Literal, Optional
 
@@ -244,6 +244,12 @@ class _ModuleRegistryView:
         """Whether the module is loaded *and* active (not disabled/failed/remote)."""
         entry = self._manager().registry.get(module_id)
         return bool(entry) and entry.get("status") == "active"
+
+    def status(self, module_id: str):
+        """Registry status of a loaded module (``active``, ``remote``, ``disabled``,
+        ``failed``, ...) or ``None`` when it is not loaded (API 1.12)."""
+        entry = self._manager().registry.get(module_id)
+        return entry.get("status") if entry else None
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return "<ModuleRegistryView (read-only)>"
