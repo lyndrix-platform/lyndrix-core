@@ -253,3 +253,50 @@ def test_row_version_sync_policy(monkeypatch, mode, row, loaded, reverted, expec
     entry = {"reverted_from": reverted} if reverted else {}
     ModuleManager._sync_row_version(db_state, manifest, entry)
     assert db_state.installed_version == expected
+
+
+def test_reconcile_leaves_a_plugin_alone_while_its_install_is_in_flight(monkeypatch, tmp_path):
+    """The lead's own periodic reconcile fired mid-reload and downgraded the
+    half-loaded plugin back to the row's old version (k3s, monitoring 1.6.2)."""
+    mgr, calls = _reconcile_env(monkeypatch, have="1.6.1", want="1.6.2")
+    folder = tmp_path / "lyndrix_plugin_x"
+    folder.mkdir()
+    (folder / "entrypoint.py").write_text('manifest = ModuleManifest(id="lyndrix.plugin.x", version="1.6.1")\n')
+    mgr.registry["lyndrix.plugin.x"]["module"] = types.SimpleNamespace(__file__=str(folder / "entrypoint.py"))
+
+    async def run():
+        lock = mgr._lock_for("install:lyndrix_plugin_x")
+        async with lock:                                   # the install handler holds it
+            summary = await mgr.reconcile_cluster_state(trigger="periodic")
+            assert calls == [] and not summary.get("upgraded")
+        summary = await mgr.reconcile_cluster_state(trigger="periodic")   # released → upgrades
+        assert len(calls) == 1 and summary.get("upgraded") == ["lyndrix.plugin.x"]
+
+    asyncio.run(run())
+
+
+def test_lead_records_the_target_version_before_reloading(monkeypatch, tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from core.components.database.logic import db_service
+    from core.components.plugins.logic.models import PluginState
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    PluginState.__table__.create(bind=engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(db_service.db_instance, "SessionLocal", Session, raising=False)
+    monkeypatch.setattr(db_service.db_instance, "is_connected", True, raising=False)
+    monkeypatch.setattr(db_service.db_instance, "engine", engine, raising=False)
+    with Session() as s:
+        s.add(PluginState(module_id="lyndrix.plugin.v", is_active=True, installed_version="1.0.0",
+                          desired_version="1.0.0", repo_url="https://x/y"))
+        s.commit()
+    mgr = ModuleManager()
+    monkeypatch.setattr(mgr, "_ensure_plugin_state_schema", lambda: None)
+    mgr._write_row_version("lyndrix.plugin.v", "1.1.0")
+    with Session() as s:
+        row = s.get(PluginState, "lyndrix.plugin.v")
+        assert row.installed_version == "1.1.0" and row.desired_version == "1.1.0"
+    mgr._write_row_version("lyndrix.plugin.unknown", "9.9.9")   # no row → no-op, no error

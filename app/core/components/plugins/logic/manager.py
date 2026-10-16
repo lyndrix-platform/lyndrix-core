@@ -334,6 +334,16 @@ class ModuleManager:
         lead = bool(payload.get("lead", True))
         log.info(f"MANAGER: Received install event for '{module_name}'. Loading module...")
         existing_module_id = self._find_plugin_id_by_folder(module_name)
+        if lead:
+            # Record the version the cluster is moving to BEFORE the (async) reload:
+            # a reconcile that runs meanwhile — periodic, or triggered by a peer —
+            # compares the row with the manifest it sees and would otherwise
+            # "correct" the half-loaded lead back to the old version (seen on
+            # the k3s cluster: the lead downgraded itself mid-upgrade).
+            target_id = existing_module_id or self._read_plugin_manifest_id(module_name)
+            target_version = self._read_folder_version(module_name)
+            if target_id and target_version:
+                await asyncio.to_thread(self._write_row_version, target_id, target_version)
         if not existing_module_id:
             # Folder-name resolution can miss when an upgrade atomically swapped
             # the on-disk folder or the folder name changed between versions.
@@ -1140,6 +1150,8 @@ class ModuleManager:
                 entry = self.registry.get(mid)
                 if entry is None:
                     folder = await asyncio.to_thread(self._folder_for_state, row)
+                    if folder and self._install_in_flight(folder):
+                        continue  # being reloaded by the install handler right now
                     if folder:
                         if self.load_module(folder, is_plugin=True):
                             summary["loaded"].append(mid)
@@ -1248,6 +1260,9 @@ class ModuleManager:
             return False
         if mid in self._reconcile_upgrading or not self._reconcile_install_allowed(mid):
             return False
+        module_file = getattr(entry.get("module"), "__file__", None)
+        if module_file and self._install_in_flight(Path(module_file).parent.name):
+            return False  # the install handler is mid-reload — never second-guess it
         # The files may already be swapped while the plugin:files_changed load is
         # still queued (reconciles triggered by several peers within a second):
         # downloading again would reload the module under the pending load.
@@ -1272,6 +1287,44 @@ class ModuleManager:
             self._reconcile_install_backoff.pop(mid, None)
             summary.setdefault("upgraded", []).append(mid)
         return True
+
+    def _read_folder_version(self, module_name: str) -> str | None:
+        """``manifest.version`` of the plugin folder on disk (static read, no import)."""
+        try:
+            from core.components.plugins.logic.plugin_service import PluginService
+            entrypoint = Path(self.base_path) / "plugins" / module_name / "entrypoint.py"
+            if entrypoint.exists():
+                return PluginService._extract_manifest_field(str(entrypoint), "version")
+        except Exception as exc:
+            log.debug(f"MANAGER: folder version probe failed for '{module_name}': {exc}")
+        return None
+
+    def _write_row_version(self, module_id: str, version: str) -> None:
+        """Lead only: move ``plugin_states.installed_version`` to the version whose
+        files are in place here (blocking; no-op without a row)."""
+        if not db_instance.SessionLocal:
+            return
+        self._ensure_plugin_state_schema()
+
+        def _tx():
+            with self._state_session() as session:
+                row = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+                if row is not None and row.installed_version != version:
+                    row.installed_version = version
+                    row.desired_version = version
+                    session.commit()
+
+        try:
+            self._retry_state_write(_tx)
+        except Exception as exc:
+            log.warning(f"MANAGER: could not record version {version} for '{module_id}': {exc}")
+
+    def _install_in_flight(self, folder: str | None) -> bool:
+        """An install/reload of this folder is being handled right now."""
+        if not folder:
+            return False
+        lock = self._locks.get(f"install:{folder}")
+        return bool(lock is not None and lock.locked())
 
     def _disk_version(self, entry: dict) -> str | None:
         """``manifest.version`` of the artifact currently on disk for a loaded

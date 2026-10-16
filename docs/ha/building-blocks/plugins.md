@@ -28,6 +28,9 @@ loaded artifact differs from the row is behind and catches up, it never pulls th
 version. A local post-install verification failure auto-reverts the files on that instance only
 (`reverted_from`) and leaves the row alone, so the next reconcile retries the cluster's version.
 The verification itself waits up to 24 s for a plugin that is still bootstrapping.
+The lead records the target version in the row *before* it reloads (1.8.4), and a reconcile
+never touches a plugin whose install is in flight on the same instance — otherwise the lead's own
+periodic reconcile could "correct" the half-loaded plugin back to the old version.
 
 **One notification per operation (core ≥ 1.8).** The API call opens a `plugin_operations` row
 with every live instance as participant; each instance records its outcome
