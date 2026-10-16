@@ -9,8 +9,8 @@ Usage::
 
 from datetime import datetime
 
-__version__: str = "1.9.2"
-__version_info__: tuple[int, int, int] = (1, 9, 2)
+__version__: str = "1.9.3"
+__version_info__: tuple[int, int, int] = (1, 9, 3)
 __release_date__: str = "2026-10-16"
 __codename__: str = "First Light"
 

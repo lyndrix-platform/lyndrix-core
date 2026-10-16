@@ -1065,15 +1065,20 @@ class PluginService:
         vendor_dir.mkdir(exist_ok=True)
 
         try:
-            # Wheels are cached on the storage directory: in a cluster that is the
-            # shared mount, so the second instance installs from cache instead of
-            # downloading (and compiling) everything again.
-            cache_dir = Path(getattr(settings, "STORAGE_DIR", "/data/storage")) / ".pip-cache"
-            try:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_args = ["--cache-dir", str(cache_dir)]
-            except OSError:
-                cache_args = []
+            # Optional shared wheel cache (LYNDRIX_PLUGIN_PIP_CACHE_DIR): speeds up
+            # the followers of a cluster, but a writable shared cache lets anyone
+            # with write access to that storage poison the next install on every
+            # instance — so it is OFF by default and, when set, created 0700.
+            cache_args: list[str] = []
+            cache_setting = str(getattr(settings, "LYNDRIX_PLUGIN_PIP_CACHE_DIR", "") or "").strip()
+            if cache_setting:
+                cache_dir = Path(cache_setting)
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    os.chmod(cache_dir, 0o700)
+                    cache_args = ["--cache-dir", str(cache_dir)]
+                except OSError as exc:
+                    log.warning(f"DEPENDENCIES: pip cache dir {cache_dir} unusable ({exc}); installing without cache.")
             process = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "pip", "install", *cache_args,
                 "--target", str(vendor_dir),

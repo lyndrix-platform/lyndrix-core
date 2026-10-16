@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # killed by the server instead of piling up after the client gave up.
     # 0 disables the cap. Long batch jobs raise it per session.
     DB_STATEMENT_TIMEOUT_SECONDS: int = 60
+    # Optional pip wheel cache for plugin requirement installs. Empty (default) =
+    # pip's per-instance default. Pointing it at the shared storage speeds up the
+    # followers of a cluster, but anyone who can write that directory could poison
+    # the next install on every instance — enable only on trusted storage.
+    LYNDRIX_PLUGIN_PIP_CACHE_DIR: str = ""
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"

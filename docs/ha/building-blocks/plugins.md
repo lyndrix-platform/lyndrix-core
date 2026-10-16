@@ -41,8 +41,9 @@ notification. Followers emit no user-facing events of their own, the leader alon
 `GET /api/plugins/operations` shows the per-instance outcomes (`installing` while an instance works).
 The timeout is activity based: an operation closes when no participant reported anything for
 10 minutes (hard cap 60 min) — a plugin with heavy requirements legitimately keeps six instances
-busy for minutes; pip wheels are cached under `STORAGE_DIR/.pip-cache` (shared in a cluster) so
-the followers install from cache. Instances replaced by a rollout meanwhile are marked `gone` and
+busy for minutes; an optional wheel cache (`LYNDRIX_PLUGIN_PIP_CACHE_DIR`, off by default) lets
+the followers install from a shared cache — only on storage nobody but the cores can write, since
+a poisoned cache would reach every instance. Instances replaced by a rollout meanwhile are marked `gone` and
 do not block the operation. Before 1.7
 every activation wrote the loaded version back, and six instances mid-rollout rewrote the row in
 turns ("revert storm": every peer downgraded and upgraded after each other). A fresh instance (new pod, empty plugin directory) runs the same reconcile at boot,
