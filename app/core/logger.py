@@ -75,19 +75,41 @@ log_capture_buffer = log_ring._all
 SENSITIVE_KEYS = {'token', 'password', 'secret', 'secret_value', 'private_key', 'key', 'auth'}
 
 
-def mask_secrets(obj):
+# Substrings that mark a *name* (dict key, env-var name) as secret-bearing.
+_SENSITIVE_MARKERS = ("token", "password", "passwd", "secret", "private_key", "api_key",
+                      "apikey", "credential", "auth")
+# Dict keys whose content is a list of environment variables: every value is masked,
+# the names stay readable (``docker:spawn`` requests, runner env, ...).
+_ENV_CONTAINERS = {"env_vars", "env", "environment"}
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}")
+
+
+def _sensitive_name(name: str) -> bool:
+    n = name.lower()
+    return n in SENSITIVE_KEYS or any(marker in n for marker in _SENSITIVE_MARKERS)
+
+
+def mask_secrets(obj, *, in_env: bool = False):
     """Recursively replace sensitive values in dicts/lists with a mask.
 
     Reused by both the log formatter and the event bus so payload dicts are
-    redacted by key name before they are stringified for logging.
+    redacted by key name before they are stringified for logging. ``{key, value}``
+    pairs (environment-variable style) keep the *name* readable and mask the value
+    when the name is secret-bearing — or always inside an env-var list — so a
+    ``docker:spawn`` request never prints a token.
     """
     if isinstance(obj, dict):
+        key_name = obj.get("key")
+        if "value" in obj and isinstance(key_name, str) and _IDENTIFIER_RE.fullmatch(key_name):
+            masked = "********" if (in_env or _sensitive_name(key_name)) else mask_secrets(obj["value"])
+            return {**{k: v for k, v in obj.items() if k != "value"}, "value": masked}
         return {
-            k: "********" if k.lower() in SENSITIVE_KEYS else mask_secrets(v)
+            k: "********" if (isinstance(k, str) and k.lower() in SENSITIVE_KEYS)
+            else mask_secrets(v, in_env=isinstance(k, str) and k.lower() in _ENV_CONTAINERS)
             for k, v in obj.items()
         }
     elif isinstance(obj, list):
-        return [mask_secrets(i) for i in obj]
+        return [mask_secrets(i, in_env=in_env) for i in obj]
     return obj
 
 

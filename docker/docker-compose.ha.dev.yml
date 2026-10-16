@@ -75,7 +75,7 @@ services:
       - LYNDRIX_INSTANCE_ROLES=api,leader
       - LYNDRIX_TRUSTED_PROXIES=*
       - LYNDRIX_DRAIN_SECONDS=5
-    command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload --timeout-graceful-shutdown 5
+    command: uvicorn main:app --host 0.0.0.0 --port 8081 --reload --reload-exclude "plugins/*/vendor/*" --reload-exclude "plugins/*/node_modules/*" --timeout-graceful-shutdown 5
     networks:
       - default
       - secured
