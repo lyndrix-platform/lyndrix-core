@@ -1,7 +1,11 @@
 # Wartungsfenster, geplante Deployments und Incident-Regeln
 
 Stand: 2026-10-17, Planungsdokument (Phase 0). Autor: Lyndrix-Session mit Marvin.
-Status: **Entscheidungen getroffen (Abschnitt 9), nächster Schritt P0-Analyse-Sweeps, danach Teilpläne pro Plugin.**
+Status: **P0 abgeschlossen.** Die sechs Analysen und die Teilpläne liegen in
+`features/maintenance-windows/`. **`00-ergebnis-p0.md` ersetzt die Abschnitte 4, 6 und 7 dieses
+Dokuments, wo es ihnen widerspricht** (Typ-Vokabular ohne `vm`, Entscheidung im Job statt beim
+Enqueue, lokale Bus-Emission, Override-Semantik, ITSM-Mapping). Nächster Schritt: Review der
+Teilpläne mit Marvin (offene Entscheidungen A–H im Ergebnis, Abschnitt 5), dann P1.
 
 ## 1. Ziel
 
@@ -207,6 +211,20 @@ Reihenfolge der Rollouts wie gewohnt (Core → Plugins → k3s-Roll durch Marvin
    bzw. pro Host im controller übersteuerbar; Laufzeit-Notschalter je Typ im Monitoring.
 5. Annahmen ohne Rückfrage: mehrere Deploys desselben Services im selben Fenster → letzter Stand
    gewinnt; Override-Puffer 15 Minuten, maximale Override-Dauer 4 h (beides als Setting).
+
+## 11. Ergebnis P0 (2026-10-17)
+
+| Datei | Inhalt |
+|---|---|
+| `maintenance-windows/00-ergebnis-p0.md` | Befunde, korrigierter Vertrag (Schema, Payloads, Transportregel), Architekturentscheidungen, offene Entscheidungen A–H, Phasen/Versionen, P7-Durchstich |
+| `maintenance-windows/analysis-{iac-orchestrator,monitoring,itsm,entity-registry,server-manager,template-engine-controller}.md` | Analyse-Sweeps (Sonnet), file:line-genau |
+| `maintenance-windows/plan-core.md` | P1: `core.api.maintenance`, API 1.13, Core 1.11.0, Shell 1.8.0 |
+| `maintenance-windows/plan-iac-orchestrator.md` | P2: Resolver, Service-CIs, `SCHEDULED`/Park, Overrides, Default-Schalter, 1.6.0 |
+| `maintenance-windows/plan-monitoring.md` | P3: `ci_id`, `MAINTENANCE`, Fenster/Overrides, Outage-Regel, 1.7.0 |
+| `maintenance-windows/plan-itsm.md` | P4: Incidents aus Outage-Events, Auto-Resolve, 0.3.0 |
+| `maintenance-windows/plan-entity-registry.md` | P5a: Read-Model, Scheme `iac.service`, 0.3.0 |
+| `maintenance-windows/plan-server-manager.md` | P5b: Badge/Filter, 1.4.0 |
+| `maintenance-windows/plan-iac-workspace.md` | P6: Linter, Controller-Doku/Beispiele, CI-Statusvertrag (Übergabe IaC-Session) |
 
 ## 10. Briefings für die Analyse-Sweeps (P0)
 
