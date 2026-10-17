@@ -1,7 +1,7 @@
 # Wartungsfenster, geplante Deployments und Incident-Regeln
 
 Stand: 2026-10-17, Planungsdokument (Phase 0). Autor: Lyndrix-Session mit Marvin.
-Status: **Entwurf – offene Fragen am Ende, danach Analyse-Sweeps und Teilpläne pro Plugin.**
+Status: **Entscheidungen getroffen (Abschnitt 9), nächster Schritt P0-Analyse-Sweeps, danach Teilpläne pro Plugin.**
 
 ## 1. Ziel
 
@@ -58,12 +58,14 @@ Incident im ITSM, verknüpft mit dem Host, auf dem der Service läuft, und mit d
 ```yaml
 maintenance:
   windows:                       # optional; leer = erbt Host/Stage-Default
-    - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }
+    - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }     # einfaches Format
     - once:   { start: "2026-11-02T22:00+01:00", end: "2026-11-03T02:00+01:00", note: "Storage-Umzug" }
-  deploy_policy: window          # window | immediate  (Default siehe offene Frage 2)
+    - cron:   { expr: "0 2 1 * *", duration_minutes: 180, tz: Europe/Berlin }       # erweitert (wie Semaphore: Cron + Dauer)
+  deploy_policy: window          # window | immediate; Default: prod → window, dev/test → immediate
   override_buffer_minutes: 15    # Override-Fenster = Jobdauer + Puffer
-incidents:
-  offline_minutes: 10            # Y; 0/fehlend = keine Incident-Regel
+incidents:                       # überschreibt die globalen Typ-Defaults (controller) für diesen Service
+  enabled: true
+  offline_minutes: 10            # Y; 0 = keine Incident-Regel
   severity: high                 # ITSM-Severity
   auto_resolve: true             # Incident schließen, wenn der Service wieder online ist
 ```
@@ -77,23 +79,34 @@ maintenance:
   inherit: true                  # Services auf diesem Host erben, wenn sie nichts eigenes haben
 # stages/<stage>.yml (oder Site)
 maintenance_default:
-  enabled: true                  # der „Default-Fenster“-Schalter
+  enabled: true                  # der „Default-Fenster“-Schalter (auch aus der Orchestrator-UI schaltbar → Git-Commit)
   windows:
     - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }
+incident_defaults:               # globale Regeln je CI-Typ (Typen = Entity-Registry-Kinds)
+  service: { enabled: true,  offline_minutes: 10, severity: high,   auto_resolve: true }
+  host:    { enabled: true,  offline_minutes: 5,  severity: critical, auto_resolve: true }
+  vm:      { enabled: true,  offline_minutes: 5,  severity: high,   auto_resolve: true }
+  container: { enabled: false }
 ```
+
+Auflösung der Incident-Regel: Service-/Host-Eintrag im SSoT → `incident_defaults[<typ>]` der Stage →
+aus. Zusätzlich hat das Monitoring einen **Laufzeit-Notschalter je Typ** (Plugin-Setting), der die
+Erzeugung von Outage-Events ohne Repo-Änderung stoppt – kein zweites Regelwerk, nur ein Aus-Knopf.
 
 Das Rendering (Template Engine / `iac_core` im Orchestrator) löst die Vererbung auf und liefert pro
 Host/Service die **effektiven** Fenster und Regeln in die Inventory-Variablen; der Orchestrator
 veröffentlicht sie (Abschnitt 6).
 
-Offen (Frage 1): ob der Default-Schalter zusätzlich aus Lyndrix heraus in den iac-controller
-zurückgeschrieben wird (Git-Commit) oder nur im Repo gepflegt wird.
+Entschieden: Der Default-Schalter wird aus der Orchestrator-UI bedient und per Git-Commit in den
+iac-controller zurückgeschrieben (eine Wahrheit, bequem). Der Orchestrator braucht dafür Schreibrechte
+auf das controller-Repo (bestehender Git-Pfad des Plugins, Commit-Autor „Lyndrix IaC Orchestrator“).
 
 ## 5. Core: Bibliothek und Vertrag (API 1.13)
 
 `core.api.maintenance` – reine Funktionen, keine Persistenz:
 
-- `Schedule` (weekly | once), `MaintenanceWindow` (ci_id, source, schedule, note, override:bool)
+- `Schedule` (weekly | once | cron+duration), `MaintenanceWindow` (ci_id, source, schedule, note, override:bool);
+  Cron-Auswertung über `croniter` (oder eigene Minimal-Implementierung) mit Zeitzone
 - `parse_windows(raw: list[dict]) -> list[Schedule]` (validiert das YAML-Schema aus 4.x)
 - `active_until(schedules, now) -> datetime | None` (laufendes Fenster), `next_start(schedules, after)`
 - Topic-Konstanten und Payload-Schemata des Bus-Vertrags (Abschnitt 6), damit alle Plugins dieselben
@@ -181,18 +194,19 @@ den Emitter aus. Topics werden in den Manifesten unter `permissions.emit/subscri
 Jede Phase endet mit Tests (reine Funktionen + Plugin-Suiten im Dev-Core) und einem Release-Tag;
 Reihenfolge der Rollouts wie gewohnt (Core → Plugins → k3s-Roll durch Marvin).
 
-## 9. Offene Fragen (vor P1 klären)
+## 9. Entscheidungen (Marvin, 2026-10-17)
 
-1. **Default-Fenster-Schalter:** nur im iac-controller-Repo pflegen (Lyndrix zeigt an) oder aus der
-   Orchestrator-UI aktivieren und per Git-Commit in den controller zurückschreiben?
-2. **Deploy-Standardverhalten:** Renovate-Deploys grundsätzlich ins Fenster, oder nur `prod`
-   (dev/test sofort), oder pro Service mit Default „prod wartet“?
-3. **Fensterformat:** einfaches Schema (wöchentlich + einmalig, Zeitzone pflicht) oder volle
-   RRULE/Cron-Syntax?
-4. **Incident-Verhalten:** Auto-Resolve bei Rückkehr als Default? Standard-Severity? Soll ein
-   Incident auch für Hosts/VMs (nicht nur Services) entstehen?
-5. Zusammenfassen mehrerer Deploys im selben Fenster: letzter Stand gewinnt (Vorschlag) – ok?
-6. Override-Puffer-Default (Vorschlag 15 Minuten) und maximale Override-Dauer (Vorschlag 4 h)?
+1. **Default-Fenster-Schalter:** Definition im iac-controller, Ein/Aus auch aus der Orchestrator-UI
+   mit Rückschreiben per Git-Commit (eine Wahrheit).
+2. **Deploy-Standardverhalten:** `prod` wartet auf das nächste Fenster, `dev`/`test` deployen sofort;
+   pro Service per `deploy_policy` übersteuerbar.
+3. **Fensterformat:** beides – einfaches Schema (`weekly`, `once`) als Standard, erweitert
+   `cron` + `duration_minutes` (wie Semaphore).
+4. **Incidents:** Auto-Resolve bei Rückkehr, Regeln für Services **und** Hosts/VMs; **globale
+   Regeln je CI-Typ** (Typen aus der Entity Registry) als Default, pro Service in der `service.yml`
+   bzw. pro Host im controller übersteuerbar; Laufzeit-Notschalter je Typ im Monitoring.
+5. Annahmen ohne Rückfrage: mehrere Deploys desselben Services im selben Fenster → letzter Stand
+   gewinnt; Override-Puffer 15 Minuten, maximale Override-Dauer 4 h (beides als Setting).
 
 ## 10. Briefings für die Analyse-Sweeps (P0)
 
