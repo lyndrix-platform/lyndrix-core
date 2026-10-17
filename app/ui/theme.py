@@ -141,6 +141,7 @@ class UIStyles:
     STATUS_RAIL_DOWN = 'lx-status-rail lx-status-rail--down'
     STATUS_RAIL_PAUSED = 'lx-status-rail lx-status-rail--paused'
     STATUS_RAIL_SUCCESS = 'lx-status-rail lx-status-rail--success'
+    STATUS_RAIL_MAINTENANCE = 'lx-status-rail lx-status-rail--maintenance'
     ROW_HOVER = 'lx-row-hover'
     BADGE_STATE = 'lx-badge'
     BADGE_STATE_UP = 'lx-badge lx-badge--up'
@@ -148,6 +149,7 @@ class UIStyles:
     BADGE_STATE_PAUSED = 'lx-badge lx-badge--paused'
     BADGE_STATE_UNKNOWN = 'lx-badge lx-badge--unknown'
     BADGE_STATE_SUCCESS = 'lx-badge lx-badge--success'
+    BADGE_STATE_MAINTENANCE = 'lx-badge lx-badge--maintenance'
     STEPPER = 'lx-stepper'
     ENTITY_CARD = 'lx-entity-card'
     IFRAME_FRAME = 'lx-iframe-frame'
@@ -256,6 +258,8 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_t
             # ThemeEngine dark-mode output so engine-on/off never diverge) ---
             '--lx-state-success': '#10b981',
             '--lx-state-marked': '#6366f1',
+            # Maintenance window / override (API 1.13); consumers fall back to --lx-state-paused.
+            '--lx-state-maintenance': '#a78bfa',
             '--lx-chart-1': '#8b5cf6',
             '--lx-chart-2': '#0ea5e9',
             '--lx-chart-3': '#10b981',
@@ -555,6 +559,7 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_t
             .lx-status-rail--down {{ background: var(--lx-state-down); }}
             .lx-status-rail--paused {{ background: var(--lx-state-paused); }}
             .lx-status-rail--success {{ background: var(--lx-state-success); }}
+            .lx-status-rail--maintenance {{ background: var(--lx-state-maintenance, var(--lx-state-paused)); }}
 
             .lx-row-hover {{ transition: background var(--lx-transition-fast) var(--lx-ease); }}
             .lx-row-hover:hover {{ background: color-mix(in srgb, var(--lx-elevated) 55%, transparent); }}
@@ -608,6 +613,7 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_t
             .lx-badge--paused {{ color: var(--lx-state-paused); background: color-mix(in srgb, var(--lx-state-paused) 13%, transparent); border-color: color-mix(in srgb, var(--lx-state-paused) 28%, transparent); }}
             .lx-badge--unknown {{ color: var(--lx-state-unknown); background: color-mix(in srgb, var(--lx-state-unknown) calc(var(--lx-badge-bg-opacity) * 100%), transparent); border-color: color-mix(in srgb, var(--lx-state-unknown) calc(var(--lx-badge-border-opacity) * 100%), transparent); }}
             .lx-badge--success {{ color: var(--lx-state-success); background: color-mix(in srgb, var(--lx-state-success) calc(var(--lx-badge-bg-opacity) * 100%), transparent); border-color: color-mix(in srgb, var(--lx-state-success) calc(var(--lx-badge-border-opacity) * 100%), transparent); }}
+            .lx-badge--maintenance {{ color: var(--lx-state-maintenance, var(--lx-state-paused)); background: color-mix(in srgb, var(--lx-state-maintenance, var(--lx-state-paused)) calc(var(--lx-badge-bg-opacity) * 100%), transparent); border-color: color-mix(in srgb, var(--lx-state-maintenance, var(--lx-state-paused)) calc(var(--lx-badge-border-opacity) * 100%), transparent); }}
             .lx-badge--accent {{ color: var(--lx-accent); background: color-mix(in srgb, var(--lx-accent) 13%, transparent); border-color: color-mix(in srgb, var(--lx-accent) 28%, transparent); }}
             .lx-badge--muted {{ color: var(--lx-text-muted); background: var(--lx-elevated); border-color: var(--lx-border-soft); }}
 

@@ -647,6 +647,77 @@ generates its `CLAUDE.md` from this index and fetches a guide on demand, cached 
 plugin version. Older cores ignore the new manifest field (no `min_core_version` bump
 needed for the field alone).
 
+## Maintenance windows (API 1.13)
+
+`core.api.maintenance` is the shared vocabulary of the maintenance-window feature. The core
+provides the **model, the time evaluation and the bus contract** — no persistence, no
+endpoints, no plugin knowledge. Every plugin implements its own maintenance capability on top
+of it and treats the other plugins as optional (an orchestrator-only installation must work).
+
+```python
+from core.api import maintenance as mw      # core >= 1.11; optional: try/except ImportError
+
+schedules = mw.parse_windows(item["windows"], default_tz="Europe/Berlin")
+state = mw.effective_state(schedules, overrides, mw.utcnow())
+if state.active:                            # window or override running
+    suppress_alerts_until(state.until)      # state.source == "window" | "override"
+upcoming = state.next_start                 # next window that is not yet running
+```
+
+**Window formats** (input form in `service.yml`/iac-controller, normal form on the bus):
+
+| Input | Normal form |
+|---|---|
+| `- weekly: {days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin}` | `{"type":"weekly","days":["sun"],"start":"02:00","end":"04:00","tz":"Europe/Berlin"}` |
+| `- once: {start: "2026-11-02T22:00+01:00", end: "2026-11-03T02:00+01:00", note: "…"}` | `{"type":"once","start":"2026-11-02T21:00:00Z","end":"2026-11-03T01:00:00Z","note":"…"}` |
+| `- cron: {expr: "0 2 1 * *", duration_minutes: 180, tz: Europe/Berlin}` | `{"type":"cron","expr":"0 2 1 * *","duration_minutes":180,"tz":"Europe/Berlin"}` |
+
+`weekly.end <= start` means "over midnight"; `days` take `mon…sun` or `0…6` (0 = Monday).
+Cron has five fields with Vixie semantics (day **or** weekday when both are restricted, names,
+`0`/`7` = Sunday, no `@` macros); the window lasts `duration_minutes` from each fire. A missing
+`tz` is the caller's `default_tz` (site time zone, else UTC). Evaluation is DST-safe through
+`zoneinfo`; all returned datetimes are aware UTC. `validate_windows()` returns error texts for
+linters and UIs; `parse_window()` raises `ScheduleError` with a specific message.
+
+**Kinds** are the Entity-Registry kinds and are **open**: validate with `is_valid_kind()`
+(lower-case slug), never against a fixed list; `KNOWN_KINDS` is display order only.
+
+**Topics and payloads** (constants `TOPIC_*`, shapes as `TypedDict`s in the module):
+
+| Topic | Emitter | Payload |
+|---|---|---|
+| `maintenance:windows_published` | every plugin that owns windows (orchestrator from controller + `service.yml`, monitoring for manual windows) | `{source, published_at, replaces: true, items: [{ci_id, kind, name, host_ci_id?, windows: [normal form…], inherited_from: null\|"host"\|"stage_default"\|"site_default", deploy_policy?, incidents?}]}` |
+| `maintenance:override_started` | a running deploy, a manual override | `{override_id, ci_ids, until, reason, source, started_at, linger_minutes}` |
+| `maintenance:override_ended` | same | `{override_id, source, ended_at, linger_minutes}` |
+| `maintenance:window_missing` | orchestrator when a `deploy_policy: window` deploy runs at once because no window lies within the horizon | `{event_id, ci_id, kind, name, host_ci_id?, site, stage, horizon_days, job_id, source, detected_at, reason}` → ITSM opens a task |
+| `monitoring:outage_persisted` | monitoring, once per outage after `offline_minutes` outside maintenance | `{outage_id, ci_id, kind, name, host_ci_id?, monitor_id, since, persisted_at, duration_s, rule, error?}` |
+| `monitoring:outage_recovered` | monitoring | `{outage_id, ci_id, since, recovered_at, duration_s}` |
+
+`replaces: true` means the consumer drops every earlier item of that `source` in one
+transaction. Ids are deterministic: `make_outage_id(ci_id, since)` =
+`"<ci_id>:<since ISO UTC>"`, `make_window_missing_id(ci_id, job_id)`; ITSM uses them as
+`external_id` for idempotent upserts.
+
+**Transport rule:** emit `maintenance:*` and `monitoring:outage_*` **locally** (no
+`cluster=True`). Plugins with `placement=any` run on every instance, so the emitter's local
+consumer writes the shared DB exactly once. Handlers stay idempotent anyway (unique keys,
+delete+insert per `source`), and a consumer with an in-memory cache invalidates its peers with
+its **own** cluster broadcast.
+
+**Overrides** are active from `started_at` until `until`; after `override_ended` they linger
+for `linger_minutes` (default 15) and then expire — consumers evaluate at read time
+(`override_active`, `effective_state`), no timers. An emitter that does not know the end in
+advance (a deploy job) sends `until = now + DEFAULT_MAX_OVERRIDE_MINUTES` (240).
+
+**Incident rules** (`IncidentRule`: `enabled, offline_minutes, severity, auto_resolve`) cascade
+with `resolve_incident_rule(own, kind, stage_defaults, site_defaults)` — the own block wins and
+may be partial, then the first `incident_defaults` mapping that defines the kind;
+`offline_minutes: 0` disables the rule.
+
+Shell/NiceGUI expose the state colour as `--lx-state-maintenance` (badge `lx-badge--maintenance`,
+rail `lx-status-rail--maintenance`, falls back to the paused colour on older servers). Tests:
+`tests/maintenance/` (pure stdlib — they also run on a bare host).
+
 ## Authentication extensions
 
 Plugins can register custom authentication providers at runtime through the event bus.

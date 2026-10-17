@@ -40,7 +40,7 @@ KNOWN_CSS_VAR_KEYS: frozenset[str] = frozenset({
     "--lx-gradient-success", "--lx-gradient-warning", "--lx-gradient-info", "--lx-gradient-danger",
     "--lx-border-width", "--lx-rail-width",
     "--lx-state-up", "--lx-state-down", "--lx-state-paused", "--lx-state-unknown",
-    "--lx-state-success", "--lx-state-marked",
+    "--lx-state-success", "--lx-state-marked", "--lx-state-maintenance",
     "--lx-warning", "--lx-log-bg", "--lx-log-fg", "--lx-log-accent",
     "--lx-terminal-bg", "--lx-terminal-fg", "--lx-terminal-accent",
     "--lx-chart-1", "--lx-chart-2", "--lx-chart-3", "--lx-chart-4",

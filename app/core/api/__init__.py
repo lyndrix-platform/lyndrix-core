@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.11
+Lyndrix Core Plugin API — Stable Surface v1.13
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -142,11 +142,30 @@ other plugins (the AI assistant collects every ``ai_instructions``)::
 It is a view, not the manager: no loading, enabling or registry mutation.
 Treat the data as optional — another plugin may be absent or disabled.
 
+Maintenance windows (API 1.13)
+------------------------------
+``core.api.maintenance`` is the shared vocabulary of the maintenance-window
+feature: normalised window formats (weekly / once / cron + duration), DST-safe
+evaluation (``current_interval``, ``next_start``, ``effective_state``), override
+semantics (``until`` + ``linger_minutes``), incident-rule cascade and the topic
+names/payload shapes of the bus contract (``maintenance:windows_published``,
+``maintenance:override_started/ended``, ``maintenance:window_missing``,
+``monitoring:outage_persisted/recovered``). Pure functions, no persistence::
+
+    from core.api import maintenance as mw
+    schedules = mw.parse_windows(item["windows"])
+    state = mw.effective_state(schedules, overrides, mw.utcnow())
+    if state.active: ...            # suppress alerts until state.until
+
+Emit ``maintenance:*`` locally (no ``cluster=True``); consumers persist
+idempotently in the shared DB. Optional use: ``try: from core.api import
+maintenance except ImportError``.
+
 Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.12.0"
+__api_version__ = "1.13.0"
 
 from typing import Any, Dict, Literal, Optional
 
@@ -283,10 +302,16 @@ from core.components.notification_router.models import (  # noqa: E402
     ResolvedState,
 )
 
+# Maintenance windows — shared model, time evaluation, bus contract (API 1.13).
+# Pure stdlib module; imported as a submodule like ``core.api.route_order``.
+from . import maintenance  # noqa: E402
+
 
 __all__ = [
     "__api_version__",
     "__core_version__",
+    # Maintenance windows (API 1.13)
+    "maintenance",
     # Event bus
     "event_bus",
     "GlobalEventBus",

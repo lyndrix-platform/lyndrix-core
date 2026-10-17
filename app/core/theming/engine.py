@@ -280,6 +280,7 @@ class ThemeEngine:
                 # Semantic state extensions (distinct from the ops --lx-state-*).
                 "--lx-state-success": "#10b981",
                 "--lx-state-marked": "#6366f1",
+                "--lx-state-maintenance": "#a78bfa",
                 # Categorical 8-hue palette (qualitative data: phases, entities).
                 "--lx-chart-1": "#8b5cf6",
                 "--lx-chart-2": "#0ea5e9",
@@ -316,6 +317,7 @@ class ThemeEngine:
                 "--lx-state-unknown": c("text_subtle", "#94a3b8"),
                 "--lx-state-success": "#059669",
                 "--lx-state-marked": "#4f46e5",
+                "--lx-state-maintenance": "#7c3aed",
                 "--lx-chart-1": "#7c3aed",
                 "--lx-chart-2": "#0284c7",
                 "--lx-chart-3": "#059669",

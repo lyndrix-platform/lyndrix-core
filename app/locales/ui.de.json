@@ -561,6 +561,7 @@
       "info_note": "Keine Live-Vorschau — wirkt nur auf die Server-Palette (NiceGUI).",
       "state_success": "Erfolg",
       "state_marked": "Markiert / ausgewählt",
+      "state_maintenance": "Wartung",
       "on_accent": "Text auf Akzent",
       "surface_glass": "Karten-Glasfläche",
       "elevated_glass": "Erhöhte Glasfläche",

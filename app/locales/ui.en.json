@@ -561,6 +561,7 @@
       "info_note": "No live preview — feeds the server (NiceGUI) palette only.",
       "state_success": "Success",
       "state_marked": "Marked / selected",
+      "state_maintenance": "Maintenance",
       "on_accent": "Text on accent",
       "surface_glass": "Card glass surface",
       "elevated_glass": "Elevated glass surface",
