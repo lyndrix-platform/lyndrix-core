@@ -1,4 +1,9 @@
-# Teilplan P2: IaC Orchestrator 1.6.0 — Fenster auflösen, geplante Deployments, Overrides, Default-Schalter
+# Teilplan P2: IaC Orchestrator 1.6.0 — Fenster auflösen, geplante Deployments, Overrides
+
+Entscheidung C (2026-10-18): der Orchestrator bleibt Ausführung. **Kein Default-Schalter mit
+Git-Rückschreiben** in diesem Plugin; er zeigt den Default nur an. Entscheidung H: ein
+`window`-Deploy ohne Fenster im Horizont läuft sofort und emittiert `maintenance:window_missing`.
+Entscheidung A: Kinds sind offen (`core.api.maintenance.is_valid_kind`), keine feste Liste.
 
 Ausführung: Fable-Subagent. Grundlage: `analysis-iac-orchestrator.md`, `00-ergebnis-p0.md`
 (Abschnitte 2–4). Repo `plugins/lyndrix-plugin-iac-orchestrator`, Layout bleibt
@@ -11,12 +16,11 @@ dahin antwortet die Registry mit `ok:false` für Service-Items → `ci_id=None`,
 - `entrypoint.py`: `version="1.6.0"`, `min_core_version="1.11.0"`; `app/api.py:35`
   `PLUGIN_VERSION="1.6.0"` (Test hält beide gleich).
 - `permissions.emit` + `maintenance:windows_published`, `maintenance:override_started`,
-  `maintenance:override_ended`, `entity_registry:relate`.
-- Neue Custom-Permission `api:maintenance_default` (Muster `api:infra_apply`,
-  `entrypoint.py:49-53`), in Rolle `admin`.
+  `maintenance:override_ended`, `maintenance:window_missing`, `entity_registry:relate`.
+- Keine neue Permission (der Default-Schalter ist nur lesend, `api:read` reicht).
 - CHANGELOG, `documentation.md` (DE: Abschnitte „API-Referenz" und „Events" ergänzen, neuer
   Abschnitt „Wartungsfenster und geplante Deployments"), `ai/INSTRUCTIONS.md` (Scheduled
-  Deploys, Run now, Default-Schalter schreibt in Git → Guardrail „nur auf Anweisung").
+  Deploys, Run now = Override, Default-Fenster nur Anzeige: Änderung im Controller-Repo).
 
 ## 2. Auflösung und Veröffentlichung (`app/controller/maintenance_resolver.py`, neu)
 
@@ -98,7 +102,12 @@ damit `services[].maintenance` im Controller überlebt (Test ergänzen).
      Fallback wie 666-672) → `service_policy`;
   3. `deploy_policy == "window"` und `current_interval` leer → `next_start` innerhalb
      `schedule_horizon_days`; gefunden → `queue.park(...)` und `raise JobParked(not_before)`;
-     nicht gefunden → Warnung ins Joblog und weiter;
+     nicht gefunden → Warnung ins Joblog, weiter, und (Setting
+     `maintenance_report_missing_window`) `ctx.emit(TOPIC_WINDOW_MISSING, {event_id:
+     make_window_missing_id(service_ci, job_id), ci_id: service_ci, kind: "service", name,
+     host_ci_id, site, stage, horizon_days, job_id, source: "iac-orchestrator", detected_at,
+     reason: "deploy_policy window, no window within <n> days"})` je Zielhost-Service-CI (lokal;
+     ohne Service-CI kein Event, nur Log);
   4. Ergebnis (`window_ci_ids` = Service-CIs der Zielhosts + Host-CIs) am Context für Schritt 5.
 - `run_pipeline` (1346-1660): `except JobParked` vor dem allgemeinen Handler: Log
   `[SYSTEM] Deployment scheduled for <iso> (<reason>)`, `parked=True`; im `finally` bei
@@ -113,25 +122,17 @@ damit `services[].maintenance` im Controller überlebt (Test ergänzen).
   über `ctx.emit` (thread-sicher seit Core 1.7).
 - Fehlt `_ci_map` für einen Zielhost (Registry nicht erreichbar): kein Override-Event, Log.
 
-## 5. Default-Schalter mit Git-Rückschreiben
+## 5. Default-Fenster: nur Anzeige (Entscheidung C)
 
-- Neuer Pipeline-Typ `maintenance_default_toggle` (`PipelineStrategy`, `commit_state=False`,
-  `dedupe_key_for` Key `maintenance_default_toggle:<site>/<stage>`), Payload
-  `{site, stage, enabled: bool, requested_by}`. Stages: `SyncRepoStage("iac_controller")` →
-  `ToggleMaintenanceDefaultStage` → `CommitPushStage("iac_controller", f"ci: maintenance default
-  {site}/{stage} {'on' if enabled else 'off'}")` → `publish_maintenance()`.
-- `ToggleMaintenanceDefaultStage`: Datei
-  `environments/sites/<site>/stages/<stage>/stage_vars.yml`; **zeilenbasierte Änderung**: im
-  Block `stage_vars:` den Unterblock `maintenance_default:` finden und nur die Zeile
-  `enabled: <bool>` ersetzen (Einrückung übernehmen). Fehlt der Block: am Ende des
-  `stage_vars:`-Blocks einfügen mit Kommentar `# managed by Lyndrix (maintenance default switch)`
-  und leerer `windows: []`-Liste. Kein YAML-Dump, kein Berühren anderer Zeilen; nach dem Edit
-  `yaml.safe_load` zur Kontrolle. Keine Änderung → Stage endet ohne Commit.
-- Schleifenschutz: `_should_trigger_orchestrator` (`api.py:252-278`) und der Webhook-Sync
-  ignorieren Deploy-Trigger für Commits mit Präfix `ci: maintenance default` (Sync bleibt).
-- Voraussetzung Push-Recht (Entscheidung C): `GET /maintenance-default` liefert `writable`
-  (Setting `maintenance_controller_writeback_enabled` **und** Credential der Rolle
-  `iac_controller` vorhanden); UI deaktiviert den Schalter sonst mit Hinweis.
+- Kein Pipeline-Typ, keine Schreibstage, kein Push. Der Default kommt aus dem Snapshot
+  `maintenance_effective` (je Site/Stage `{enabled, windows, source_file}` aus
+  `stage_vars.maintenance_default` bzw. `site_vars.maintenance_default`).
+- Schleifenschutz vorbereiten: `_should_trigger_orchestrator` (`api.py:252-278`) und der
+  Webhook-Sync ignorieren Deploy-Trigger für Commits mit Präfix `ci: maintenance` (Sync läuft
+  weiter). Das ist das Präfix, das der künftige SSoT-Manager-Schalter verwendet
+  (`00-ergebnis-p0.md` Abschnitt 8).
+- UI-Hinweis an der Karte: „Änderung im iac-controller (`stage_vars.yml`, Block
+  `maintenance_default`)" mit Pfad der Datei.
 
 ## 6. Settings (`app/controller/settings_schema.py` `_build_fields`, Kategorie „Maintenance")
 
@@ -141,7 +142,7 @@ damit `services[].maintenance` im Controller überlebt (Test ergänzen).
 | `maintenance_max_override_minutes` | int | 240 |
 | `maintenance_linger_minutes` | int | 15 |
 | `maintenance_schedule_horizon_days` | int | 30 |
-| `maintenance_controller_writeback_enabled` | bool | false |
+| `maintenance_report_missing_window` | bool | true (emittiert `maintenance:window_missing`) |
 
 Zugriff über die bestehende Vault-/Env-Mechanik (`config.py`, Env `PLUGIN_IAC_ORCHESTRATOR_*`
 hat Vorrang).
@@ -154,8 +155,7 @@ hat Vorrang).
 | POST | `/schedules/{job_id}/run-now` | write | `promote(override=True)` + `iac:job_queued` (cluster) |
 | DELETE | `/schedules/{job_id}` | write | geplanten Job abbrechen (`ABORTED`) |
 | GET | `/maintenance-windows?site=&stage=&kind=&q=` | read | Snapshot `maintenance_effective` plus `effective_state` je Item (Core-Bibliothek, `now`) |
-| GET | `/maintenance-default` | read | je Site/Stage `{enabled, windows, writable}` aus dem Snapshot |
-| POST | `/maintenance-default` | write + `api:maintenance_default` | `{site, stage, enabled}` → Toggle-Pipeline enqueuen |
+| GET | `/maintenance-default` | read | je Site/Stage `{enabled, windows, source_file}` aus dem Snapshot (nur lesend) |
 
 Öffentlich (`webhook_router.py`, `api.py:659-694 do_get_service_status`): Query `accept`
 (Komma-Liste). `SCHEDULED` → mit `accept=scheduled`: `{"status":"scheduled","job_status":
@@ -167,11 +167,12 @@ hat Vorrang).
 - Neuer Tab `maintenance` („Wartung") in `TabId` (1301), `NavTile`, `ViewHeader`. Drei Karten:
   **Geplante Deployments** (Tabelle, Buttons „Jetzt ausführen" mit Confirm wie `abort()`
   1469-1483, „Abbrechen"), **Effektive Fenster** (Filter Site/Stage/Typ, Badge „aktiv bis",
-  „nächstes"), **Default-Fenster** (Toggle je Site/Stage, deaktiviert wenn `!writable`, Tooltip).
+  „nächstes"), **Default-Fenster** (je Site/Stage Zustand an/aus und Fenster, nur Anzeige, mit
+  Hinweis auf die Controller-Datei; kein Toggle).
 - `StatusBadge`/`statusColor` (56-86): `SCHEDULED` → `--lx-state-maintenance` mit Fallback
   `--lx-state-paused`; `ActivePipelines` zeigt geplante getrennt („geplant: n").
 - `api.ts`: `listSchedules`, `runNow`, `cancelSchedule`, `maintenanceWindows`,
-  `maintenanceDefault`, `setMaintenanceDefault`. Locales de/en (i18next-Dialekt).
+  `maintenanceDefault`. Locales de/en (i18next-Dialekt).
 - NiceGUI-Seiten unverändert (React ist Ziel).
 
 ## 9. Tests (`tests/`, im Dev-Core: `docker cp` + `PYTHONPATH=/app pytest -q tests`)
@@ -184,18 +185,19 @@ hat Vorrang).
   bleibt liegen, Zusammenfassen setzt `start_time`, `abort_queued` lässt `SCHEDULED`,
   `clear_all_jobs` behält `SCHEDULED`.
 - `test_policy_stage.py`: Entscheidung mit Fake-Uhr (in Fenster → weiter; außerhalb → Park mit
-  `not_before`; kein Fenster im Horizont → weiter mit Warnung; `force` → weiter; `trigger=ui` →
-  weiter); `JobParked` lässt `update_job` aus.
+  `not_before`; kein Fenster im Horizont → weiter mit Warnung **und** genau ein
+  `window_missing`-Emit mit deterministischem `event_id`, kein Emit bei Setting aus oder ohne
+  Service-CI; `force` → weiter; `trigger=ui` → weiter); `JobParked` lässt `update_job` aus.
 - `test_inventory_publish.py` erweitern: Service-Items in `identify`, `relate`-Emits, `ci_id`
   und `host_ci_id` im Monitoring-Payload, `windows_published` einmal mit `replaces:true`.
 - `test_status_mapping.py`: `accept=scheduled` vs. Kompatibilitätsmodus.
-- `test_toggle_stage.py`: Fixture `stage_vars.yml` mit Kommentaren und TF-Block → genau eine
-  Zeile ändert sich; fehlender Block wird eingefügt; `safe_load` danach gültig.
+- Schleifenschutz: Controller-Commit mit Präfix `ci: maintenance` löst keinen Deploy aus, der
+  Sync läuft.
 - `iac_core/tests`: `ServiceDefinition` behält `maintenance`.
 
 ## 10. Abnahme (Dev-Bench)
 
-Siehe `00-ergebnis-p0.md` Abschnitt 7, Schritte 2–4 und 7. Zusätzlich: ein zweiter Webhook für
+Siehe `00-ergebnis-p0.md` Abschnitt 7, Schritte 2–4, 7 und 8. Zusätzlich: ein zweiter Webhook für
 denselben Service wird zusammengefasst; nach einem Runner-Neustart bleibt der `SCHEDULED`-Job
 erhalten und wird fällig ausgeführt. `ruff`, `black --check`, `mypy` sauber; Bundle neu gebaut
 (`ui_static/ui_bundle.js`). Commit auf `feature/maintenance-windows`, Tag erst nach Freigabe
@@ -207,5 +209,7 @@ erhalten und wird fällig ausgeführt. `ruff`, `black --check`, `mypy` sauber; B
   abweichende Hosts werden im Joblog genannt.
 - Services, die der Orchestrator noch nie geklont hat, erben Host/Stage-Default (kein eigenes
   `service.yml` auf dem Runner).
-- Der Default-Schalter commitet auf `main`; Branch-Protection oder fehlendes Push-Recht
-  lassen den Toggle-Job rot werden, die UI zeigt den Fehler aus dem Joblog.
+- Der Default-Schalter ist hier nur lesbar; Ein/Aus wird im Controller-Repo geändert, bis der
+  SSoT Manager das Rückschreiben übernimmt (`00-ergebnis-p0.md` Abschnitt 8).
+- `window_missing` wird je Deploy-Job emittiert; die Deduplizierung (ein offener Task je CI)
+  liegt im ITSM. Ohne ITSM verbleibt nur die Joblog-Warnung.

@@ -1,6 +1,7 @@
 # P0-Ergebnis: Befunde, korrigierter Vertrag, Entscheidungen
 
-Stand 2026-10-17. Synthese der sechs Analyse-Sweeps (`analysis-*.md` in diesem Ordner) durch die
+Stand 2026-10-17, Entscheidungen A–H von Marvin am 2026-10-18 eingearbeitet (Abschnitt 5).
+Synthese der sechs Analyse-Sweeps (`analysis-*.md` in diesem Ordner) durch die
 Lyndrix-Session (Fable). Dieses Dokument ersetzt die Abschnitte 4, 6 und 7 des Hauptplans
 `../maintenance-windows.md`, wo es ihnen widerspricht. Die Teilpläne `plan-*.md` bauen darauf auf.
 
@@ -8,7 +9,7 @@ Lyndrix-Session (Fable). Dieses Dokument ersetzt die Abschnitte 4, 6 und 7 des H
 
 | # | Befund | Quelle | Konsequenz |
 |---|---|---|---|
-| 1 | Die Entity Registry kennt die Kinds `host`, `hypervisor`, `service`, `container`, `network`, `itsm_record`, `generic`. **Es gibt kein `vm`.** VMs und LXCs sind `host`, physische Nodes `hypervisor`. | registry §2.2 | Typ-Vokabular des Features = `hypervisor \| host \| service \| container`. `incident_defaults` wird mit diesen Schlüsseln geführt. |
+| 1 | Die Entity Registry kennt die Kinds `host`, `hypervisor`, `service`, `container`, `network`, `itsm_record`, `generic`. **Es gibt kein `vm`.** VMs und LXCs sind `host`, physische Nodes `hypervisor`. | registry §2.2 | Typ-Vokabular des Features = **die Kinds der Entity Registry, offen** (heute `hypervisor`, `host`, `service`, `container`, `network`, `itsm_record`, `generic`; künftig weitere). Keine feste Liste im Code, nur ein Slug-Check. `incident_defaults` akzeptiert jeden Kind als Schlüssel. Quellen im ersten Wurf: Controller und `service.yml` für `hypervisor`/`host`/`service` (Entscheidung A). |
 | 2 | **Niemand legt `service`-Entities an**, und die Relation `runs_on` wird von keinem Plugin gepflegt. Der Orchestrator identifiziert nur Hosts und Hypervisoren. | registry §2.2, §2.5; orchestrator §2 | Der Orchestrator identifiziert künftig Services (`entity_type: service`, neues Scheme `iac.service = <host>/<service.name>`) und setzt `runs_on` Service → Host. Events tragen zusätzlich `host_ci_id`, damit Konsumenten nicht auf die Relation angewiesen sind. |
 | 3 | **Das Monitoring hat kein `ci_id`** am Monitor, nutzt keine Registry und bekommt sein Inventar per HTTP-POST vom Orchestrator (`/inventory-sync`), nicht über den Bus. | monitoring §1, §4 | Der Orchestrator reichert den Inventory-Sync-Payload um `ci_id` (Hosts und Services) und `host_ci_id` (Services) an; das Monitoring speichert `ci_id` am Monitor. Reihenfolge in `NativeGenerateStage`: erst `_attach_ci_ids`, dann Monitoring-Sync. |
 | 4 | **Das Monitoring hat keinen Notification-Pfad.** `monitoring:state_changed` hat keinen Konsumenten. | monitoring §1, §10.2 | „Keine Alarme im Fenster" heißt konkret: Zustand `maintenance` statt `down`, keine Outage-Events, und jeder spätere Alarmpfad muss `in_maintenance` prüfen. Kein Discord-Hook zu bauen. |
@@ -16,7 +17,7 @@ Lyndrix-Session (Fable). Dieses Dokument ersetzt die Abschnitte 4, 6 und 7 des H
 | 6 | Die Entscheidung „sofort oder geplant" fällt heute beim Enqueue auf einer beliebigen Control-Plane-Instanz, die **keine Git-Working-Trees** hat. | orchestrator §8.2.5 | **Entscheidung im Job** („Park"): der Runner claimt den Job, klont das Service-Repo (bestehende erste Stage), wertet die Policy aus und parkt den Job als `SCHEDULED` mit `not_before`. Immer frisch, kein Snapshot für die Entscheidung nötig. |
 | 7 | Die Service-CI (`prod-trigger-orchestrator`) pollt bis 1800 s auf `success`/`failed`; `QUEUED` und ein künftiges `SCHEDULED` werden zu `unknown` → der CI-Job wird rot. | TE §8; orchestrator §3.6 | Status-Endpunkt liefert `scheduled` + `not_before` nur, wenn der Client `?accept=scheduled` sendet (neues CI-Template, P6). Alte Templates bekommen weiter `success` mit `job_status: SCHEDULED` (Kompatibilitätsmodus). |
 | 8 | Doppelte Deploys: heute **gewinnt der erste** (`DuplicateJob`), nicht der letzte Stand. | orchestrator §7 | Nur für `SCHEDULED`-Jobs wird zusammengefasst (Payload und `start_time` aktualisieren). Für `QUEUED`/`RUNNING` bleibt das heutige Verhalten. |
-| 9 | Der Orchestrator hat **keinen Schreibpfad ins Controller-Repo**; die Rolle `iac_controller` ist read-only konfiguriert; der Commit-Autor im Core ist fest „Lyndrix IaC". `stage_vars.yml` enthält einen TF-Backend-Block mit einem Credential-Keynamen. | orchestrator §8.4 | Default-Schalter als eigener Pipeline-Typ auf dem Runner mit **zielgenauer Textänderung** (nur die Zeile `enabled:` im Block `maintenance_default`), kein YAML-Roundtrip. Push-Recht für den Controller-Credential ist Marvins Entscheidung; ohne Recht bleibt der Schalter in der UI deaktiviert mit Hinweis. |
+| 9 | Der Orchestrator hat **keinen Schreibpfad ins Controller-Repo**; die Rolle `iac_controller` ist read-only konfiguriert; der Commit-Autor im Core ist fest „Lyndrix IaC". `stage_vars.yml` enthält einen TF-Backend-Block mit einem Credential-Keynamen. | orchestrator §8.4 | **Der Orchestrator schreibt nicht in den Controller** (Entscheidung C: er bleibt Ausführung). Er liest `maintenance_default` nur und zeigt Zustand und Fenster an. Ein/Aus wird im ersten Wurf im Controller-Repo editiert (`stage_vars.yml`, eine Zeile); das Rückschreiben aus der UI ist ein Folgevorhaben im SSoT-Manager-Plugin (Abschnitt 8). |
 | 10 | Das Override-Ende ist vorab unbekannt; es gibt kein Bus-Completion-Event für Jobs. | orchestrator §9.12 | `override_started` mit `until = now + max_override_minutes` (Default 240), `override_ended` in `run_pipeline finally`, Orphan-Sweep und Abort. Konsumenten lassen das Override nach `ended` noch `linger_minutes` (Default 15) nachlaufen. |
 | 11 | ITSM-Incidents haben **keine Severity**, sondern Priorität P1–P4 aus `impact × urgency`. „Offen" ist kein Katalogfilter (`closed_at IS NULL` schließt `resolved` ein). `on_hold → resolved` ist verboten. | itsm §3, §9.3–9.5 | Mapping-Tabelle `critical→1/1`, `high→1/2`, `medium→2/2`, `low→3/2`. Dedupe über State-Kind `open`. Auto-Resolve aus `on_hold` fällt auf einen Kommentar zurück. Neuer Katalog-Code `auto_recovered`. |
 | 12 | Jede Instanz führt alle Bus-Handler aus; kein Konsument hat heute einen Single-Writer-Schutz. | itsm §8, registry §8, server-manager §7 | Transportregel in Abschnitt 3: lokale Emission, idempotente Handler, DB als Zustand. ITSM nutzt `UNIQUE(source, external_id)` mit deterministischem `external_id = outage_id`. |
@@ -26,9 +27,12 @@ Lyndrix-Session (Fable). Dieses Dokument ersetzt die Abschnitte 4, 6 und 7 des H
 
 ## 2. Typ-Vokabular und Schema (korrigiert)
 
-Typen (= Entity-Registry-Kinds): `hypervisor` (physische Nodes, Controller `hardware.yml`),
-`host` (VMs und LXCs, Controller `hosts.yml`), `service` (aac-Service aus `service.yml`, je
-Host eine Instanz), `container` (Docker-Container; nur Anzeige, keine eigene Quelle im ersten Wurf).
+Typen = Entity-Registry-Kinds, **offen** (Entscheidung A: alle, künftig auch `network` usw.).
+Der Code prüft nur den Slug (`^[a-z][a-z0-9_]*$`), nicht die Mitgliedschaft in einer Liste.
+Quellen im ersten Wurf: `hypervisor` (physische Nodes, Controller `hardware.yml`), `host` (VMs
+und LXCs, Controller `hosts.yml`), `service` (aac-Service aus `service.yml`, je Host eine
+Instanz). `container`, `network` und alle weiteren Kinds bekommen Fenster heute nur über
+manuelle Fenster im Monitoring oder künftige Emitter; Konsumenten behandeln sie gleich.
 
 ### 2.1 Fensterformat (normalisiert, so liegt es auch im Bus)
 
@@ -87,13 +91,14 @@ hardware_hosts:
 # sites/<site>/stages/<stage>/stage_vars.yml      # UNTER stage_vars:
 stage_vars:
   maintenance_default:
-    enabled: true                # der Default-Schalter (Orchestrator-UI schreibt diese Zeile zurück)
+    enabled: true                # der Default-Schalter; wird im Repo editiert (Rückschreiben aus der UI: SSoT Manager, Abschnitt 8)
     windows: [...]
-  incident_defaults:
+  incident_defaults:             # Schlüssel = beliebige Registry-Kinds
     service:    {enabled: true,  offline_minutes: 10, severity: high,     auto_resolve: true}
     host:       {enabled: true,  offline_minutes: 5,  severity: critical, auto_resolve: true}
     hypervisor: {enabled: true,  offline_minutes: 5,  severity: critical, auto_resolve: true}
     container:  {enabled: false}
+    network:    {enabled: false} # Beispiel für einen Kind ohne Quelle im ersten Wurf
 
 # sites/<site>/site_vars.yml                      # UNTER site_vars: (gilt für hardware_hosts, die keine stage_vars sehen)
 site_vars:
@@ -132,9 +137,12 @@ bzw. `permissions.subscribe` der Manifeste.
 | `maintenance:override_ended` | dito | `{override_id, source, ended_at, linger_minutes: 15}` |
 | `monitoring:outage_persisted` | Monitoring (Prober-Instanz, einmal je Ausfall) | `{outage_id, ci_id, kind, name, host_ci_id?, monitor_id, since, persisted_at, duration_s, rule: {offline_minutes, severity, auto_resolve}, error?}` |
 | `monitoring:outage_recovered` | Monitoring | `{outage_id, ci_id, since, recovered_at, duration_s}` |
+| `maintenance:window_missing` | Orchestrator (Runner, wenn ein `deploy_policy: window`-Deploy sofort läuft, weil im Horizont kein Fenster liegt; Entscheidung H) | `{event_id, ci_id, kind: "service", name, host_ci_id?, site, stage, horizon_days, job_id, source: "iac-orchestrator", detected_at, reason}` |
 
 `outage_id` ist deterministisch `"<ci_id>:<since als ISO-UTC>"`; ITSM nutzt es als
-`external_id`. `replaces: true` heißt: der Konsument ersetzt **alle** Einträge dieser `source` in
+`external_id`. `event_id` ist deterministisch `"window_missing:<ci_id>:<job_id>"`; ITSM legt
+daraus einen **Task** („Wartungsfenster definieren") an, dedupliziert je Event und je offenem
+Task am CI. `replaces: true` heißt: der Konsument ersetzt **alle** Einträge dieser `source` in
 einer Transaktion. Ein Item ohne `ci_id` wird vom Emitter nicht gesendet. Ein Konsument ignoriert
 unbekannte Felder und unbekannte `ci_id`s.
 
@@ -150,7 +158,9 @@ gelegentlich gelöscht; kein Timer nötig.
    nächster Fensterbeginn, window_ci_ids)` → Status `SCHEDULED`, Claim freigegeben, kein
    Endstatus. Fällig: `claim_next` nimmt `SCHEDULED` mit `not_before <= now` → erneuter Clone
    (frische `service.yml`) → Policy-Stage sieht `not_before` erreicht → läuft. Kein Fenster in
-   30 Tagen → Warnung und sofort ausführen (Deploys dürfen nicht ewig hängen).
+   30 Tagen → Warnung, sofort ausführen (Deploys dürfen nicht ewig hängen) **und**
+   `maintenance:window_missing` emittieren; ITSM legt daraus einen Task mit der Aufgabe an, ein
+   Fenster zu definieren (Entscheidung H).
 2. **Jeder ausgeführte Deploy ist ein Override** (`deploy_marks_maintenance`, Default an): nicht
    nur „Jetzt ausführen", auch `immediate`-Deploys und Katalog-Button. Begründung: jeder Deploy
    startet Container neu und würde sonst `down` erzeugen. „Jetzt ausführen" = SCHEDULED → QUEUED
@@ -177,26 +187,28 @@ gelegentlich gelöscht; kein Timer nötig.
 8. **Read-Models** in Registry und Server Manager als **eigene Tabellen**, Auswertung
    (aktuell/nächstes Fenster, abgelaufene Overrides) **beim Lesen** über die Core-Bibliothek,
    keine Pro-Entity-Events bei Massen-Publish.
-9. **Default-Schalter** als Pipeline-Typ `maintenance_default_toggle` (Runner) mit zielgenauer
-   Textänderung in `stage_vars.yml`, Commit-Message `ci: maintenance default <site>/<stage> on|off`
-   (Schleifenschutz um dieses Präfix erweitern), danach Re-Sync und Re-Publish.
+9. **Default-Schalter nur lesend im Orchestrator** (Entscheidung C). Der Orchestrator zeigt je
+   Site/Stage `enabled` und `windows` aus dem Controller-Snapshot; geändert wird im
+   Controller-Repo. Der Schleifenschutz reserviert trotzdem schon das Commit-Präfix
+   `ci: maintenance` (kein Deploy-Trigger), damit der künftige SSoT-Manager-Commit keinen
+   Deploy auslöst. Das Rückschreiben aus der UI wandert in das SSoT-Manager-Plugin (Abschnitt 8).
 10. **Statusvertrag CI** (Befund 7): `GET …/gitlab/status?accept=scheduled` → `{"status":
     "scheduled", "not_before": …}`; ohne `accept` → `status: "success"`, `job_status: "SCHEDULED"`.
     Beim Zusammenfassen eines `SCHEDULED`-Jobs wird `start_time = now` gesetzt, damit die zweite
     CI den Job über `since_epoch` findet.
 
-## 5. Entscheidungen für Marvin (mit meinem Default)
+## 5. Entscheidungen (Marvin, 2026-10-18)
 
-| # | Frage | Default, wenn keine Antwort |
+| # | Frage | Entscheidung |
 |---|---|---|
-| A | Typ-Vokabular ohne `vm` (`hypervisor \| host \| service \| container`)? | ja |
-| B | Jeder ausgeführte Deploy erzeugt ein Override (nicht nur „Jetzt ausführen")? | ja, Setting `deploy_marks_maintenance` |
-| C | Push-Recht für den Orchestrator auf `iac-controller/main` (Credential der Rolle `iac_controller`, Branch-Protection)? | Schalter wird gebaut, in der UI deaktiviert bis Push-Recht da ist |
-| D | CI-Template-Umbau (`?accept=scheduled`) durch die IaC-Session in P6; bis dahin Kompatibilitätsmodus (`success` bei `SCHEDULED`)? | ja |
-| E | Server Manager: nur Badge + Filter, Detailansicht später? | ja |
-| F | ITSM: neuer Incident je Ausfall, kein Reopen eines `resolved`? | ja |
-| G | Zeitzone ohne `tz`: Site-`timezone`, sonst UTC? | ja |
-| H | Kein Fenster in 30 Tagen → sofort deployen mit Warnung? | ja, Setting `schedule_horizon_days` |
+| A | Typ-Vokabular? | **Alle Registry-Kinds, offen** (künftig auch `network` usw.). Kein `vm`. Code prüft nur den Slug. |
+| B | Jeder ausgeführte Deploy erzeugt ein Override (nicht nur „Jetzt ausführen")? | ja (Default akzeptiert), Setting `deploy_marks_maintenance` |
+| C | Push-Recht für den Orchestrator auf `iac-controller/main`? | **Nein.** Der Orchestrator bleibt Ausführung und liest nur. Das Rückschreiben des Default-Schalters wird ein eigenes Vorhaben im SSoT-Manager-Plugin (Abschnitt 8). Bis dahin: Zeile `enabled:` im Controller-Repo editieren. |
+| D | CI-Template-Umbau (`?accept=scheduled`) durch die IaC-Session in P6; bis dahin Kompatibilitätsmodus? | ja (Default akzeptiert) |
+| E | Server Manager: nur Badge + Filter, Detailansicht später? | ja (Default akzeptiert) |
+| F | ITSM: neuer Incident je Ausfall, kein Reopen eines `resolved`? | ja (Default akzeptiert) |
+| G | Zeitzone ohne `tz`: Site-`timezone`, sonst UTC? | ja (Default akzeptiert) |
+| H | Kein Fenster in 30 Tagen? | Sofort deployen mit Warnung (Setting `schedule_horizon_days`) **und** einen ITSM-Task „Wartungsfenster definieren" für den Service anlegen (Topic `maintenance:window_missing`, Abschnitt 3). |
 
 ## 6. Phasen, Abhängigkeiten, Versionen
 
@@ -231,5 +243,26 @@ zur Freigabe.
    mit CI-Links Service (`affected`) und Host (`related`), Priorität aus Severity; Service starten →
    `outage_recovered` → Incident `resolved` (`auto_recovered`).
 6. Dasselbe innerhalb des Fensters → kein Incident, Zustand `maintenance`.
-7. Default-Schalter in der Orchestrator-UI → Commit im Controller-Fixture-Repo → Re-Sync →
-   Fenster verschwinden/erscheinen im Monitoring.
+7. Default-Schalter: Zeile `enabled:` in `stage_vars.yml` des Controller-Fixture-Repos
+   umstellen, Commit → Sync → Fenster verschwinden/erscheinen im Monitoring; die
+   Orchestrator-Karte „Default-Fenster" zeigt den neuen Zustand (nur lesend).
+8. Service mit `deploy_policy: window` ohne Fenster im Horizont (Horizont auf 1 Tag stellen,
+   Fenster entfernen) → Webhook → Job läuft sofort, Joblog-Warnung, `window_missing` → ITSM
+   zeigt einen Task „Wartungsfenster definieren: <service>" mit CI-Links; zweiter Deploy →
+   Work-Note am offenen Task, kein zweiter Task.
+
+## 8. Folgevorhaben (nicht Teil dieses Features)
+
+- **SSoT Manager: Default-Schalter mit Git-Rückschreiben** (Entscheidung C). Das Plugin
+  `plugins/lyndrix-plugin-aac-ssot-manager` bekommt den Schalter je Site/Stage (zielgenaue
+  Zeilenänderung `enabled:` im Block `maintenance_default` unter `stage_vars:`, Commit-Präfix
+  `ci: maintenance default <site>/<stage> on|off`, danach Sync-Webhook → Orchestrator
+  publiziert neu). Voraussetzungen: eigenes Git-Credential mit Push-Recht auf
+  `iac-controller/main`, Plugin-Repo auf GitHub (fehlt heute, Memory
+  `lyndrix-ssot-manager-repo-missing`). Der Orchestrator reserviert das Commit-Präfix bereits.
+- **Weitere Kinds als Fensterquelle** (`network`, `container` …): Emitter, die
+  `maintenance:windows_published` mit eigener `source` senden (z. B. Docker Manager für
+  Container). Konsumenten brauchen dafür keine Änderung.
+- **Server Manager Detailansicht** für Fenster/Overrides (Entscheidung E).
+- **Service-CI-Template** `?accept=scheduled` (P6, IaC-Session); danach den
+  Kompatibilitätsmodus im Status-Endpunkt abkündigen.

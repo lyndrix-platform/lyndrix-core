@@ -16,6 +16,8 @@ Kein `schema_version`-Bump (die Version steuert nur Env/Secret-Verhalten).
    `deploy_policy ∈ {window, immediate}`; `incidents.offline_minutes` int ≥ 0, `severity ∈
    {critical, high, medium, low}`, `enabled`/`auto_resolve` bool. Falsche Typen → Fehler,
    unbekannte Keys unter `maintenance`/`incidents` → Warnung. Nur stdlib (kein `croniter`).
+   Kind-Schlüssel unter `incident_defaults` (Controller) sind offen: Slug `^[a-z][a-z0-9_]*$`,
+   keine feste Liste (Entscheidung A).
 2. **Safety-Net** `scripts/manifest_generator/context.py:55-73`: `"maintenance": {}`,
    `"incidents": {}` als Defaults, damit Templates nicht auf fehlende Keys laufen.
 3. **Kein eigener Prozessor**: die effektive Auflösung passiert im Orchestrator (Variante A).
@@ -49,16 +51,21 @@ Kein `schema_version`-Bump (die Version steuert nur Env/Secret-Verhalten).
    `stage_vars.incident_defaults`), Site (`site_vars.maintenance_default`,
    `site_vars.incident_defaults`, `site_vars.timezone` als tz-Default). Regeln: Werte literal
    (kein Jinja, `{{ }}` würde geleert), Listen werden ersetzt (Fenster je Ebene nur einmal
-   definieren), Typ-Schlüssel `hypervisor|host|service|container`.
+   definieren), Typ-Schlüssel = Entity-Registry-Kinds (offen; heute `hypervisor`, `host`,
+   `service`, `container`, `network` …). Hinweis: ohne Fenster im Horizont deployt der
+   Orchestrator sofort und das ITSM legt einen Task „Wartungsfenster definieren" an.
 2. **Beispiel-Einträge** in `environments/sites/onprem/stages/prod/stage_vars.yml` (unter
    `stage_vars:`): `maintenance_default: {enabled: false, windows: [{weekly: {days: [sun],
    start: "02:00", end: "04:00"}}]}` und `incident_defaults` mit den Defaults aus dem Ergebnis
    2.3. `enabled: false`, bis Marvin den Schalter umlegt. **Datei zeilenweise editieren**, der
    TF-Backend-Block mit Credential-Key bleibt unangetastet (siehe `features/002-secrets-sops-hardening.md`).
-3. **Default-Schalter-Rückschreiben** (Entscheidung C): Credential der Rolle `iac_controller`
-   im Orchestrator braucht Push auf `main` (oder ein Bot-Account mit „Allowed to push" in der
-   Branch-Protection). Die CI (`.gitlab-ci.yml:52-80`) löst bei dem Commit nur den Webhook-Sync
-   aus; der Orchestrator ignoriert Deploy-Trigger mit Präfix `ci: maintenance default`.
+3. **Default-Schalter** (Entscheidung C, 2026-10-18): kein Push-Recht für den Orchestrator.
+   Ein/Aus wird im Controller-Repo editiert (Zeile `enabled:` im Block `maintenance_default`),
+   die CI (`.gitlab-ci.yml:52-80`) löst beim Commit den Webhook-Sync aus, der Orchestrator
+   publiziert neu. Das Rückschreiben aus der Lyndrix-UI kommt später über das
+   SSoT-Manager-Plugin (`00-ergebnis-p0.md` Abschnitt 8); dessen Commits beginnen mit
+   `ci: maintenance` und lösen keinen Deploy aus. Für diesen Bot-Account ist dann „Allowed to
+   push" auf `main` einzurichten.
 4. **Hub/MkDocs**: `mkdocs.yml` nimmt die neue Feature-Datei auf (`generate_hub.py` prüfen).
 
 ## 3. Renovate

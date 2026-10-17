@@ -23,12 +23,15 @@ Endpunkte.
 
 ```python
 # Konstanten
-KINDS = ("hypervisor", "host", "service", "container")
+KNOWN_KINDS = ("hypervisor", "host", "service", "container", "network", "itsm_record", "generic")
+    # nur Doku/UI-Reihenfolge — KEIN Gate (Entscheidung A: Kinds sind offen)
+def is_valid_kind(kind: str) -> bool        # ^[a-z][a-z0-9_]*$, max 32 Zeichen
 SEVERITIES = ("critical", "high", "medium", "low")
 DEPLOY_POLICIES = ("window", "immediate")
 TOPIC_WINDOWS_PUBLISHED = "maintenance:windows_published"
 TOPIC_OVERRIDE_STARTED = "maintenance:override_started"
 TOPIC_OVERRIDE_ENDED = "maintenance:override_ended"
+TOPIC_WINDOW_MISSING = "maintenance:window_missing"
 TOPIC_OUTAGE_PERSISTED = "monitoring:outage_persisted"
 TOPIC_OUTAGE_RECOVERED = "monitoring:outage_recovered"
 DEFAULT_LINGER_MINUTES = 15
@@ -84,11 +87,15 @@ def parse_iso(value: str) -> datetime        # aware; naive → UTC
 def iso(dt: datetime) -> str                 # UTC, Sekunden, "Z"
 def utcnow() -> datetime
 def make_outage_id(ci_id: str, since: datetime) -> str      # f"{ci_id}:{iso(since)}"
+def make_window_missing_id(ci_id: str, job_ref: str | int) -> str   # f"window_missing:{ci_id}:{job_ref}"
 ```
 
 Payload-Formen aus `00-ergebnis-p0.md` Abschnitt 3 als `TypedDict`s (`WindowsPublishedItem`,
-`WindowsPublished`, `OverrideStarted`, `OverrideEnded`, `OutagePersisted`, `OutageRecovered`) nur
-zur Dokumentation und für Typprüfung; keine Laufzeitvalidierung im Core.
+`WindowsPublished`, `OverrideStarted`, `OverrideEnded`, `WindowMissing`, `OutagePersisted`,
+`OutageRecovered`) nur zur Dokumentation und für Typprüfung; keine Laufzeitvalidierung im Core.
+`parse_incident_rule`/`resolve_incident_rule` arbeiten mit `incident_defaults` als
+`Mapping[str, Mapping]` mit **beliebigen** Kind-Schlüsseln (`resolve_incident_rule(own,
+defaults_by_kind, kind, site_defaults_by_kind)`).
 
 ## 3. Zeitlogik, präzise
 
@@ -127,21 +134,23 @@ Laufen im Dev-Core (`docker exec lyndrix-core-dev python -m pytest tests/mainten
   `ended_at` innerhalb und außerhalb `linger`, abgelaufen.
 - Incident-Regeln: `offline_minutes: 0` → disabled; Severity-Validierung; Kaskade
   `resolve_incident_rule`.
-- Contract: Konstanten unverändert (Snapshot-Test), `make_outage_id` deterministisch.
+- Contract: Konstanten unverändert (Snapshot-Test), `make_outage_id`/`make_window_missing_id`
+  deterministisch; `is_valid_kind` akzeptiert `network`/`my_kind2`, lehnt `VM`/`a-b`/leer ab.
 
 ## 5. Doku (`docs/plugins.md`, Englisch wie der Rest der Datei)
 
 Inhalt: Zweck (Core liefert Modell + Zeitauswertung + Topic-Namen, keine Persistenz), Normalform
-der Fenster, die fünf Topics mit Payload-Tabelle, Transportregel (lokal emittieren, idempotent
+der Fenster, die sechs Topics mit Payload-Tabelle, Transportregel (lokal emittieren, idempotent
 konsumieren, eigener Cluster-Broadcast für Caches), Override-Semantik mit `linger_minutes`,
-Typ-Vokabular = Entity-Registry-Kinds, Beispiel „Plugin konsumiert `windows_published` und
+Typ-Vokabular = Entity-Registry-Kinds (offen, kein Gate; `KNOWN_KINDS` nur Anzeige-Reihenfolge),
+`window_missing` → ITSM-Task, Beispiel „Plugin konsumiert `windows_published` und
 berechnet `effective_state` beim Lesen", Hinweis auf `min_core_version="1.11.0"` bzw.
 `try/except ImportError` für optionale Nutzung.
 
 ## 6. Abnahme
 
 - Tests grün im Dev-Core; `ruff`, `black --check`, `mypy app/core/api/maintenance.py` sauber.
-- `python -c "from core.api import maintenance as m; print(m.KINDS)"` im Dev-Core.
+- `python -c "from core.api import maintenance as m; print(m.KNOWN_KINDS)"` im Dev-Core.
 - Theme-Validator akzeptiert `state_maintenance`; Shell zeigt das Token in den DevTools.
 - Commit auf `feature/maintenance-core`, kein Push vor Freigabe; danach Core-Image 1.11.0 und
   Shell 1.8.0 nach dem gewohnten Rollout (Marvin rollt k3s).

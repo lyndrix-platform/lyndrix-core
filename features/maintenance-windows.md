@@ -212,6 +212,14 @@ Reihenfolge der Rollouts wie gewohnt (Core → Plugins → k3s-Roll durch Marvin
 5. Annahmen ohne Rückfrage: mehrere Deploys desselben Services im selben Fenster → letzter Stand
    gewinnt; Override-Puffer 15 Minuten, maximale Override-Dauer 4 h (beides als Setting).
 
+**Nachtrag 2026-10-18 (Antworten auf A–H aus `maintenance-windows/00-ergebnis-p0.md` §5):**
+Punkt 1 ist präzisiert: der Orchestrator bleibt Ausführung und zeigt den Default-Schalter nur
+an; das Rückschreiben per Git-Commit kommt in ein eigenes Vorhaben im SSoT-Manager-Plugin
+(C). Typen sind alle Entity-Registry-Kinds, offen für künftige wie `network` (A). Findet sich
+im Horizont kein Fenster, deployt der Orchestrator sofort mit Warnung und das ITSM legt einen
+Task „Wartungsfenster definieren" an (H, Topic `maintenance:window_missing`). B, D, E, F, G
+mit den vorgeschlagenen Defaults.
+
 ## 11. Ergebnis P0 (2026-10-17)
 
 | Datei | Inhalt |

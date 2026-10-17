@@ -17,7 +17,8 @@ Inventory-Sync (bis dahin bleibt `ci_id` leer, alles andere funktioniert).
 | Key | kind | Default |
 |---|---|---|
 | `outage_rules_enabled` | bool | true (globaler Notschalter) |
-| `outage_rules_enabled_hypervisor` / `_host` / `_service` / `_container` | bool | true / true / true / false |
+| `outage_rules_enabled_hypervisor` / `_host` / `_service` / `_container` | bool | true / true / true / false (die bekannten Kinds als eigene Schalter) |
+| `outage_rules_disabled_kinds` | str | "" (Komma-Liste weiterer Kinds, die stumm sind — Kinds sind offen, Entscheidung A; Beispiel `network,generic`) |
 | `outage_default_offline_minutes` | int | 10 |
 | `outage_default_severity` | select critical/high/medium/low | high |
 | `outage_default_auto_resolve` | bool | true |
@@ -77,7 +78,9 @@ Helfer in `maintenance.py`.
   `core.api.maintenance.effective_state`; `rule_for(record) -> IncidentRule | None`
   (Reihenfolge: Regel am Service-CI → Regel am Host-CI → Settings-Default des Kinds;
   Kind aus `windows`-Tabelle, sonst `server`-Monitor → `host`, sonst `service`); Notschalter
-  (`outage_rules_enabled*`) hier anwenden.
+  (`outage_rules_enabled*` für die bekannten Kinds, `outage_rules_disabled_kinds` für alle
+  anderen; unbekannter Kind ohne Eintrag → Regel gilt) hier anwenden. Kein Kind-Gate: jeder
+  Slug aus dem Event wird übernommen (`core.api.maintenance.is_valid_kind`).
 - Bus-Handler (dünn in `entrypoint.py` nach Muster 327-367, Arbeit im Modul via `to_thread`):
   `on_windows_published` (nur `source != "monitoring"`; `replaces` → `replace_windows`),
   `on_override_started`, `on_override_ended`. Nach jedem Schreiben: `cache.reload()` lokal und
