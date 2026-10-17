@@ -214,7 +214,7 @@ gelegentlich gelöscht; kein Timer nötig.
 
 | Phase | Teilplan | Version | Abhängigkeit |
 |---|---|---|---|
-| P1 | `plan-core.md`: `core.api.maintenance`, API 1.13, Token, Doku | core 1.11.0, ui 1.8.0 | keine |
+| P1 | `plan-core.md`: `core.api.maintenance`, API 1.13, Token, Doku — **umgesetzt 2026-10-18** (core `50d94f5`, ui `fca418d`) | core 1.11.0, ui 1.8.0 | keine |
 | P2 | `plan-iac-orchestrator.md` | orchestrator 1.6.0 | P1; Registry-Scheme `iac.service` aus P5a (Reihenfolge: P5a vor P2 ausrollen) |
 | P3 | `plan-monitoring.md` | monitoring 1.7.0 | P1; `ci_id` im Inventory-Sync aus P2 |
 | P4 | `plan-itsm.md` | itsm 0.3.0 | P3-Payloads (im Vertrag fixiert, parallel baubar) |

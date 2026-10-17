@@ -1,5 +1,15 @@
 # Teilplan P1: Core-Bibliothek `core.api.maintenance` (API 1.13, Core 1.11.0)
 
+**Status 2026-10-18: umgesetzt** (lyndrix-core `50d94f5`, lyndrix-ui `fca418d`, lokal, nicht gepusht).
+Abweichungen vom Entwurf unten, die reale Datei `app/core/api/maintenance.py` ist maßgeblich:
+`KINDS` → `KNOWN_KINDS` + `is_valid_kind()` (Entscheidung A); zusätzlich `MaintenanceError` als
+Basis von `ScheduleError`/`RuleError`, `CronExpr` öffentlich, `UTC`, `apply_override_ended(o,
+payload)`, `make_window_missing_id`, `TOPIC_WINDOW_MISSING`, TypedDict `WindowMissing`;
+`resolve_incident_rule(own, kind, *defaults_by_kind)` (eigener Block gewinnt und darf partiell
+sein, dann die erste `incident_defaults`-Map, die den Kind kennt). `weekly.start == end` ist ein
+Fehler. Horizont von `next_start` zählt ab Ende des laufenden Fensters. 64 Tests
+(`tests/maintenance/`, laufen auch ohne Core-Stack auf dem Host). Codename 1.11.0 „Quiet Hours".
+
 Ausführung: Fable selbst. Grundlage: `00-ergebnis-p0.md` Abschnitte 2, 3. Der Core bleibt
 plugin-agnostisch: reine Funktionen, Konstanten, Doku, ein Farbtoken. Keine Persistenz, keine
 Endpunkte.
