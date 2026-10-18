@@ -266,3 +266,32 @@ zur Freigabe.
 - **Server Manager Detailansicht** für Fenster/Overrides (Entscheidung E).
 - **Service-CI-Template** `?accept=scheduled` (P6, IaC-Session); danach den
   Kompatibilitätsmodus im Status-Endpunkt abkündigen.
+
+## 9. Review der Subagent-Berichte (Fable, 2026-10-18)
+
+Stand: P4 ITSM 0.3.0 (`4878594`), P5a Entity Registry 0.3.0 (`255708d`), P5b Server Manager
+1.4.0 (`4bb5df7`) committet, lokal. P2 und P3 wurden vom Session-Limit unterbrochen und laufen
+weiter (Working Trees mit WIP). Antworten auf die offenen Fragen der Agenten:
+
+| Plugin | Frage | Entscheidung |
+|---|---|---|
+| alle Konsumenten | `override_id` in Fensterzeilen `NOT NULL DEFAULT ""` statt NULL | akzeptiert (NULL kollidiert im Unique-Index nicht; nur so fängt der Key doppelte Zustellungen) |
+| alle Konsumenten | `override_ended` matcht `override_id` + `source`, wenn `source` mitkommt | akzeptiert; der Vertrag garantiert dieselbe `source` |
+| alle Konsumenten | wiederholtes `override_started` nach `override_ended` reaktiviert nicht | akzeptiert (Idempotenz vor Reihenfolge) |
+| Server Manager | Fensterzeilen speichern nur `windows` + `inherited_from` | akzeptiert für Entscheidung E; Detailansicht braucht später `kind`, `name`, `host_ci_id`, `deploy_policy`, `incidents` (Migration, Abschnitt 8) |
+| Server Manager, Registry | Fenster mehrerer Quellen werden beim Lesen vereinigt | so gemeint: „spezifisch gewinnt" löst der Emitter innerhalb seiner `source`, Quellen addieren sich |
+| ITSM | Event-Verlust, wenn ITSM deaktiviert ist oder Tabellen > 30 s fehlen | für den ersten Wurf akzeptiert; Folgevorhaben: Monitoring emittiert offene Outages periodisch erneut (z. B. alle 30 min, ITSM dedupliziert über `outage_id`) |
+| ITSM | Notification `link` wird von der Shell nicht gerendert | Folgevorhaben Core/Shell: generischer Link an Notifications; ITSM-Payload bleibt wie gebaut |
+| ITSM | Task `due` nur als Katalogfeld, Core-Spalte `due_at` bleibt NULL | akzeptiert; mit der SLA-Phase beide setzen |
+| ITSM | `task.yml` kennt jetzt nur die Kategorie `maintenance` | akzeptiert und dokumentiert; weitere Kategorien kommen in den Katalog, wenn sie gebraucht werden |
+| ITSM | ein offener Monitoring-Incident je CI, unabhängig vom Monitor | so gemeint (Entscheidung F) |
+| ITSM | Zeiten in Titeln/Notizen in UTC | akzeptiert; später `tz` im Event, wenn das Monitoring die Site-Zeitzone kennt |
+| ITSM | eigenes Setting `auto_text_locale` (de/en) für generierte Texte | akzeptiert (Bus-Events haben keine Benutzer-Locale) |
+| Registry | `entity_registry:maintenance_changed` lokal oder `cluster=True`? | **`cluster=True`**: es ist ein UI-Refresh-Signal ohne Schreibfolgen, Peers müssen es sehen (der eigene Cluster-Broadcast aus der Transportregel) |
+| Registry | `host_ci_id` aus `windows_published` wird verworfen, `/host` nutzt nur `runs_on` | akzeptiert; der Orchestrator setzt `runs_on` beim Publish. Fallback-Spalte nur, wenn der Durchstich ein Loch zeigt |
+| Registry | ungültige Fenster werden übersprungen, gezählt, geloggt | akzeptiert |
+| Registry | Zeilen an stillgelegten Entities bleiben | akzeptiert |
+| Registry, ITSM, Server Manager | Repos sind nicht black-formatiert; Agenten haben Bestandsdateien nicht umformatiert | richtig so; ein reiner Style-Commit je Repo ist Marvins Entscheidung |
+
+Ergänzungen zu Abschnitt 8 (Folgevorhaben): Monitoring-Re-Emit offener Outages; Notification-Link
+in Core/Shell; Server-Manager-Migration für die Detailansicht; `tz` in Outage-Events.
