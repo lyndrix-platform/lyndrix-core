@@ -336,3 +336,23 @@ zählt als Kind `service`. Alle neuen Routen (`/windows`, `/overrides`, `/outage
 **Folgevorhaben (neu):** Host-Ausfall erzeugt heute je Service einen eigenen Incident plus einen
 für den Host. Korrelation Host → Services (nur Host-Incident, Services als `related`) gehört in
 eine spätere Welle (Monitoring kennt `host_ci_id`, ITSM kann unterdrücken).
+
+### 9.3 Dev-Bench nach dem Umbau (2026-10-18, vor P7)
+
+- **Reconcile-Loop:** die gemounteten Plugins trugen neue Manifestversionen, `plugin_states` die
+  alten → der Cluster-Reconcile lud die alten Tags nach, uvicorn startete alle paar Sekunden neu
+  (3098 Reloads in 3 h). Behoben per `~/.config/lyndrix/dev-align-plugin-states.sh` (Marvin, der
+  Auto-Modus blockt DB-Update und Container-`rm`). Lehre: nach einem Versions-Bump gemounteter
+  Plugins **sofort** die `plugin_states`-Zeilen angleichen (Memory `lyndrix-dev-bench-testing`).
+- **Monitoring 1.7.0:** während des Loops ~50 000 `Unknown column 'maintenance_samples'` auf
+  `dev-b` — die `ALTER … IF NOT EXISTS` in `_ensure_schema` schlucken Fehler still
+  (`except: pass`), im Sturm kamen sie nicht durch; seit der ruhigen Bench null Fehler, Spalte
+  vorhanden. Beim Prod-Rollout nach dem Roll die Monitoring-Logs auf diese Meldung prüfen.
+- **Orchestrator Boot-Publish (Bug, behoben in `62b5893`):** nach dem Core-Neustart meldete die
+  Registry noch `database not ready`; der Orchestrator publizierte „0 item(s) with ci_id (108
+  resolved)“ und löschte mit `replaces: true` die Fenster aller Konsumenten. Jetzt: Boot-Kette
+  mit Backoff (15/30/60/120/300 s) wiederholen, `windows_published` zurückhalten, solange die
+  Registry nicht geantwortet hat; Snapshot für die UI trotzdem aktualisieren. 7 neue Tests.
+- Theme `marvin` (nicht versioniert) warnt je Ladevorgang „missing component style
+  BADGE_STATE_MAINTENANCE / STATUS_RAIL_MAINTENANCE“ — der Validator füllt auf, die Warnung ist
+  nur Rauschen; Marvin kann die beiden Keys in `components.json` ergänzen.
