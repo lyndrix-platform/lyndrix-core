@@ -313,3 +313,26 @@ ohne `ci_id` (UI zeigt ⚠), der Bus nicht; `iac:inventory_updated` bekommt addi
 | Bell-Notification bei `window_missing` ohne ITSM? | nein (würde den ITSM-Task doppeln); Joblog-Warnung reicht |
 | Kompatibilitätsmodus färbt alte CI-Jobs grün, obwohl geparkt | Entscheidung D; P6 stellt die Templates auf `?accept=scheduled` um |
 | vorbestehender `iac_core`-Testfehler und Paketnamen-Kollision `tests`/`iac_core/tests` | Folgevorhaben im Repo |
+
+### 9.2 P3 Monitoring 1.7.0 (`1e1edc2`)
+
+95 Tests grün (+45, alle Uhren eingefroren). Abweichungen akzeptiert: `monitors_changed` mit
+`reason=maintenance_windows` (das bestehende `maintenance` bedeutet „Housekeeping, Probe-Jobs neu
+laden"); zusätzliche Spalte `host_ci_id`; manuelle Fenster als eine Zeile je Ziel
+`(monitoring, ci_id, monitor_id)`; `PassiveResult` mit `MAINTENANCE` → 422 statt 400
+(Pydantic-Validator); Settings-Kategorien „Incidents" und „Maintenance windows" (die Kategorie
+„Maintenance" trägt die Housekeeping-Buttons); Service ohne eigene `ci_id` leiht die des Hosts und
+zählt als Kind `service`. Alle neuen Routen (`/windows`, `/overrides`, `/outages`) sind mit
+`api:read`/`api:write` abgesichert, fremde Quellen liefern 409 (Security-Review geprüft).
+
+| Frage | Entscheidung |
+|---|---|
+| Fenster/Override am Host-CI decken Service-Monitore mit eigener `ci_id` nicht implizit ab | akzeptiert: der Orchestrator löst die Vererbung auf und sendet Service- **und** Host-CIs in `window_ci_ids`; der Dialog postet je Monitor des Hosts. Beobachten in P7 |
+| `GET /windows` `effective` nur mit CI-Overrides | reicht |
+| Outage unter geliehener Host-`ci_id`: Kind `service`, Regel vom Host | ok, ITSM nutzt nur die Severity |
+| `outage_recovered` emittiert die Instanz, die den Heartbeat speichert | ok (bedingtes UPDATE = genau einmal, lokaler Konsument) |
+| Inventory-Sync-Schlüssel `ci_id`/`host_ci_id` | Orchestrator 1.6.0 sendet genau diese Schlüssel |
+
+**Folgevorhaben (neu):** Host-Ausfall erzeugt heute je Service einen eigenen Incident plus einen
+für den Host. Korrelation Host → Services (nur Host-Incident, Services als `related`) gehört in
+eine spätere Welle (Monitoring kennt `host_ci_id`, ITSM kann unterdrücken).
