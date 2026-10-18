@@ -295,3 +295,21 @@ weiter (Working Trees mit WIP). Antworten auf die offenen Fragen der Agenten:
 
 Ergänzungen zu Abschnitt 8 (Folgevorhaben): Monitoring-Re-Emit offener Outages; Notification-Link
 in Core/Shell; Server-Manager-Migration für die Detailansicht; `tz` in Outage-Events.
+
+### 9.1 P2 IaC Orchestrator 1.6.0 (`09c020e`)
+
+75 Plugin-Tests grün (+42), `iac_core/tests` 11 grün und 1 **vorbestehender** Fehler
+(`test_terraform_gen.py::test_providers_exclude_secrets`, auch auf dem Baseline rot). Abweichungen
+akzeptiert: eigener schlanker `load_tree` statt `iac_core.loader` (gleiche Merge-Semantik, testbar
+auf Temp-Verzeichnissen); `gitlab_pipeline_success` zählt zu den Policy-Triggern; `enqueue()`
+bleibt `int`, neu `enqueue_ex()`; ein UI-Deploy oder `force` **promotet** einen geparkten Job
+statt ihn liegen zu lassen; ein `windows_published` für alle Sites/Stages; Snapshot behält Items
+ohne `ci_id` (UI zeigt ⚠), der Bus nicht; `iac:inventory_updated` bekommt additiv `services[]`.
+
+| Frage | Entscheidung |
+|---|---|
+| `not_before` naiv in der Prozessuhr wie die übrigen Job-Spalten | akzeptiert: genau ein Runner (`pinned:runner`), Container laufen in UTC. Folgevorhaben Queue-Spalten auf UTC |
+| Registry 0.2.0 lehnt Service-Items ab → kein Service-`ci_id`, kein `window_missing` | bekannt, deshalb Rollout-Reihenfolge Registry vor Orchestrator |
+| Bell-Notification bei `window_missing` ohne ITSM? | nein (würde den ITSM-Task doppeln); Joblog-Warnung reicht |
+| Kompatibilitätsmodus färbt alte CI-Jobs grün, obwohl geparkt | Entscheidung D; P6 stellt die Templates auf `?accept=scheduled` um |
+| vorbestehender `iac_core`-Testfehler und Paketnamen-Kollision `tests`/`iac_core/tests` | Folgevorhaben im Repo |
