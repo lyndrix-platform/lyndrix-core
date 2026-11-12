@@ -15,6 +15,7 @@ und das Feature-Doc darf weg (oder wird als „shipped" markiert).
 
 | Doc | Thema | Status |
 |---|---|---|
+| [`step-ca-ui-plugin.md`](./step-ca-ui-plugin.md) | PKI-Plugin als Web-UI für step-ca (Zertifikate, Ablauf-Monitoring, Revoke, Entity-Registry) — keine der OSS-UIs passt | 💡 Idee |
 | [`lyndrix-agent-framework.md`](./lyndrix-agent-framework.md) | Verschlüsselter Host-Agent (`lyndrix-agent`) + `agent-management`-Plugin — ersetzt Klartext docker-proxy/dockermon/docker-to-dns | 📐 Design |
 | [`rbac-security-k8s-audit.md`](./rbac-security-k8s-audit.md) | RBAC-Ausbau (Plugin-Rollen + Zuweisungs-API), Security-Findings aus dem Multi-Agent-Audit (inkl. kritischer superadmin-Escalation) & Kubernetes-Multi-Pod-Readiness | 📐 Design / Audit |
 | [`cluster-plugin-ops-and-ux.md`](./cluster-plugin-ops-and-ux.md) | Cluster-weite Plugin-Operationen (eine Notification pro Upgrade, Fortschritt pro Instanz, DB-Notification-Store), „Alle aktualisieren“, Zahnrad für Plugin-Einstellungen, External-Services-Konfiguration in React + optionales Grid, Users-Seite rollenorientiert mit implizierten Rechten | 🚧 begonnen 2026-10-16 |
