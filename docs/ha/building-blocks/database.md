@@ -25,7 +25,21 @@
 ## Lyndrix settings
 
 `DB_HOST` (writer endpoint), `DB_POOL_RECYCLE_SECONDS`, `DB_STATEMENT_TIMEOUT_SECONDS`,
-`DB_ALLOW_DIRECT_NODE`.
+`DB_SOCKET_TIMEOUT_SECONDS`, `DB_ALLOW_DIRECT_NODE`.
+
+### Dead peers (core ≥ 1.11.1)
+
+A pooled connection whose peer vanished without a FIN/RST (the DB VIP moved to another node, a
+NAT/conntrack entry expired, a half-open TCP session) does not fail — the kernel retransmits for
+`tcp_retries2` = 15 rounds, about 16 minutes, and every caller of that connection waits, including
+`pool_pre_ping`, the cluster heartbeat and lease renewals. The core therefore sets pymysql
+`read_timeout`/`write_timeout` (`DB_SOCKET_TIMEOUT_SECONDS`, auto = statement cap + 30 s): the query
+fails with error 2013, SQLAlchemy drops the connection and the next call opens a fresh one. On top of
+that the heartbeat and each lease renewal are abandoned after the lease TTL, so an instance logs the
+outage within seconds and resumes as soon as the database answers again. Setting
+`net.ipv4.tcp_retries2=8` (~100 s) on the container/pod shortens the kernel side as well — this is a
+namespaced `net.*` sysctl, so Compose `sysctls:` / Kubernetes `securityContext.sysctls` need no
+extra privileges.
 
 ## Reference setup
 

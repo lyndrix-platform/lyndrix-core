@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # killed by the server instead of piling up after the client gave up.
     # 0 disables the cap. Long batch jobs raise it per session.
     DB_STATEMENT_TIMEOUT_SECONDS: int = 60
+    # Socket read/write timeout (seconds) of every pooled connection (pymysql
+    # read_timeout / write_timeout). Bounds how long a query against a silently
+    # dead peer (VIP failover, half-open TCP) blocks before the client gives up
+    # and the pool replaces the connection — without it the kernel retransmits
+    # for ~16 min (tcp_retries2=15) and every caller, including the cluster
+    # heartbeat, waits that long. 0 = auto: DB_STATEMENT_TIMEOUT_SECONDS + 30
+    # (at least 90), so a statement that hits the server-side cap is ended by
+    # the server, never by the socket. A value <= the statement cap is raised.
+    DB_SOCKET_TIMEOUT_SECONDS: int = 0
     # Optional pip wheel cache for plugin requirement installs. Empty (default) =
     # pip's per-instance default. Pointing it at the shared storage speeds up the
     # followers of a cluster, but anyone who can write that directory could poison

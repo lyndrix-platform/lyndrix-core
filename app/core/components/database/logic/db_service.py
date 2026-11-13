@@ -48,6 +48,51 @@ class DatabaseService:
 
         log.info(f"DATABASE: statement time capped at {seconds}s per connection (DB_STATEMENT_TIMEOUT_SECONDS)")
 
+    # pymysql gives up a TCP connect after this many seconds (DNS + SYN).
+    CONNECT_TIMEOUT_S = 5
+    # Floor of the automatic socket timeout (``DB_SOCKET_TIMEOUT_SECONDS=0``).
+    MIN_SOCKET_TIMEOUT_S = 90
+    # Margin above the statement cap: the server must be the one that ends a
+    # long statement (clean error 1969/3024), the socket timeout only catches
+    # a peer that stopped answering altogether.
+    SOCKET_TIMEOUT_MARGIN_S = 30
+
+    @classmethod
+    def socket_timeout_seconds(cls) -> int:
+        """Effective pymysql ``read_timeout``/``write_timeout`` in seconds.
+
+        ``DB_SOCKET_TIMEOUT_SECONDS`` > 0 is honoured unless it is not above
+        ``DB_STATEMENT_TIMEOUT_SECONDS`` — then (and for ``0`` = auto) the value
+        is cap + 30 s, at least 90 s. Without this bound a query against a
+        connection whose peer silently vanished (DB VIP moved, half-open TCP)
+        returned only after the kernel retransmit timeout (~16 min with
+        ``tcp_retries2=15``) — long enough for the cluster heartbeat to miss its
+        lease TTL and for the instance to be reported dead.
+        """
+        cap = int(getattr(settings, "DB_STATEMENT_TIMEOUT_SECONDS", 0) or 0)
+        configured = int(getattr(settings, "DB_SOCKET_TIMEOUT_SECONDS", 0) or 0)
+        floor = cap + cls.SOCKET_TIMEOUT_MARGIN_S if cap > 0 else 0
+        auto = max(cls.MIN_SOCKET_TIMEOUT_S, floor)
+        if configured <= 0:
+            return auto
+        if cap > 0 and configured <= cap:
+            log.warning(
+                f"DATABASE: DB_SOCKET_TIMEOUT_SECONDS={configured} is not above "
+                f"DB_STATEMENT_TIMEOUT_SECONDS={cap} — using {floor}s so the server cap fires first"
+            )
+            return floor
+        return configured
+
+    @classmethod
+    def connect_args(cls) -> dict:
+        """DBAPI connect arguments for the pooled engine (pymysql)."""
+        timeout = cls.socket_timeout_seconds()
+        return {
+            "connect_timeout": cls.CONNECT_TIMEOUT_S,
+            "read_timeout": timeout,
+            "write_timeout": timeout,
+        }
+
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
@@ -124,13 +169,21 @@ class DatabaseService:
         log.info(f"DATABASE: Vault is open. Initializing engine for {settings.DATABASE_URL_SAFE}")
         try:
             recycle = int(getattr(settings, "DB_POOL_RECYCLE_SECONDS", 0) or 0)
+            connect_args = self.connect_args()
             self.engine = create_engine(
                 settings.DATABASE_URL,
                 pool_pre_ping=True,
                 # Proxies (MaxScale/ProxySQL) and Galera nodes drop idle
                 # connections; recycle ours before they do (0 → never).
                 pool_recycle=recycle if recycle > 0 else -1,
-                connect_args={'connect_timeout': 5}
+                # read/write_timeout: a dead peer surfaces as pymysql 2013 after
+                # this long; SQLAlchemy treats 2013 as a disconnect and replaces
+                # the pooled connection (also bounds pool_pre_ping).
+                connect_args=connect_args,
+            )
+            log.info(
+                f"DATABASE: socket timeouts — connect {connect_args['connect_timeout']}s, "
+                f"read/write {connect_args['read_timeout']}s (DB_SOCKET_TIMEOUT_SECONDS)"
             )
             self._install_statement_cap(self.engine)
             self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
