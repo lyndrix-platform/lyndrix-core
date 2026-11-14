@@ -131,15 +131,19 @@ class AuthConfigService:
         vault = self._vault_client()
         if not vault.is_connected:
             raise RuntimeError("Vault ist nicht verbunden. Konfiguration kann nicht gespeichert werden.")
-        existing = self.load_vault_data()
-        existing.update({k: v for k, v in updates.items() if v != ""})
-        # Remove keys explicitly set to "" to allow clearing values
-        for k, v in updates.items():
-            if v == "":
-                existing.pop(k, None)
-        vault.client.secrets.kv.v2.create_or_update_secret(
-            path=VAULT_PATH, mount_point=VAULT_MOUNT, secret=existing
-        )
+        from core.components.vault.logic.kv_helper import update_secret_dict
+
+        def _merge(existing: dict) -> None:
+            existing.update({k: v for k, v in updates.items() if v != ""})
+            # Remove keys explicitly set to "" to allow clearing values
+            for k, v in updates.items():
+                if v == "":
+                    existing.pop(k, None)
+
+        # Strict read + check-and-set: a failed read must abort the save (it
+        # would otherwise replace the LDAP/OIDC config with only ``updates``).
+        # Raises RuntimeError (VaultReadError/VaultWriteError) → caller reports it.
+        update_secret_dict(VAULT_PATH, _merge)
 
     # ------------------------------------------------------------------
     # Effective value resolution

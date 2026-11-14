@@ -69,33 +69,35 @@ class CustomRepositoryService:
             return {}
 
     def _write_token(self, repo_id: int, token: str) -> bool:
-        vault = self._vault()
-        if not vault:
+        if not self._vault():
             log.warning("CUSTOM_REPO: Vault not connected — token not stored.")
             return False
-        data = self._read_vault_data(vault)
-        data[_token_key(repo_id)] = token
+        from core.components.vault.logic.kv_helper import update_secret_dict
+
+        def _set(data: dict) -> None:
+            data[_token_key(repo_id)] = token
+
         try:
-            vault.client.secrets.kv.v2.create_or_update_secret(
-                path=VAULT_PATH, mount_point=VAULT_MOUNT, secret=data
-            )
+            # Strict read + CAS: all repo tokens share one secret, so a failed
+            # read must abort instead of replacing it with this single token.
+            update_secret_dict(VAULT_PATH, _set)
             return True
         except Exception as exc:
             log.error(f"CUSTOM_REPO: Failed to write token: {exc}")
             return False
 
     def _delete_token(self, repo_id: int) -> None:
-        vault = self._vault()
-        if not vault:
+        if not self._vault():
             return
-        data = self._read_vault_data(vault)
-        if data.pop(_token_key(repo_id), None) is not None:
-            try:
-                vault.client.secrets.kv.v2.create_or_update_secret(
-                    path=VAULT_PATH, mount_point=VAULT_MOUNT, secret=data
-                )
-            except Exception as exc:
-                log.error(f"CUSTOM_REPO: Failed to delete token: {exc}")
+        from core.components.vault.logic.kv_helper import update_secret_dict
+
+        def _drop(data: dict) -> None:
+            data.pop(_token_key(repo_id), None)
+
+        try:
+            update_secret_dict(VAULT_PATH, _drop)
+        except Exception as exc:
+            log.error(f"CUSTOM_REPO: Failed to delete token: {exc}")
 
     def get_token(self, repo_id: int) -> Optional[str]:
         """Read a per-repo token from Vault, or None."""
