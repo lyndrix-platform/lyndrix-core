@@ -200,8 +200,9 @@ def render_plugins_page():
 
             with ui.scroll_area().classes('w-full flex-grow pr-4'):
                 with ui.column().classes('w-full gap-4'):
-                    def toggle_plugin_inner(event):
-                        module_manager.toggle_module(manifest.id, event.value)
+                    async def toggle_plugin_inner(event):
+                        # The DB write runs in a worker thread — never block the loop.
+                        await module_manager.set_module_active(manifest.id, event.value)
                         if event.value:
                             _safe_notify(t('plugins.notify.activated', name=manifest.name), 'positive')
                         else:

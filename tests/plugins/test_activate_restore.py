@@ -30,15 +30,6 @@ def _entry(mid: str, status: str, setup, *, dependencies=None) -> dict:
             "status": status, "error_message": None}
 
 
-class _RowExists:
-    """Fake session: every plugin_states row already exists (skips the insert)."""
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def query(self, *a): return self
-    def filter(self, *a): return self
-    def first(self): return object()
-
-
 @pytest.fixture()
 def mgr(monkeypatch):
     """A manager whose DB parts are stubbed; ``row_states`` = plugin_states.is_active."""
@@ -48,10 +39,9 @@ def mgr(monkeypatch):
     async def _noop(*a, **k):
         return None
 
-    monkeypatch.setattr(manager_mod.db_instance, "SessionLocal", lambda: _RowExists(), raising=False)
+    monkeypatch.setattr(manager_mod.db_instance, "SessionLocal", object(), raising=False)
     monkeypatch.setattr(m, "_ensure_plugin_state_schema", lambda: None)
-    monkeypatch.setattr(m, "_restore_row_states", lambda: dict(m.row_states), raising=False)
-    monkeypatch.setattr(m, "_retry_state_write", lambda fn, attempts=4: dict(m.row_states))
+    monkeypatch.setattr(m, "_restore_row_states", lambda loaded: dict(m.row_states))
     monkeypatch.setattr(m, "_converge_after_restore", _noop)
     monkeypatch.setattr(m, "_mount_plugin_statics", lambda mid: None)
     monkeypatch.setattr(m, "_unmount_plugin_statics", lambda mid: None)

@@ -214,6 +214,27 @@ class OperationTracker:
         except Exception:
             return False
 
+    def tracks(self, *, repo_name: str, grace_s: int = 60) -> bool:
+        """``has_running`` plus operations for the repo that closed within the
+        last ``grace_s`` seconds — for consumers that look the operation up
+        asynchronously, a moment after the event they are deciding about."""
+        if not self.available() or not repo_name:
+            return False
+        now = _utcnow()
+        try:
+            with self._session() as s:
+                ops = s.query(PluginOperation).filter(
+                    PluginOperation.repo_name == repo_name,
+                    PluginOperation.requested_at >= now - timedelta(seconds=MATCH_WINDOW_S),
+                ).all()
+                return any(
+                    o.status == "running"
+                    or (o.finished_at is not None and o.finished_at >= now - timedelta(seconds=grace_s))
+                    for o in ops
+                )
+        except Exception:
+            return False
+
     def sweep_timeouts(self, max_age_s: int = DEFAULT_TIMEOUT_S) -> int:
         """Close running operations older than ``max_age_s``: participants that
         never reported become ``skipped``. Leader-only by convention."""

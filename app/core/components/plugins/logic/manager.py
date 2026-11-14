@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 import inspect
 import asyncio
+import threading
 from typing import List
 from sqlalchemy import inspect as sqlalchemy_inspect, text
 from packaging.version import Version, InvalidVersion
@@ -40,6 +41,7 @@ class ModuleManager:
     def __init__(self):
         self.registry = {}
         self._plugin_state_schema_ready = False
+        self._schema_lock = threading.Lock()
         # module_id → (failures, monotonic time of the next allowed install attempt)
         self._reconcile_install_backoff: dict = {}
         # (module_id, version) → (failures, monotonic time of the next allowed
@@ -928,64 +930,16 @@ class ModuleManager:
             log.error("PLUGIN_MANAGER: SessionLocal missing during DB activation.")
             return
 
-        self._ensure_plugin_state_schema()
-
-        # Custom plugin repositories live in their own table; create it on the
-        # same db:connected pass so the marketplace can read it immediately.
-        try:
-            from .custom_repo_service import custom_repo_service
-            custom_repo_service.ensure_schema()
-        except Exception as exc:
-            log.warning(f"PLUGIN_MANAGER: custom repo schema bootstrap failed: {exc}")
-
-        # Rows for plugins seen for the first time are inserted one per
-        # transaction up front: two instances booting together may both find a
-        # row missing — the loser's IntegrityError must not abort the whole pass.
-        from sqlalchemy.exc import IntegrityError
-
-        for module_id, entry in list(self.registry.items()):
-            if entry["manifest"].type == "CORE":
-                continue
-            manifest = entry["manifest"]
-            with db_instance.SessionLocal() as session:
-                if session.query(PluginState).filter(PluginState.module_id == module_id).first() is not None:
-                    continue
-                session.add(PluginState(
-                    module_id=module_id,
-                    is_active=manifest.auto_enable_on_install,
-                    installed_version=manifest.version,
-                    desired_version=manifest.version,
-                    repo_url=manifest.repo_url,
-                    auto_update=settings.LYNDRIX_PLUGINS_AUTO_UPDATE,
-                ))
-                try:
-                    session.commit()
-                except IntegrityError:
-                    session.rollback()
-                    log.info(f"DB_RESTORE: plugin_states row for '{module_id}' was created by another instance.")
-
-        # 1. Row sync in one short, retried transaction (no side effects inside):
-        #    record the version this instance loaded, read back the desired state.
-        def _sync_rows() -> dict:
-            states: dict = {}
-            with self._state_session() as session:
-                for module_id, entry in list(self.registry.items()):
-                    if entry["manifest"].type == "CORE":
-                        continue
-                    manifest = entry["manifest"]
-                    db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
-                    if not db_state:  # pragma: no cover - inserted above; defensive
-                        continue
-                    self._sync_row_version(db_state, manifest, entry)
-                    if manifest.repo_url and db_state.repo_url != manifest.repo_url:
-                        db_state.repo_url = manifest.repo_url
-                    if not db_state.desired_version:
-                        db_state.desired_version = manifest.version
-                    states[module_id] = bool(db_state.is_active)
-                session.commit()
-            return states
-
-        row_states = self._retry_state_write(_sync_rows)
+        # 1. All blocking DB work of the pass (bootstrap DDL under the cluster
+        #    lock — up to 55 s behind a booting peer —, row inserts, the retried
+        #    row sync with its back-off sleeps) runs in ONE worker thread. It gets
+        #    a snapshot of the registry, so the thread never reads the live dict.
+        loaded = [
+            (module_id, entry["manifest"], entry.get("reverted_from"))
+            for module_id, entry in list(self.registry.items())
+            if entry["manifest"].type != "CORE"
+        ]
+        row_states = await asyncio.to_thread(self._restore_row_states, loaded)
 
         # 2. Apply the desired state (setup runs here, outside any transaction).
         for module_id, entry in list(self.registry.items()):
@@ -1010,6 +964,66 @@ class ModuleManager:
         self._activate_unblocked()
 
         await self._converge_after_restore()
+
+    def _restore_row_states(self, loaded: list) -> dict:
+        """Bring ``plugin_states`` in line with the plugins loaded here and return
+        ``{module_id: is_active}``. Blocking — runs in a worker thread.
+
+        ``loaded`` is a snapshot ``[(module_id, manifest, reverted_from), …]`` of
+        the non-core registry entries.
+        """
+        self._ensure_plugin_state_schema()
+
+        # Custom plugin repositories live in their own table; create it on the
+        # same db:connected pass so the marketplace can read it immediately.
+        try:
+            from .custom_repo_service import custom_repo_service
+            custom_repo_service.ensure_schema()
+        except Exception as exc:
+            log.warning(f"PLUGIN_MANAGER: custom repo schema bootstrap failed: {exc}")
+
+        # Rows for plugins seen for the first time are inserted one per
+        # transaction up front: two instances booting together may both find a
+        # row missing — the loser's IntegrityError must not abort the whole pass.
+        from sqlalchemy.exc import IntegrityError
+
+        for module_id, manifest, _reverted_from in loaded:
+            with db_instance.SessionLocal() as session:
+                if session.query(PluginState).filter(PluginState.module_id == module_id).first() is not None:
+                    continue
+                session.add(PluginState(
+                    module_id=module_id,
+                    is_active=manifest.auto_enable_on_install,
+                    installed_version=manifest.version,
+                    desired_version=manifest.version,
+                    repo_url=manifest.repo_url,
+                    auto_update=settings.LYNDRIX_PLUGINS_AUTO_UPDATE,
+                ))
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    log.info(f"DB_RESTORE: plugin_states row for '{module_id}' was created by another instance.")
+
+        # Row sync in one short, retried transaction (no side effects inside):
+        # record the version this instance loaded, read back the desired state.
+        def _sync_rows() -> dict:
+            states: dict = {}
+            with self._state_session() as session:
+                for module_id, manifest, reverted_from in loaded:
+                    db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+                    if not db_state:  # pragma: no cover - inserted above; defensive
+                        continue
+                    self._sync_row_version(db_state, manifest, {"reverted_from": reverted_from})
+                    if manifest.repo_url and db_state.repo_url != manifest.repo_url:
+                        db_state.repo_url = manifest.repo_url
+                    if not db_state.desired_version:
+                        db_state.desired_version = manifest.version
+                    states[module_id] = bool(db_state.is_active)
+                session.commit()
+            return states
+
+        return self._retry_state_write(_sync_rows)
 
     def _activate_unblocked(self) -> None:
         """Set up every plugin parked as ``blocked`` whose dependencies became
@@ -1057,31 +1071,60 @@ class ModuleManager:
         ``persist=False`` applies a state another instance already wrote to
         ``plugin_states`` (cluster reconcile) without writing it again or
         re-broadcasting ``plugin:desired_changed``.
+
+        Synchronous and therefore BLOCKING when it persists (DB round trips,
+        retry sleeps, possibly the bootstrap lock): code running on the event
+        loop must use ``await set_module_active(...)`` instead. Kept for sync
+        callers and backwards compatibility.
         """
         if module_id not in self.registry:
             return False
+        if persist and not self._persist_toggle(module_id, active):
+            return False
+        self._apply_toggle(module_id, active)
+        if persist:
+            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
+        return True
 
+    async def set_module_active(self, module_id: str, active: bool, *, persist: bool = True) -> bool:
+        """Async ``toggle_module``: the ``plugin_states`` write runs in a worker
+        thread, the lifecycle part (setup/teardown, routes, bus) on the loop."""
+        if module_id not in self.registry:
+            return False
+        if persist and not await asyncio.to_thread(self._persist_toggle, module_id, active):
+            return False
+        if module_id not in self.registry:
+            return False  # unloaded while the row was being written
+        self._apply_toggle(module_id, active)
+        if persist:
+            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
+        return True
+
+    def _persist_toggle(self, module_id: str, active: bool) -> bool:
+        """Write ``is_active`` to the plugin's row (blocking). False = not saved."""
+        if not db_instance.SessionLocal:
+            return True  # no database (boot, tests): the in-memory state is all there is
         self._ensure_plugin_state_schema()
 
-        # 1. Persist to DB
-        if persist and db_instance.SessionLocal:
-            def _tx():
-                with self._state_session() as session:
-                    db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
-                    if not db_state:
-                        db_state = PluginState(module_id=module_id, is_active=active)
-                        session.add(db_state)
-                    else:
-                        db_state.is_active = active
-                    session.commit()
+        def _tx():
+            with self._state_session() as session:
+                db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+                if not db_state:
+                    db_state = PluginState(module_id=module_id, is_active=active)
+                    session.add(db_state)
+                else:
+                    db_state.is_active = active
+                session.commit()
 
-            try:
-                self._retry_state_write(_tx)
-            except Exception as e:
-                log.error(f"DB_ERROR: Failed to save toggle state: {e}")
-                return False
+        try:
+            self._retry_state_write(_tx)
+            return True
+        except Exception as e:
+            log.error(f"DB_ERROR: Failed to save toggle state: {e}")
+            return False
 
-        # 2. Update RAM status and execute lifecycle hooks
+    def _apply_toggle(self, module_id: str, active: bool) -> None:
+        """Update the in-memory status and run the lifecycle hooks (event loop)."""
         entry = self.registry[module_id]
         was_remote = entry.get("status") == "remote"
 
@@ -1140,11 +1183,6 @@ class ModuleManager:
             self._unmount_plugin_statics(module_id)
 
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
-
-        if persist:
-            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
-
-        return True
 
     # ------------------------------------------------------------------
     # Cluster: converge this instance on plugin_states (docs/ha/building-blocks/plugins.md)
@@ -1344,10 +1382,10 @@ class ModuleManager:
                     continue  # the upgrade path reloads + activates via plugin:files_changed
                 active_here = entry.get("status") in ("active", "initializing", "blocked", "remote")
                 if row["is_active"] and not active_here:
-                    if self.toggle_module(mid, True, persist=False):
+                    if await self.set_module_active(mid, True, persist=False):
                         summary["enabled"].append(mid)
                 elif not row["is_active"] and active_here:
-                    if self.toggle_module(mid, False, persist=False):
+                    if await self.set_module_active(mid, False, persist=False):
                         summary["disabled"].append(mid)
 
             # Uninstalled elsewhere: loaded here, this instance has seen its
@@ -1832,7 +1870,7 @@ class ModuleManager:
             await self._reconcile_desired_plugins_locked(desired)
 
     async def _reconcile_desired_plugins_locked(self, desired: list):
-        self._ensure_plugin_state_schema()
+        await asyncio.to_thread(self._ensure_plugin_state_schema)
 
         from .plugin_service import plugin_service
 
@@ -1925,7 +1963,15 @@ class ModuleManager:
         """Apply additive schema upgrades for plugin_states on existing installs."""
         if self._plugin_state_schema_ready or not db_instance.engine:
             return
+        # Reached from several worker threads at boot (row restore, lead install,
+        # desired-plugin pass): one of them runs the DDL, the others wait.
+        with self._schema_lock:
+            if self._plugin_state_schema_ready:
+                return
+            self._bootstrap_plugin_state_schema()
+            self._plugin_state_schema_ready = True
 
+    def _bootstrap_plugin_state_schema(self) -> None:
         required_columns = {
             "installed_version": "VARCHAR(50) NULL",
             "desired_version": "VARCHAR(50) NULL",
@@ -1964,8 +2010,6 @@ class ModuleManager:
                             if "Duplicate column" not in str(exc) and "already exists" not in str(exc):
                                 raise
             self._drop_legacy_plugin_states()
-
-        self._plugin_state_schema_ready = True
 
 module_manager = ModuleManager()
 module_manager.attach_bus()

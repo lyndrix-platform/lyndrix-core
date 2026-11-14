@@ -151,7 +151,7 @@ async def enable_plugin(
     mgr = _manager()
     if plugin_id not in mgr.registry:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-    ok = mgr.toggle_module(plugin_id, True)
+    ok = await mgr.set_module_active(plugin_id, True)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to enable '{plugin_id}'")
     bus.emit("plugin:state_changed", {"plugin_id": plugin_id, "is_active": True})
@@ -167,7 +167,7 @@ async def disable_plugin(
     mgr = _manager()
     if plugin_id not in mgr.registry:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-    ok = mgr.toggle_module(plugin_id, False)
+    ok = await mgr.set_module_active(plugin_id, False)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to disable '{plugin_id}'")
     bus.emit("plugin:state_changed", {"plugin_id": plugin_id, "is_active": False})
