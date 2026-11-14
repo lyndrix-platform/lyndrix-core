@@ -156,6 +156,21 @@ Web logins mint a `UserApiKey` labelled `web-session · <browser> on <os> · <ti
 Users can review and revoke their **active sessions** individually (or "sign out
 all other sessions") from Settings → Profile, separate from long-lived API keys.
 
+- A login session expires `LYNDRIX_SESSION_MAX_AGE_HOURS` after it was created
+  (default 720 = 30 days, `0` = never): the token then answers `401` and the
+  shell returns to the login page. Named API keys do not expire. The label
+  prefix `web-session` is reserved for sessions.
+- A password change (own, admin reset, environment rotation) ends the account's
+  other login sessions; API keys are kept.
+- Deleting an account removes its API keys, sessions, linked identities and
+  preferences in the same transaction; a key whose owner is gone is rejected and
+  is never inherited by a later account of the same name.
+- An account without a local password (SSO/LDAP-only) cannot set one itself —
+  an administrator can.
+- **Scoped API keys** are bounded by their scopes whoever owns them (also for a
+  superadmin) and cannot create keys, change a password or an email address, or
+  revoke anything but themselves.
+
 ## Hardening recommendations
 
 For any non-local environment, apply these minimum controls:

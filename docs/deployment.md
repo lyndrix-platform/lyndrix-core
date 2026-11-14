@@ -84,6 +84,7 @@ For development, the defaults are intentionally convenient. For any shared or pr
 |---|---|---|
 | `LYNDRIX_SYSTEM_API_KEY` | unset | Master machine-to-machine API key. When unset (and no Vault `system_api_key`), the system-key auth method is disabled. See [Auth → API authentication](core-components/auth.md#api-authentication-and-authorization). |
 | `LYNDRIX_API_BASIC_AUTH` | `true` | Accept HTTP Basic (local accounts) on API routes. Throttled like the login form; set `false` once every client uses an API key or session token. |
+| `LYNDRIX_SESSION_MAX_AGE_HOURS` | `720` | Absolute lifetime of a login session in hours (`0` = never). Named API keys are not affected. |
 | `LYNDRIX_LOGIN_VERIFY_CONCURRENCY` | `4` | Password verifications (Argon2id, 64 MiB each) one process runs at the same time; further ones wait up to 5 s, then get `503` + `Retry-After`. |
 
 ### Plugins and marketplace

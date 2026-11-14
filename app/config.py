@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     # same time. More of them wait a few seconds for a free slot and are then
     # answered 503 + Retry-After — memory stays bounded under a login flood.
     LYNDRIX_LOGIN_VERIFY_CONCURRENCY: int = 4
+    # Absolute lifetime of a login session (the token a web/SSO login returns)
+    # in hours; after that the token answers 401 and the user signs in again.
+    # 0 = never expires. Named API keys a user creates are NOT affected.
+    LYNDRIX_SESSION_MAX_AGE_HOURS: int = 720
 
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636

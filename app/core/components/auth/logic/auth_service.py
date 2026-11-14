@@ -317,6 +317,10 @@ class AuthService:
                     roles=roles,
                     groups=list(groups or []),
                 )
+                # Never inherit keys/preferences of an earlier account of this name.
+                from .api_key_service import api_key_service
+
+                api_key_service.purge_for_username(session, username)
                 session.add(new_user)
                 session.commit()
                 log.info(f"SUCCESS: User '{username}' created.")
@@ -332,6 +336,13 @@ class AuthService:
                 user.hashed_password = hash_password(password)
                 session.commit()
                 log.info(f"UPDATE: Password for '{username}' updated from environment.")
+                # Like every password change: sessions opened with the old one end.
+                try:
+                    from .api_key_service import api_key_service
+
+                    api_key_service.revoke_sessions(username)
+                except Exception as exc:  # never block the boot over it
+                    log.warning(f"UPDATE: Could not revoke sessions of '{username}': {exc}")
             # Backfill default group membership for pre-2.0 seeded accounts so
             # a non-reset dev DB still lands in the group path (never removes
             # anything an admin assigned).

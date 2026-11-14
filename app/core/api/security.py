@@ -276,25 +276,14 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
         return None
 
     if resolved is None:
+        # Unknown, revoked, expired session — or the owner no longer exists.
         return None
-
-    roles: List[str] = []
-    extra: List[str] = []
-    try:
-        from core.components.auth.logic.user_service import user_service
-
-        owner = user_service.get_by_username(resolved.username)
-        if owner is not None:
-            roles = list(getattr(owner, "roles", None) or [])
-            extra = list(getattr(owner, "extra_permissions", None) or [])
-    except Exception:
-        pass
 
     return ApiIdentity(
         method="user_api_key",
         username=resolved.username,
-        roles=roles,
-        extra_permissions=extra,
+        roles=list(resolved.owner_roles),
+        extra_permissions=list(resolved.owner_extra_permissions),
         permissions=_resolve_effective(resolved.username),
         key_scopes=resolved.scopes or None,
         key_id=resolved.id,

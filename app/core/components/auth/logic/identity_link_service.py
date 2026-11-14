@@ -329,6 +329,11 @@ def _match_or_create(session, result: AuthResult, provider: str, stable_id: str)
         groups=default_groups,
         extra_permissions=[],
     )
+    # A new profile never inherits API keys/preferences that an earlier account
+    # of this name left behind (accounts deleted by an older core kept theirs).
+    from .api_key_service import api_key_service
+
+    api_key_service.purge_for_username(session, username)
     session.add(user)
     session.flush()  # assign the UUID before the identity row references it
     user._matched_by = "new"

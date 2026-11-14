@@ -86,6 +86,10 @@ class UserService:
         log.info(f"USER: Password changed for '{username}'.")
         return True, "Passwort erfolgreich geändert."
 
+    # NOTE: callers end the account's other login sessions after a password
+    # change (``api_key_service.revoke_sessions``) — the REST routes do; they
+    # know which session made the change and must survive.
+
     def admin_reset_password(self, username: str, new_password: str) -> Tuple[bool, str]:
         """Reset a user's password without needing the current one (admin function)."""
         if len(new_password) < 8:
