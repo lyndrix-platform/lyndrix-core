@@ -51,6 +51,10 @@ COLLECTION_FALLBACK_URL = os.environ.get(
 # How often to check for new commits on main (seconds).
 COLLECTION_POLL_INTERVAL = int(os.environ.get("PLUGIN_COLLECTION_POLL_INTERVAL", "900"))  # 15 min
 
+class PluginInstallError(RuntimeError):
+    """An install/upgrade step failed and the plugin must not be swapped in."""
+
+
 class PluginService:
     def __init__(self):
         # FIX: Robust path finding
@@ -837,6 +841,9 @@ class PluginService:
             log.warning(f"CONFLICT: Plugin directory '{safe_repo_name}' already exists. Operation aborted")
             return False
 
+        # Set once the old version has been moved aside (filled from the swap thread).
+        swap_started: list[bool] = []
+
         try:
             headers = self._auth_headers_for(github_url, provider)
             # Default to no redirects: the auth header (possibly a PAT) must
@@ -954,6 +961,9 @@ class PluginService:
                     if backup_path.exists():
                         shutil.rmtree(backup_path, ignore_errors=True)
                     plugin_path.rename(backup_path)
+                    # From here on a leftover backup belongs to THIS attempt
+                    # (see _restore_after_failed_install).
+                    swap_started.append(True)
 
                 shutil.move(str(extracted_dir), str(plugin_path))
 
@@ -988,19 +998,46 @@ class PluginService:
         except Exception as e:
             log.error(f"INSTALL_ERROR: Installation failed for {repo}: {str(e)}", exc_info=True)
             
-            # Revert from backup if swap failed midway
+            # Put the plugin directory back into a consistent state (off the
+            # loop: removing a half-copied tree is IO-heavy).
             backup_path = self.plugin_dir / f".backup_{safe_repo_name}"
-            if backup_path.exists() and not plugin_path.exists():
-                backup_path.rename(plugin_path)
-                
-            if plugin_path.exists() and not upgrade:
-                shutil.rmtree(plugin_path, ignore_errors=True)
+            try:
+                await asyncio.to_thread(
+                    self._restore_after_failed_install,
+                    plugin_path, backup_path, upgrade, bool(swap_started),
+                )
+            except OSError:
+                log.error(f"INSTALL_ERROR: could not restore '{safe_repo_name}' after the failure", exc_info=True)
             bus.emit("plugin:install_failed", {"repo": repo, "error": str(e)})
             await self._report_operation_failure(safe_repo_name, str(e))
             return False
         finally:
             if staging_base.exists():
                 shutil.rmtree(staging_base, ignore_errors=True)
+
+    @staticmethod
+    def _restore_after_failed_install(
+        plugin_path: Path, backup_path: Path, upgrade: bool, swap_started: bool
+    ) -> None:
+        """Undo a swap that failed midway (BG-10).
+
+        Once the old version was moved aside (``swap_started``) and the backup
+        is still there, the new one did not make it completely: whatever sits
+        at ``plugin_path`` is a partial copy (``shutil.move`` across filesystems
+        is copy+delete). Remove it and put the backup back — previously the
+        partial directory blocked the restore and the backup stayed orphaned.
+        A stale backup of an earlier crash is never restored over a working
+        directory. A failed fresh install leaves nothing behind, so a retry is
+        not skipped as "already installed".
+        """
+        if swap_started and backup_path.exists():
+            if plugin_path.exists():
+                shutil.rmtree(plugin_path, ignore_errors=True)
+            backup_path.rename(plugin_path)
+        elif backup_path.exists() and not plugin_path.exists():
+            backup_path.rename(plugin_path)
+        elif plugin_path.exists() and not upgrade:
+            shutil.rmtree(plugin_path, ignore_errors=True)
 
     @staticmethod
     async def _report_operation_failure(repo_name: str, message: str) -> None:
@@ -1039,11 +1076,10 @@ class PluginService:
         req_content = await asyncio.to_thread(req_file.read_text, encoding="utf-8", errors="replace")
         problems = check_requirements(req_content)
         if problems:
-            log.error(
-                f"SECURITY: Blocked requirements of {plugin_path.name}: "
-                + "; ".join(problems[:5])
-            )
-            return
+            detail = "; ".join(problems[:5])
+            log.error(f"SECURITY: Blocked requirements of {plugin_path.name}: {detail}")
+            # BG-10: a plugin without its dependencies must not be swapped in.
+            raise PluginInstallError(f"requirements.txt rejected: {detail}")
 
         # TODO(agent): require hash-pinned requirements and isolate dependency
         # installs in a sandboxed runtime (CORE-AUTH-PLUGINS-008). Deferred —
@@ -1092,15 +1128,29 @@ class PluginService:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout
             )
-            if process.returncode != 0:
-                log.error(f"PIP_ERROR: Dependency installation failed: {stderr.decode()[:500]}")
-                shutil.rmtree(vendor_dir, ignore_errors=True)
-            else:
-                log.info("SUCCESS: All dependencies resolved into private vendor directory.")
         except asyncio.TimeoutError:
             log.error(f"TIMEOUT: pip install for {plugin_path.name} exceeded {timeout}s. Killing process.")
-            process.kill()
+            # Kill AND reap: without the wait the child stays a zombie and its
+            # pipes stay open until the core exits.
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass  # exited on its own between the timeout and the kill
+            await process.wait()
             shutil.rmtree(vendor_dir, ignore_errors=True)
+            raise PluginInstallError(
+                f"dependency installation timed out after {timeout}s"
+            ) from None
+
+        if process.returncode != 0:
+            # pip output can echo index URLs; the logger masks credentials in them.
+            pip_error = stderr.decode(errors="replace")[:500]
+            log.error(f"PIP_ERROR: Dependency installation failed: {pip_error}")
+            shutil.rmtree(vendor_dir, ignore_errors=True)
+            raise PluginInstallError(
+                f"dependency installation failed (pip exit code {process.returncode})"
+            )
+        log.info("SUCCESS: All dependencies resolved into private vendor directory.")
 
     async def uninstall_plugin(self, module_id: str, repo_name: str):
         """Löscht den Plugin-Ordner physisch."""
