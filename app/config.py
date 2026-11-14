@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     # Seconds a plugin's teardown() may take on disable/unload/reload before
     # the core stops waiting for it and continues (the plugin lifecycle reads
     # this; a hanging teardown must not block the operation forever).
-    LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: int = 15
+    LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: float = 15
     # Host the global GitLab token (GITLAB_TOKEN / Vault gitlab_token) belongs to.
     # A token is only ever sent to its own host, over https. Empty = the single
     # non-GitHub host in LYNDRIX_PLUGIN_REPO_HOSTS; with several GitLab hosts on

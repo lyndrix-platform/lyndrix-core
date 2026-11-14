@@ -146,7 +146,9 @@ def test_disable_waits_for_the_teardown_too_and_reenable_starts_clean(env):
 
 def test_teardown_is_bounded_by_the_timeout(env, monkeypatch):
     mgr, register, log = env
-    monkeypatch.setenv("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", "0.05")
+    # The setting is declared on Settings (it wins over the bare environment).
+    from config import settings as _settings
+    monkeypatch.setattr(_settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", 0.05, raising=False)
     assert mgr._teardown_timeout() == 0.05
 
     async def run():
@@ -170,9 +172,10 @@ def test_teardown_is_bounded_by_the_timeout(env, monkeypatch):
 
 
 def test_teardown_timeout_default_and_invalid_values(monkeypatch):
-    monkeypatch.delenv("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", raising=False)
+    from config import settings as _settings
+    monkeypatch.setattr(_settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", 15, raising=False)
     assert ModuleManager._teardown_timeout() == 15.0
-    monkeypatch.setenv("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", "not-a-number")
+    monkeypatch.setattr(_settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", "not-a-number", raising=False)
     assert ModuleManager._teardown_timeout() == 15.0
 
 
