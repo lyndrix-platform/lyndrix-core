@@ -137,7 +137,7 @@ def _theme_zip(tokens=None, extra=None) -> bytes:
 def upload(tmp_path, monkeypatch):
     engine = ThemeEngine(user_dir=tmp_path)
     monkeypatch.setattr(themes_api, "_engine", lambda: engine)
-    monkeypatch.setattr(themes_api.Path, "home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr("core.theming.get_theme_engine", lambda: engine)
 
     def _do(data: bytes):
         return asyncio.run(themes_api.upload_theme(file=_Upload("big.zip", data), identity=_Identity()))

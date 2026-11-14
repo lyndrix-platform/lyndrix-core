@@ -1,7 +1,6 @@
-import io
+import asyncio
 import json
 import shutil
-import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -35,15 +34,10 @@ def _theme_dir(theme_id: str) -> Path:
         raise HTTPException(status_code=404, detail="Not found")
 
 # Allowed image extensions for theme background assets (lowercase) → media type.
-_IMAGE_MEDIA_TYPES = {
-    ".webp": "image/webp",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-}
-
-# Per-image size cap for ZIP-uploaded assets (~8 MB).
-_MAX_ASSET_BYTES = 8 * 1024 * 1024
+# Shared with the upload path so what can be uploaded is what can be served.
+from core.components.settings.logic.themes_service import (  # noqa: E402
+    THEME_IMAGE_MEDIA_TYPES as _IMAGE_MEDIA_TYPES,
+)
 
 
 def _is_safe_component(name: str) -> bool:
@@ -152,16 +146,6 @@ async def get_theme_detail(
     return {"status": "ok", "theme_id": theme_id, "tokens": tokens, "components": components}
 
 
-def _validate_uploaded_pack(theme_id: str, tokens_raw: bytes, components_raw: bytes) -> None:
-    """Reject (422) a theme whose JSON is malformed or carries unsafe values."""
-    from core.components.settings.logic import themes_service
-
-    try:
-        themes_service.check_uploaded_pack(theme_id, tokens_raw, components_raw)
-    except themes_service.ThemeRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-
 @themes_router.post("", summary="Upload a theme ZIP", status_code=201)
 async def upload_theme(
     file: UploadFile = File(...),
@@ -169,12 +153,6 @@ async def upload_theme(
 ):
     if not file.filename:
         raise HTTPException(status_code=422, detail="No file provided")
-
-    theme_id = Path(file.filename).stem
-    if not _is_safe_component(theme_id) or not _THEME_ID_RE.match(theme_id):
-        raise HTTPException(status_code=422, detail="Invalid theme ID derived from filename")
-    if theme_id == "default":
-        raise HTTPException(status_code=400, detail="Cannot overwrite the default theme")
 
     from core.components.settings.logic import themes_service
 
@@ -187,67 +165,15 @@ async def upload_theme(
             status_code=413, detail=f"Theme ZIP is larger than {limit // (1024 * 1024)} MB"
         )
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            try:
-                themes_service.check_zip_limits(zf, len(data))
-            except themes_service.ThemeRejected as exc:
-                raise HTTPException(status_code=413, detail=str(exc))
-            names = zf.namelist()
-            if "tokens.json" not in names or "components.json" not in names:
-                raise HTTPException(
-                    status_code=422,
-                    detail="ZIP must contain tokens.json and components.json at root level",
-                )
-            # Validate BEFORE anything is written: a rejected upload must not
-            # replace (or half-replace) an existing theme of the same id, and an
-            # unsafe pack must never sit on the shared storage (SC-02).
-            _validate_uploaded_pack(theme_id, zf.read("tokens.json"), zf.read("components.json"))
+        # Validation + extraction are blocking file IO — off the event loop.
+        theme_id, warnings = await asyncio.to_thread(
+            themes_service.install_theme_zip, file.filename, data
+        )
+    except themes_service.ThemeRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
-            # Uploads go to the shared storage (every cluster instance sees them,
-            # an image update keeps them); built-ins stay read-only in the image.
-            user_dir = _engine().user_dir
-            dest = user_dir / theme_id
-            dest.mkdir(parents=True, exist_ok=True)
-            zf.extract("tokens.json", dest)
-            zf.extract("components.json", dest)
-
-            # Also extract any image assets at `assets/<name>.{png,jpg,jpeg,webp}`
-            # into dest/assets/<name>. Traversal-guarded + per-file size capped.
-            assets_dir = dest / "assets"
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                entry = info.filename
-                # Reject absolute paths and any traversal attempt outright.
-                if entry.startswith("/") or ".." in entry.replace("\\", "/").split("/"):
-                    continue
-                parts = entry.replace("\\", "/").split("/")
-                # Only a single `assets/` prefix + safe basename is allowed.
-                if len(parts) != 2 or parts[0] != "assets":
-                    continue
-                basename = parts[1]
-                if not _is_safe_component(basename):
-                    continue
-                if Path(basename).suffix.lower() not in _IMAGE_MEDIA_TYPES:
-                    continue
-                if info.file_size > _MAX_ASSET_BYTES:
-                    continue
-                assets_dir.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, (assets_dir / basename).open("wb") as out:
-                    shutil.copyfileobj(src, out, length=1024 * 64)
-    except zipfile.BadZipFile:
-        raise HTTPException(status_code=422, detail="Invalid ZIP file")
-
-    try:
-        from core.theming.schema import validate_theme_pack
-        from core.theming.loader import load_theme_pack
-        pack = load_theme_pack(user_dir, theme_id)
-        errors = validate_theme_pack(pack)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Theme validation failed: {exc}")
-
-    log.info(f"API: Theme '{theme_id}' uploaded by '{identity.username}' (warnings={len(errors)}).")
-    return {"status": "ok", "theme_id": theme_id, "validation_warnings": errors}
+    log.info(f"API: Theme '{theme_id}' uploaded by '{identity.username}' (warnings={len(warnings)}).")
+    return {"status": "ok", "theme_id": theme_id, "validation_warnings": warnings}
 
 
 @themes_router.delete("/{theme_id}", summary="Delete a theme")

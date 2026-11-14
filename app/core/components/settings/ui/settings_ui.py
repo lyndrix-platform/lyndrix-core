@@ -1,10 +1,8 @@
 import asyncio
-import io
 import os
 import platform
 import re
 import sys
-import zipfile
 from pathlib import Path
 
 import psutil
@@ -14,7 +12,6 @@ from config import settings
 from core.i18n import t
 from core.logger import get_logger
 from core.theming import get_theme_engine
-from core.theming.engine import THEMES_BASE_DIR
 from ui.theme import UIStyles
 from ui.secret_fields import entered_secret, is_configured, secret_hint
 from version import __version__, __codename__, __release_date__, get_uptime
@@ -242,66 +239,34 @@ def _render_theme_management_card() -> None:
                 ).classes(UIStyles.TEXT_HINT)
 
                 def _handle_upload(e):
+                    # Same path as POST /api/themes: id check (never "default"),
+                    # size limits, strict validation, and the pack goes to the
+                    # shared storage — not into the read-only built-in themes
+                    # of the image, where an upload was lost on the next image
+                    # update and invisible to the other cluster instances.
+                    from core.components.settings.logic import themes_service
                     try:
-                        from core.components.settings.logic import themes_service
-                        limit = themes_service.max_theme_zip_bytes()
-                        data = e.content.read(limit + 1)
-                        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                            # Same size limits as the REST upload (SC-13).
-                            try:
-                                themes_service.check_zip_limits(zf, len(data))
-                            except themes_service.ThemeRejected as rejected:
-                                ui.notify(str(rejected), type='negative')
-                                return
-                            names = zf.namelist()
-                            if 'tokens.json' not in names or 'components.json' not in names:
-                                ui.notify(
-                                    'ZIP must contain tokens.json and components.json at root level.',
-                                    type='negative',
-                                )
-                                return
-                            theme_id = Path(e.name).stem
-                            if not re.fullmatch(r'[A-Za-z0-9_-]+', theme_id or ''):
-                                ui.notify('Invalid theme ID derived from filename.', type='negative')
-                                return
-                            # Same gate as the REST upload: unsafe values are
-                            # refused before anything is written (SC-02).
-                            try:
-                                themes_service.check_uploaded_pack(
-                                    theme_id, zf.read('tokens.json'), zf.read('components.json'))
-                            except themes_service.ThemeRejected as rejected:
-                                ui.notify(str(rejected), type='negative')
-                                return
-                            dest = THEMES_BASE_DIR / theme_id
-                            dest.mkdir(parents=True, exist_ok=True)
-                            zf.extract('tokens.json', dest)
-                            zf.extract('components.json', dest)
-
-                        from core.theming.schema import validate_theme_pack
-                        from core.theming.loader import load_theme_pack
-                        try:
-                            pack = load_theme_pack(THEMES_BASE_DIR, theme_id)
-                            errors = validate_theme_pack(pack)
-                        except Exception as ve:
-                            ui.notify(f'Theme validation failed: {ve}', type='negative')
-                            return
-
-                        if errors:
-                            ui.notify(
-                                f'Theme "{theme_id}" uploaded with {len(errors)} missing key(s) '
-                                f'(backfilled with defaults). Reload to see it in the list.',
-                                type='warning',
-                            )
-                        else:
-                            ui.notify(
-                                f'Theme "{theme_id}" uploaded and validated. '
-                                f'Reload the page to select it.',
-                                type='positive',
-                            )
-                    except zipfile.BadZipFile:
-                        ui.notify('Invalid ZIP file.', type='negative')
+                        data = e.content.read(themes_service.max_theme_zip_bytes() + 1)
+                        theme_id, warnings = themes_service.install_theme_zip(e.name, data)
+                    except themes_service.ThemeRejected as rejected:
+                        ui.notify(str(rejected), type='negative')
+                        return
                     except Exception as ex:
                         ui.notify(f'Upload failed: {ex}', type='negative')
+                        return
+
+                    if warnings:
+                        ui.notify(
+                            f'Theme "{theme_id}" uploaded with {len(warnings)} warning(s) '
+                            f'(missing keys are backfilled with defaults). Reload to see it in the list.',
+                            type='warning',
+                        )
+                    else:
+                        ui.notify(
+                            f'Theme "{theme_id}" uploaded and validated. '
+                            f'Reload the page to select it.',
+                            type='positive',
+                        )
 
                 ui.upload(
                     label='Drop theme ZIP here',
@@ -326,9 +291,14 @@ def _render_theme_management_card() -> None:
                         if not tid or tid == 'default':
                             return
                         import shutil
-                        target = THEMES_BASE_DIR / tid
-                        if target.exists():
-                            shutil.rmtree(target)
+                        # Same rule as DELETE /api/themes/{id}: only uploaded
+                        # themes (shared storage) can be deleted, never the
+                        # built-in ones inside the image.
+                        target = engine.user_dir / tid
+                        if not re.fullmatch(r'[A-Za-z0-9_-]+', tid) or not target.exists():
+                            ui.notify(f'Theme "{tid}" is built in and cannot be deleted.', type='warning')
+                            return
+                        shutil.rmtree(target)
                         if settings.DEFAULT_THEME_ID == tid:
                             settings.DEFAULT_THEME_ID = 'default'
                         ui.notify(f'Theme "{tid}" deleted. Reload to apply.', type='positive')

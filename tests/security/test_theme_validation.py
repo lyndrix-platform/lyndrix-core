@@ -192,6 +192,7 @@ def _zip(tokens, components=None) -> bytes:
 def upload(tmp_path, monkeypatch):
     engine = ThemeEngine(user_dir=tmp_path)
     monkeypatch.setattr(themes_api, "_engine", lambda: engine)
+    monkeypatch.setattr("core.theming.get_theme_engine", lambda: engine)
 
     def _do(tokens, name="mytheme.zip"):
         return asyncio.run(themes_api.upload_theme(file=_Upload(name, _zip(tokens)), identity=_Identity()))
@@ -240,3 +241,35 @@ def test_builtin_theme_can_be_uploaded_as_is(upload, theme_id):
     result = upload(tokens, name="copy_of_theme.zip")
     assert result["status"] == "ok" and result["theme_id"] == "copy_of_theme"
     assert (upload.user_dir / "copy_of_theme" / "tokens.json").exists()
+
+
+# --- one upload path for REST and NiceGUI ------------------------------------
+
+def test_shared_upload_path_writes_to_shared_storage_and_refuses_default(tmp_path, monkeypatch):
+    from core.components.settings.logic import themes_service
+
+    engine = ThemeEngine(user_dir=tmp_path / "storage-themes")
+    monkeypatch.setattr("core.theming.get_theme_engine", lambda: engine)
+    builtin_before = sorted(p.name for p in THEMES_BASE_DIR.iterdir())
+    good = _zip({"colors": {"bg_body": {"light": "#ffffff", "dark": "#000000"}}})
+
+    theme_id, _warnings = themes_service.install_theme_zip("nice.zip", good)
+
+    assert theme_id == "nice"
+    assert (tmp_path / "storage-themes" / "nice" / "tokens.json").exists()
+    assert sorted(p.name for p in THEMES_BASE_DIR.iterdir()) == builtin_before  # image dir untouched
+
+    for filename in ("default.zip", "..zip", "a b.zip", "x/../default.zip", ".zip", "evil;.zip"):
+        with pytest.raises(themes_service.ThemeRejected):
+            themes_service.install_theme_zip(filename, good)
+    with pytest.raises(themes_service.ThemeRejected) as exc:
+        themes_service.install_theme_zip("default.zip", good)
+    assert exc.value.status_code == 400
+    with pytest.raises(themes_service.ThemeRejected, match="Invalid ZIP"):
+        themes_service.install_theme_zip("broken.zip", b"not a zip")
+
+
+def test_nicegui_settings_page_uses_the_shared_upload_path():
+    source = (pathlib.Path(themes_api.__file__).parents[1] / "ui" / "settings_ui.py").read_text(encoding="utf-8")
+    assert "themes_service.install_theme_zip(" in source
+    assert "THEMES_BASE_DIR" not in source  # never writes into the built-in themes of the image
