@@ -14,6 +14,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
 | `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
 | `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → at once: `/api/ready` 503, `draining` published to the peers, leases handed over (`lost` callbacks first) → wait → close SSE → tombstone → exit |
+| `LYNDRIX_STORAGE_SHARED_ROLES` | `api` | 1 | roles whose instances must see one shared `STORAGE_DIR` (comma list; they serve user files). The preflight `storage` check compares only those; empty = nobody has to share |
 | `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` | `600` | 1 | cluster mode: after boot `/api/ready` stays 503 (`plugins:converging`) until the plugins recorded in `plugin_states` are installed and activated on this instance — at most this long, then it turns ready anyway (preflight `plugins: warn`). `0` = do not wait |
 | `LYNDRIX_RESTART_GRACE_SECONDS` | `90` | 1 | how long an instance that stopped gracefully counts as `restarting` (not `dead`) for its peers: `ctx.has_live_role()` stays true, pinned plugins answer `Retry-After: 5`. Should cover a container restart |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
@@ -58,7 +59,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `clock` | — | this instance's clock is more than 5 s off the database clock |
 | `vault_nodes` | — | a node in `VAULT_NODES` does not answer `/v1/sys/health` |
 | `drain` | — | cluster mode with `LYNDRIX_DRAIN_SECONDS=0` |
-| `storage` | — | cluster mode: `STORAGE_DIR` is not one shared mount (peer marker files missing/stale), only one instance is alive so it cannot be verified, or the mount does not respond (a storage job is stuck) |
+| `storage` | — | cluster mode: an instance that serves user files (`LYNDRIX_STORAGE_SHARED_ROLES`) does not share `STORAGE_DIR` with this one (its marker is not readable here — named in the message), no second such instance is alive so it cannot be verified, or the mount does not respond (a storage job is stuck) |
 
 ## Readiness
 

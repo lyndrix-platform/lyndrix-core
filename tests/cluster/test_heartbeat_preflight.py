@@ -11,7 +11,7 @@
 import asyncio
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -41,7 +41,8 @@ def _now():
 
 
 def _inst(iid, me=False, fp=None):
-    return InstanceInfo(iid, "h", ["api", "leader"], "1.11.1", "1.13.0", _now(), _now(), 0.5, True, me,
+    started = _now() - timedelta(minutes=10)
+    return InstanceInfo(iid, "h", ["api", "leader"], "1.11.1", "1.13.0", started, _now(), 0.5, True, me,
                         {"secret_fp": fp or cluster_service.secret_fingerprint})
 
 
@@ -121,7 +122,7 @@ def svc(monkeypatch):
     monkeypatch.setattr(cluster_service, "_clock", time.monotonic)
     monkeypatch.setattr(cluster_service, "storage", StorageProbe(clock=lambda: cluster_service._clock()))
     monkeypatch.setattr(cluster_service, "_write_storage_marker", lambda: None)
-    monkeypatch.setattr(cluster_service, "storage_markers", lambda: {"pod-2": 1.0})
+    monkeypatch.setattr(cluster_service, "_read_peer_markers", lambda ids: {i: "legacy" for i in ids})
     monkeypatch.setattr(preflight, "_pinned_roles", lambda: {})
     yield cluster_service
 
@@ -384,10 +385,10 @@ def test_hanging_checks_time_out_as_warnings(svc, monkeypatch):
 
 
 def test_stuck_storage_probe_is_a_warning_not_a_readiness_failure(svc, monkeypatch):
-    async def busy(timeout=0):
+    async def busy(instance_ids, timeout=0):
         raise StorageBusy(95.0, "marker")
 
-    monkeypatch.setattr(svc, "read_storage_markers", busy)
+    monkeypatch.setattr(svc, "read_peer_markers", busy)
 
     async def run():
         await svc._heartbeat_once()

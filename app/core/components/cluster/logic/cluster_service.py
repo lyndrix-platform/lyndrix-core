@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import secrets
 import socket
@@ -71,6 +72,8 @@ _IO_TIMEOUT_S = 8.0
 # health is NOT in here: readiness reads it live (``started`` + heartbeat age),
 # a cached check result would pin /api/ready at 503 long after a blip is over.
 _READINESS_CHECKS = frozenset({"storage_secret"})
+_MARKER_CLEANUP_INTERVAL_S = 3600
+_MARKER_MAX_AGE_S = 24 * 3600
 
 
 def _utcnow() -> datetime:
@@ -176,6 +179,7 @@ class ClusterService:
         self.storage = StorageProbe(clock=lambda: self._clock())
         self.storage_last_error: Optional[str] = None
         self.storage_last_ok_at: Optional[datetime] = None
+        self._markers_cleaned_at = 0.0
 
         if subscribe:
             bus.subscribe("db:connected")(self.on_db_connected)
@@ -401,16 +405,71 @@ class ClusterService:
     STORAGE_MARKER_DIR = ".cluster"
 
     def _write_storage_marker(self) -> None:
+        """Write this instance's marker: a small JSON file naming the process
+        (incarnation) that wrote it. A peer that reads the same incarnation the
+        registry row carries has proof that both look at one directory — no
+        directory listing and no file times involved (both lie on NFS: listing
+        and attribute caches, server clock vs. reader clock)."""
         try:
             marker_dir = os.path.join(settings.STORAGE_DIR, self.STORAGE_MARKER_DIR)
             os.makedirs(marker_dir, exist_ok=True)
             path = os.path.join(marker_dir, self.instance_id)
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(_utcnow().isoformat())
+                json.dump({"instance_id": self.instance_id, "incarnation": self.incarnation,
+                           "written_at": _utcnow().isoformat()}, fh)
             self.storage_last_ok_at, self.storage_last_error = _utcnow(), None
+            if self.is_leader and time.monotonic() - self._markers_cleaned_at > _MARKER_CLEANUP_INTERVAL_S:
+                self._markers_cleaned_at = time.monotonic()
+                self._remove_stale_markers(marker_dir)
         except Exception as exc:  # read-only or missing storage → the preflight reports it
             self.storage_last_error = str(exc)[:200]
             log.debug("CLUSTER: storage marker not written: %s", exc)
+
+    def _remove_stale_markers(self, marker_dir: str) -> int:
+        """Leader housekeeping (runs on the storage thread): every live
+        instance rewrites its marker each heartbeat, so a marker untouched for
+        a day belongs to an instance that is long gone (one file per pod name
+        would otherwise pile up forever)."""
+        known = {i.instance_id for i in self._instances} | {self.instance_id}
+        removed = 0
+        cutoff = time.time() - _MARKER_MAX_AGE_S
+        for name in os.listdir(marker_dir):
+            path = os.path.join(marker_dir, name)
+            try:
+                if name not in known and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue
+        if removed:
+            log.info("CLUSTER: removed %s storage marker(s) of instances gone for more than a day", removed)
+        return removed
+
+    def _read_peer_markers(self, instance_ids: list[str]) -> dict[str, Optional[str]]:
+        """instance id → what its marker in OUR directory says: the incarnation
+        that wrote it, ``"legacy"`` for a marker of core ≤ 1.11 (a timestamp,
+        no JSON) or ``None`` when no readable marker exists. Opened by name:
+        open() revalidates on NFS, a directory listing may be minutes old."""
+        out: dict[str, Optional[str]] = {}
+        marker_dir = os.path.join(settings.STORAGE_DIR, self.STORAGE_MARKER_DIR)
+        for iid in instance_ids:
+            try:
+                with open(os.path.join(marker_dir, iid), encoding="utf-8") as fh:
+                    raw = fh.read(4096)
+            except OSError:
+                out[iid] = None
+                continue
+            try:
+                out[iid] = str(json.loads(raw).get("incarnation") or "legacy")
+            except Exception:
+                out[iid] = "legacy"
+        return out
+
+    async def read_peer_markers(self, instance_ids: list[str], timeout: float = _IO_TIMEOUT_S) -> dict:
+        """:meth:`_read_peer_markers` through the storage probe (bounded, one
+        storage job at a time). Raises :class:`StorageBusy` / ``asyncio.TimeoutError``."""
+        return await self.storage.call(self._read_peer_markers, list(instance_ids),
+                                       label="read markers", timeout=timeout)
 
     def _drop_storage_marker(self) -> None:
         """Refresh this instance's marker without ever waiting for the mount.
@@ -426,12 +485,6 @@ class ClusterService:
                     "marker writes are skipped until it does",
                     self.storage.stuck_label, stuck, settings.STORAGE_DIR,
                 )
-
-    async def read_storage_markers(self, timeout: float = _IO_TIMEOUT_S) -> dict[str, float]:
-        """:meth:`storage_markers` through the storage probe: bounded, and never
-        a second thread on a mount that already holds one hostage. Raises
-        :class:`StorageBusy` / ``asyncio.TimeoutError``."""
-        return await self.storage.call(self.storage_markers, label="read markers", timeout=timeout)
 
     def storage_status(self) -> dict:
         """Storage probe telemetry for ``GET /api/cluster`` and the heartbeat meta."""

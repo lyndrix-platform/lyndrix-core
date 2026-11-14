@@ -138,15 +138,6 @@ def _secret_reference(alive: list, own_fp: Optional[str]) -> tuple[Optional[str]
     return reference, odd, len(groups[reference])
 
 
-async def _read_markers(service: "ClusterService") -> dict:
-    """Marker listing through the service's storage probe (one storage job at a
-    time, bounded); plain thread for services without a probe (test fakes)."""
-    reader = getattr(service, "read_storage_markers", None)
-    if callable(reader):
-        return await reader(timeout=CHECK_TIMEOUT_S)
-    return await _bounded(asyncio.to_thread(service.storage_markers))
-
-
 async def run_checks(service: "ClusterService") -> list[Check]:
     checks: list[Check] = []
     cluster = service.is_cluster
@@ -356,38 +347,102 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     else:
         add("drain", "ok", f"drain on SIGTERM: {service.drain_seconds}s" if service.drain_seconds else "no drain (single instance)")
 
-    # 13. shared storage: every instance drops a marker file in STORAGE_DIR/.cluster on
-    #     each heartbeat. Seeing the other live instances' fresh markers proves the
-    #     directory is one shared mount (NFS/CIFS/RWX volume); otherwise files written
-    #     here are invisible elsewhere.
+    # 13. shared storage: every instance writes a marker file STORAGE_DIR/.cluster/<id>
+    #     naming its incarnation on each heartbeat. Reading a peer's marker here with
+    #     the incarnation its registry row carries proves that both look at ONE
+    #     directory (NFS/CIFS/RWX volume); otherwise files written here are invisible
+    #     there. Only instances that serve user files have to share.
     if not cluster:
         add("storage", "skip", "single-instance mode — local storage")
     else:
-        others = [i for i in alive if not i.is_self]
-        markers = {}
-        try:
-            markers = await _read_markers(service)
-        except StorageBusy as exc:
-            # The mount is holding an earlier job hostage: do not send a second
-            # thread after it, and do not guess — report what is known.
-            add("storage", "warn",
-                f"{settings.STORAGE_DIR} is not responding — a storage job ({exc.label or 'io'}) has been stuck "
-                f"for {exc.stuck_for_s:.0f}s",
-                "The mount (NFS/CIFS/RWX volume) hangs. Requests that read or write files block until it is "
-                "back; everything else keeps working, so the instance stays in rotation.", recheck=True)
-        except Exception as exc:
-            add("storage", "warn", f"could not inspect {settings.STORAGE_DIR}: {_why(exc)}", recheck=True)
-        else:
-            fresh_s = max(3 * service.heartbeat_s, 60)
-            if not others:
-                add("storage", "warn", f"cannot verify that {settings.STORAGE_DIR} is shared — only this instance is alive",
-                    "Uploads and attachments are only safe in a cluster when every instance mounts the same directory (NFS/CIFS/RWX volume); the check turns ok once a second instance reports.")
-            else:
-                missing = [i.instance_id for i in others if markers.get(i.instance_id, float("inf")) > fresh_s]
-                if missing:
-                    add("storage", "warn", f"{settings.STORAGE_DIR} is NOT shared — markers of {', '.join(missing)} are not visible here",
-                        "Attachments/uploads written on one instance are invisible on the others. Mount one directory (NFS/CIFS/RWX volume) on every instance; an object-store driver (S3/MinIO) is on the roadmap.")
-                else:
-                    add("storage", "ok", f"{settings.STORAGE_DIR} is a shared mount — markers of {len(others)} peer(s) visible")
+        await _check_storage(service, alive, add)
 
     return checks
+
+
+def _sharing_roles() -> set[str]:
+    return {r.strip() for r in (getattr(settings, "LYNDRIX_STORAGE_SHARED_ROLES", "api") or "").split(",") if r.strip()}
+
+
+def _uptime_s(inst) -> float:
+    """Seconds since the instance registered, on the database clock."""
+    if isinstance(inst.started_at, datetime) and isinstance(inst.heartbeat_at, datetime):
+        return max(0.0, (inst.heartbeat_at - inst.started_at).total_seconds() + inst.age_s)
+    return float("inf")  # unknown start → not "young"
+
+
+def _label(instances: list) -> str:
+    return ", ".join(f"{i.instance_id} ({','.join(i.roles) or '-'})" for i in sorted(instances, key=lambda i: i.instance_id))
+
+
+async def _visible_markers(service: "ClusterService", peers: list) -> set[str]:
+    """Ids of ``peers`` whose marker is visible in this instance's STORAGE_DIR."""
+    reader = getattr(service, "read_peer_markers", None)
+    if callable(reader):
+        found = await reader([p.instance_id for p in peers], timeout=CHECK_TIMEOUT_S)
+        # "legacy": marker of a core ≤ 1.11 peer — present under its name, no
+        # incarnation to compare. A marker of ANOTHER incarnation is a leftover.
+        return {p.instance_id for p in peers
+                if found.get(p.instance_id) in ("legacy", p.incarnation) and found.get(p.instance_id) is not None}
+    # Services without a marker reader (test fakes): the former age heuristic.
+    ages = await _bounded(asyncio.to_thread(service.storage_markers))
+    fresh_s = max(3 * service.heartbeat_s, 60)
+    return {p.instance_id for p in peers if ages.get(p.instance_id, float("inf")) <= fresh_s}
+
+
+async def _check_storage(service: "ClusterService", alive: list, add) -> None:
+    directory = settings.STORAGE_DIR
+    sharing = _sharing_roles()
+    own_roles = set(service.roles)
+    others = [i for i in alive if not i.is_self]
+    # A peer that registered a moment ago may not have written its marker yet.
+    young = [i for i in others if _uptime_s(i) < 2 * service.heartbeat_s]
+    settled = [i for i in others if i not in young]
+    try:
+        visible = await _visible_markers(service, settled) if settled else set()
+    except StorageBusy as exc:
+        # The mount is holding an earlier job hostage: do not send a second
+        # thread after it, and do not guess — report what is known.
+        add("storage", "warn",
+            f"{directory} is not responding — a storage job ({exc.label or 'io'}) has been stuck "
+            f"for {exc.stuck_for_s:.0f}s",
+            "The mount (NFS/CIFS/RWX volume) hangs. Requests that read or write files block until it is "
+            "back; everything else keeps working, so the instance stays in rotation.", recheck=True)
+        return
+    except Exception as exc:
+        add("storage", "warn", f"could not inspect {directory}: {_why(exc)}", recheck=True)
+        return
+
+    must_share = [i for i in settled if sharing & set(i.roles)]
+    not_shared = [i for i in settled if i.instance_id not in visible]
+    if not (sharing & own_roles):
+        # This instance serves no user files (e.g. a runner on its own host).
+        seen = [i for i in settled if i.instance_id in visible]
+        add("storage", "ok",
+            f"this instance (roles {','.join(sorted(own_roles)) or '-'}) does not have to share {directory}"
+            + (f" — it shares it with {_label(seen)}" if seen else " — it has a directory of its own"))
+        return
+    missing = [i for i in must_share if i.instance_id not in visible]
+    if missing:
+        add("storage", "warn",
+            f"{directory} is NOT shared with {_label(missing)} — the instance(s) mount a different directory",
+            "Files written through one of these instances (uploads, attachments, uploaded themes) do not exist "
+            "on the other: a user routed to both sees them come and go. Mount the same NFS/CIFS/RWX volume at "
+            f"{directory} on every instance that serves users, or keep the odd instance out of the user-facing "
+            "load balancer (roles are set with LYNDRIX_INSTANCE_ROLES; LYNDRIX_STORAGE_SHARED_ROLES names the "
+            "roles that must share).", recheck=True)
+        return
+    apart = [i for i in not_shared if i not in must_share]
+    note = (f"; not shared with {_label(apart)} — fine, they do not serve user files" if apart else "")
+    if must_share:
+        add("storage", "ok",
+            f"{directory} is a shared mount — markers of {len(must_share)} peer(s) visible{note}")
+    elif young:
+        add("storage", "warn", f"cannot verify yet that {directory} is shared — {_label(young)} just started",
+            "Checked again in a moment.", recheck=True)
+    else:
+        add("storage", "warn",
+            f"cannot verify that {directory} is shared — only this instance is alive with a role that "
+            f"serves files ({','.join(sorted(sharing)) or 'none'}){note}",
+            "Uploads and attachments are only safe in a cluster when every instance that serves users mounts the "
+            "same directory (NFS/CIFS/RWX volume); the check turns ok once a second such instance reports.")

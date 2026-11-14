@@ -232,6 +232,11 @@ class Settings(BaseSettings):
     # Retry-After meanwhile. Should cover a container restart (image pull
     # excluded); rows are pruned after grace + TTL at the earliest.
     LYNDRIX_RESTART_GRACE_SECONDS: int = 90
+    # Roles whose instances must see ONE shared STORAGE_DIR (comma list): they
+    # serve user files (uploads, attachments, themes). The preflight "storage"
+    # check compares only these instances; a runner-only instance on another
+    # host is reported for information, not as a problem. Empty = nobody.
+    LYNDRIX_STORAGE_SHARED_ROLES: str = "api"
     # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
     # the plugins recorded in plugin_states are installed and activated on this
     # instance — a fresh pod with an empty plugin directory would otherwise take
