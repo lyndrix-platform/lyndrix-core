@@ -56,13 +56,22 @@ class ModuleManager:
         self._locks: dict = {}
         current_file_path = os.path.abspath(__file__)
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
-        # Subscribe to filesystem change events from the PluginService
+        self._reconcile_task = None
+
+    def attach_bus(self) -> None:
+        """Subscribe this manager to the lifecycle events it reacts to.
+
+        Called once, for the process-wide ``module_manager``. Not part of
+        ``__init__``: the bus delivers to every distinct subscriber, so a second
+        manager instance (tests build their own) must not start handling the
+        process's install and reconcile events as well.
+        """
+        # Filesystem change events from the PluginService
         bus.subscribe("plugin:files_changed")(self._handle_plugin_change)
         # Cluster: a peer installed/enabled/disabled a plugin → converge on the
         # DB state (plugin_states is the source of truth for every instance).
         bus.subscribe("plugin:desired_changed")(self._on_desired_changed)
         bus.subscribe("system:boot_complete")(self._start_cluster_reconciler)
-        self._reconcile_task = None
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         """Return (creating on first use) the reload lock for a module/folder key."""
@@ -751,8 +760,7 @@ class ModuleManager:
                     log.error(f"RUNTIME_ERROR: Sync setup failed for '{module_id}': {e}")
                     entry["status"] = "failed"
                     entry["error_message"] = str(e)
-                    if hasattr(ctx, "reset_runtime"):
-                        ctx.reset_runtime()
+                    self._discard_partial_setup(module_id, ctx)
                     try:
                         bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
                     except Exception as emit_err:
@@ -834,6 +842,24 @@ class ModuleManager:
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
 
+    @staticmethod
+    def _discard_partial_setup(module_id: str, ctx) -> None:
+        """Undo what a failed ``setup()`` registered before it raised.
+
+        A failed module must not keep half of its handlers, tasks and leases
+        alive, and the next activation pass runs ``setup()`` again: without
+        this every retry would subscribe the handlers once more (closures are
+        new objects each run, and the bus delivers to each of them).
+        ``dispose()`` also resets a blocking runtime status.
+        """
+        try:
+            if hasattr(ctx, "dispose"):
+                ctx.dispose()
+            elif hasattr(ctx, "reset_runtime"):
+                ctx.reset_runtime()
+        except Exception as exc:
+            log.warning(f"SETUP: cleanup after the failed setup of '{module_id}' raised: {exc}")
+
     def _owns_setup(self, module_id: str, ctx) -> bool:
         """Does the running task still own the setup of ``module_id``?
 
@@ -863,8 +889,7 @@ class ModuleManager:
                 return
             self.registry[module_id]["status"] = "failed"
             self.registry[module_id]["error_message"] = str(e)
-            if hasattr(ctx, "reset_runtime"):
-                ctx.reset_runtime()
+            self._discard_partial_setup(module_id, ctx)
             # Emit on the global bus directly (bypass plugin permissions in ctx).
             try:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
@@ -1539,8 +1564,7 @@ class ModuleManager:
                 log.warning(f"UNLOAD: teardown of '{module_id}' raised: {e}")
 
         # Dispose bus subscriptions + background tasks owned by this module so a
-        # reloaded/uninstalled plugin's stale handlers stop firing (and its
-        # de-dup keys are freed so the re-imported code can re-subscribe).
+        # reloaded/uninstalled plugin's stale handlers stop firing.
         ctx = entry.get("context")
         if ctx is not None and hasattr(ctx, "dispose"):
             try:
@@ -1595,6 +1619,12 @@ class ModuleManager:
             m for m in sys.modules
             if m == base_package_name or m.startswith(base_package_name + ".")
         ]
+        # Handlers the plugin subscribed directly on the bus (not through its
+        # context) go as well — the purged module must not keep answering events.
+        if entry["manifest"].type == "PLUGIN":
+            stale_handlers = bus.unsubscribe_package(base_package_name)
+            if stale_handlers:
+                log.info(f"UNLOAD: removed {stale_handlers} direct bus subscriber(s) of '{module_id}'.")
         # The plugin's SQLAlchemy models stay registered on the shared Base after
         # the module objects are gone; a re-import of the same folder (reload,
         # auto-revert, cluster reconcile) then fails with "Table '…' is already
@@ -1938,3 +1968,4 @@ class ModuleManager:
         self._plugin_state_schema_ready = True
 
 module_manager = ModuleManager()
+module_manager.attach_bus()

@@ -464,9 +464,8 @@ class ModuleContext:
                 lambda: future.done() or future.set_result(payload)
             )
 
-        # The bus de-duplicates subscribers by module + qualname; make the
-        # listener unique per plugin and topic or the second plugin's
-        # listener would be silently dropped as a "duplicate".
+        # A readable, unique name per plugin and topic for logs and task names
+        # (the bus itself tells subscribers apart by identity).
         _on_reply.__qualname__ = f"ModuleContext.request<{self.manifest.id}:{reply_topic}>"
         self.subscribe(reply_topic)(_on_reply)
         self._reply_listeners.add(reply_topic)
