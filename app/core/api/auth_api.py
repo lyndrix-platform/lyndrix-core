@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from config import settings
 from core.api.security import ApiIdentity, require_api_auth, require_permission
+from core.components.vault.logic.rate_limit import SlidingWindowRateLimiter, normalize_client_address
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
@@ -257,29 +258,94 @@ async def list_auth_providers():
     return {"status": "ok", "providers": providers}
 
 
+# Every /oidc/start stores a login state for five minutes (a database row in
+# cluster mode) without any authentication: bound how many a client — and all
+# clients together — can create. Generous for people clicking "Sign in with …".
+_OIDC_START_PER_ADDRESS = SlidingWindowRateLimiter(max_attempts=30, window_seconds=60)
+_OIDC_START_GLOBAL = SlidingWindowRateLimiter(max_attempts=600, window_seconds=60)
+
+
+def _safe_next_path(next_path: str) -> str:
+    """The in-app path to land on after the login, or ``/``.
+
+    ``//host`` and ``/\\host`` are other SITES to a browser, and browsers drop
+    tabs/newlines inside a URL (``/<tab>/host`` becomes ``//host``) — none of
+    them may travel through the login as "a path".
+    """
+    candidate = next_path or ""
+    if (
+        not candidate.startswith("/")
+        or candidate.startswith(("//", "/\\"))
+        or any(ord(ch) < 0x20 or ch == "\x7f" for ch in candidate)
+    ):
+        return "/"
+    return candidate
+
+
+def _validated_redirect_uri(redirect_uri: str) -> str:
+    """``redirect_uri`` if it is a plain URL on an allowed origin, else 400.
+
+    The one-time login code is appended to this URL. Its origin must be in
+    CORS_ALLOWED_ORIGINS, and nothing in it may make a browser or a parser go
+    elsewhere or carry the code along: no userinfo (``allowed@evil``), no
+    backslash/whitespace tricks, no query (an open redirect on an allowed
+    origin would forward the code) and no fragment.
+    """
+    from urllib.parse import urlsplit
+
+    def reject(reason: str) -> HTTPException:
+        return HTTPException(status_code=400, detail=f"redirect_uri {reason}")
+
+    raw = redirect_uri or ""
+    if any(ord(ch) <= 0x20 or ch in "\\\x7f" for ch in raw):
+        raise reject("must not contain whitespace, control characters or backslashes")
+    try:
+        parsed = urlsplit(raw)
+        has_userinfo = parsed.username is not None or parsed.password is not None
+    except ValueError:
+        raise reject("is not a valid URL")
+    if not parsed.scheme or not parsed.netloc:
+        raise reject("must be an absolute URL")
+    if has_userinfo or "@" in parsed.netloc:
+        raise reject("must not contain credentials")
+    if parsed.query or parsed.fragment or "?" in raw or "#" in raw:
+        raise reject("must not contain a query or fragment")
+    origin = f"{parsed.scheme}://{parsed.netloc}".lower()
+    if origin not in {str(o).rstrip("/").lower() for o in settings.CORS_ALLOWED_ORIGINS}:
+        raise reject("origin not allowed")
+    return raw
+
+
 @auth_router.get("/oidc/start", summary="Begin the OIDC flow for the React SPA")
-async def oidc_start_react(redirect_uri: str, next: str = "/"):
+async def oidc_start_react(request: Request, redirect_uri: str, next: str = "/"):
     """Redirect the browser to the IdP (PKCE + state bound to this flow).
 
     ``redirect_uri`` is the SPA's absolute /auth/callback URL; its origin MUST
-    be in CORS_ALLOWED_ORIGINS (open-redirect protection). ``next`` is the
-    in-app path to land on after the exchange.
+    be in CORS_ALLOWED_ORIGINS and it must carry no credentials, query or
+    fragment (open-redirect / code-leak protection). ``next`` is the in-app
+    path to land on after the exchange. Rate-limited per client address (429).
     """
-    from urllib.parse import urlparse
     from fastapi.responses import RedirectResponse
-    from config import settings
+    from core.components.auth.logic.login_guard import client_host
     from core.components.auth.logic.providers.registry import provider_registry
 
-    parsed = urlparse(redirect_uri)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    if origin not in set(settings.CORS_ALLOWED_ORIGINS):
-        raise HTTPException(status_code=400, detail="redirect_uri origin not allowed")
-    if not next.startswith("/"):
-        next = "/"
+    redirect_uri = _validated_redirect_uri(redirect_uri)
+    next = _safe_next_path(next)
 
     provider = provider_registry.get("oidc")
     if provider is None or not provider.is_configured():
         raise HTTPException(status_code=404, detail="No OIDC provider configured")
+
+    # Only now a state would be created — count it (per address first, so one
+    # client cannot use up the global budget of everybody else).
+    retry = _OIDC_START_PER_ADDRESS.hit(normalize_client_address(client_host(request)))
+    retry = retry or _OIDC_START_GLOBAL.hit("all")
+    if retry > 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(retry)},
+        )
 
     url = await provider.build_login_url(
         flow="react", redirect=f"{redirect_uri}|{next}"

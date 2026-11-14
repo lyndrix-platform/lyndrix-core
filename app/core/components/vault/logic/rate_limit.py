@@ -39,6 +39,8 @@ def normalize_client_address(host: Optional[str]) -> str:
 
 
 class SlidingWindowRateLimiter:
+    _MAX_KEYS = 10000
+
     def __init__(self, max_attempts: int, window_seconds: int) -> None:
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
@@ -59,7 +61,15 @@ class SlidingWindowRateLimiter:
 
     def record(self, key: str) -> None:
         """Record an attempt for *key*."""
-        self._attempts[key].append(time.time())
+        now = time.time()
+        self._attempts[key].append(now)
+        if len(self._attempts) > self._MAX_KEYS:
+            # Keys are client-chosen (addresses): forget the idle ones so a
+            # caller rotating them cannot grow this table without bound.
+            for stale in [k for k, ts in self._attempts.items() if not ts or now - ts[-1] >= self.window_seconds]:
+                del self._attempts[stale]
+            for oldest in list(self._attempts)[: max(0, len(self._attempts) - self._MAX_KEYS)]:
+                del self._attempts[oldest]
 
     def hit(self, key: str) -> int:
         """

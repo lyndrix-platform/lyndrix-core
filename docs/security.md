@@ -147,8 +147,16 @@ Each login resolves to one local profile via a stable identity link
 (`UserIdentity`). Auto-matching an external account to an existing user by email
 only happens when the provider **vouches** for it — AD/LDAP directory mail, or an
 OIDC `email_verified: true` claim. An unverified or ambiguous email never merges
-accounts; a new profile is created instead (spoofing protection). The OIDC
-redirect flow uses **PKCE + a session-bound state**.
+accounts; a new profile is created instead (spoofing protection). Auto-matching
+additionally needs a local email that an administrator or a provider put on the
+profile — an address a user typed in themselves is never a link target.
+
+The OIDC redirect flow uses **PKCE between the core and the IdP** and a
+single-use, server-side state. The SPA start endpoint only accepts a plain
+callback URL on an allowed origin (no credentials, query or fragment), an
+in-app `next` path, and is rate-limited. Not yet bound to the browser that
+started the flow (login CSRF): PKCE between SPA and core and a nonce cookie for
+the NiceGUI flow are open.
 
 ### Session tokens
 
