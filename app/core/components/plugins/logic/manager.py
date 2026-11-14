@@ -542,7 +542,9 @@ class ModuleManager:
         # Drop the broken version from memory before swapping files back.
         if module_id and module_id in self.registry:
             self.unload_module(module_id)
-        if not plugin_service.restore_previous(module_name):
+        # Folder swap + rmtree of the failed tree (seconds with a large vendor/)
+        # — off the event loop.
+        if not await asyncio.to_thread(plugin_service.restore_previous, module_name):
             log.error(f"AUTO-REVERT: restore failed for '{module_name}'.")
             return False
         importlib.invalidate_caches()
@@ -557,16 +559,24 @@ class ModuleManager:
             self.registry[restored_id]["reverted_from"] = failed_version
         if restored_id and db_instance.is_connected:
             await self._activate_saved_plugins()
-        plugin_service._record_history(
+        # Sync DB write (plus a checkfirst DDL round trip) — off the event loop.
+        await asyncio.to_thread(
+            plugin_service._record_history,
             restored_id, module_name, prev_version, action="upgrade", outcome="reverted",
         )
-        return True
+        # Announce the revert. These used to sit behind the ``return`` and never
+        # fired: no UI refresh, and installs without a tracked operation (desired
+        # plugins, cluster reconcile) reverted without any notification.
         bus.emit("plugin:rolled_back",
                  {"repo": module_name, "module_id": restored_id, "version": prev_version})
         bus.emit("plugin:install_failed",
                  {"repo": module_name, "error": "verification_failed_auto_reverted"})
+        if restored_id:
+            # The React client invalidates its plugin list/bundle caches on this topic.
+            bus.emit("plugin:state_changed", {"plugin_id": restored_id, "action": "reverted"})
         bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_name} auto-reverted."})
         log.info(f"AUTO-REVERT: '{module_name}' restored to previous version {prev_version}.")
+        return True
 
     def _mount_plugin_statics(self, module_id: str):
         """Mount a plugin's built UI bundle directory for React UI serving.
