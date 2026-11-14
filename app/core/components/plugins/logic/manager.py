@@ -59,6 +59,16 @@ class ModuleManager:
         current_file_path = os.path.abspath(__file__)
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
         self._reconcile_task = None
+        # Boot convergence (read by the cluster readiness check through
+        # ``getattr(module_manager, "boot_converged", True)``): False from
+        # process start, True once the first activation pass — saved states,
+        # desired plugins and, in cluster mode, the plugin_states reconcile —
+        # has finished and nothing it started is still loading or setting up.
+        self.boot_converged: bool = False
+        self._boot_pass_claimed = False
+        self._boot_watch_task = None
+        # Cluster mode: did the latest boot-time plugin_states reconcile run through?
+        self._boot_reconcile_ok = True
 
     def attach_bus(self) -> None:
         """Subscribe this manager to the lifecycle events it reacts to.
@@ -934,6 +944,24 @@ class ModuleManager:
             log.error("PLUGIN_MANAGER: SessionLocal missing during DB activation.")
             return
 
+        # The first pass that gets this far is THE boot pass: when it is through
+        # (including the convergence at its end) the instance has its plugins.
+        # Passes nested inside it (one per install it triggers) do not count.
+        is_boot_pass = not self.boot_converged and not self._boot_pass_claimed
+        if is_boot_pass:
+            self._boot_pass_claimed = True
+        try:
+            await self._run_activation_pass()
+        except BaseException:
+            if is_boot_pass:
+                self._boot_pass_claimed = False  # the next pass (DB reconnect) tries again
+            raise
+        if is_boot_pass:
+            self._boot_watch_task = bus.create_tracked_task(
+                self._watch_boot_convergence(), name="module_manager:boot_convergence",
+            )
+
+    async def _run_activation_pass(self) -> None:
         # 1. All blocking DB work of the pass (bootstrap DDL under the cluster
         #    lock — up to 55 s behind a booting peer —, row inserts, the retried
         #    row sync with its back-off sleeps) runs in ONE worker thread. It gets
@@ -978,6 +1006,43 @@ class ModuleManager:
         self._activate_unblocked()
 
         await self._converge_after_restore()
+
+    def _boot_pending(self) -> list:
+        """What the boot pass started and has not finished: plugins still
+        ``initializing`` (async ``setup()``, or loaded and waiting for their
+        activation) and installs/upgrades in flight. A plugin whose install
+        failed into back-off, or that ended ``failed``/``degraded``/``blocked``,
+        is NOT pending — a dead repo must not keep the instance unready."""
+        pending = [
+            module_id for module_id, entry in self.registry.items()
+            if entry["manifest"].type == "PLUGIN" and entry.get("status") == "initializing"
+        ]
+        pending += [
+            key for key, lock in self._locks.items()
+            if key.startswith("install:") and lock.locked()
+        ]
+        pending += [f"upgrade:{module_id}" for module_id in self._reconcile_upgrading]
+        return pending
+
+    async def _watch_boot_convergence(self, poll_s: float = 0.5, retry_s: float = 15.0) -> None:
+        """Set ``boot_converged`` once nothing of the boot pass is pending."""
+        # Cluster: a boot reconcile that failed (database hiccup) installed
+        # nothing — this instance does not have its plugins yet. Retry it here
+        # instead of declaring convergence and waiting for the periodic pass.
+        while settings.LYNDRIX_CLUSTER_MODE == "cluster" and not self._boot_reconcile_ok:
+            await asyncio.sleep(retry_s)
+            self._boot_reconcile_ok = await self._boot_reconcile("boot-retry")
+        # Installs the pass triggered load in their own bus tasks: let those
+        # start (and take their install lock) before the first look.
+        await asyncio.sleep(0)
+        while True:
+            pending = self._boot_pending()
+            if not pending:
+                break
+            log.debug(f"PLUGIN_MANAGER: boot convergence waits for {pending}")
+            await asyncio.sleep(poll_s)
+        self.boot_converged = True
+        log.info(f"PLUGIN_MANAGER: boot convergence reached — {len(self.registry)} module(s) loaded.")
 
     @staticmethod
     def _is_running(entry: dict) -> bool:
@@ -1084,10 +1149,17 @@ class ModuleManager:
         await self.reconcile_desired_plugins()
         if settings.LYNDRIX_CLUSTER_MODE != "cluster":
             return
+        self._boot_reconcile_ok = await self._boot_reconcile("boot")
+
+    async def _boot_reconcile(self, trigger: str) -> bool:
+        """One plugin_states reconcile; False when it failed or could not run
+        (database away) — never raises, startup must go on."""
         try:
-            await self.reconcile_cluster_state(trigger="boot")
+            summary = await self.reconcile_cluster_state(trigger=trigger)
+            return not (isinstance(summary, dict) and summary.get("skipped"))
         except Exception:
-            log.error("RECONCILE: boot-time cluster reconcile failed", exc_info=True)
+            log.error(f"RECONCILE: {trigger} cluster reconcile failed", exc_info=True)
+            return False
 
     def toggle_module(self, module_id: str, active: bool, *, persist: bool = True):
         """Toggles the module state in RAM and persists it to the DB.
