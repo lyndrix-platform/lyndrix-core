@@ -7,8 +7,6 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from config import settings
 from core.components.cluster.logic import cluster_service as cs_mod
 from core.components.cluster.logic.cluster_service import ClusterService
