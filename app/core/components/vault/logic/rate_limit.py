@@ -84,5 +84,29 @@ class SlidingWindowRateLimiter:
         return 0
 
 
-# Shared limiter for Vault unseal/init attempts (per source identity).
+# Vault init/unseal attempts are unauthenticated and each one costs an Argon2
+# key derivation. Two budgets:
+#   * per source (client address): 5 per minute, as before;
+#   * all sources together: 20 per minute — rotating addresses (or a forged
+#     X-Forwarded-For) cannot multiply the attempts.
+# The per-source budget is a quarter of the global one on purpose: one address
+# — e.g. everything behind a load balancer the core does not trust — can never
+# use up the global budget, so the operator always gets an attempt in from
+# another address (a port-forward arrives as 127.0.0.1).
 unseal_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60)
+unseal_global_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60)
+_ALL_SOURCES = "all"
+
+
+def unseal_retry_after(source: str) -> int:
+    """Admit (and count) one init/unseal attempt from ``source``.
+
+    Returns 0 when admitted, else the seconds to wait. A refused attempt is
+    not counted against either budget.
+    """
+    retry = unseal_limiter.retry_after(source) or unseal_global_limiter.retry_after(_ALL_SOURCES)
+    if retry > 0:
+        return retry
+    unseal_limiter.record(source)
+    unseal_global_limiter.record(_ALL_SOURCES)
+    return 0

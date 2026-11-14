@@ -7,7 +7,7 @@ from core.bus import bus
 from core.logger import get_logger
 
 from ..logic.crypto import validate_master_key, WeakMasterKeyError
-from ..logic.rate_limit import unseal_limiter
+from ..logic.rate_limit import normalize_client_address, unseal_retry_after
 
 log = get_logger("Core:VaultAPI")
 
@@ -23,12 +23,14 @@ class VaultUnsealRequest(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    # The address uvicorn resolved from the trusted proxies, IPv6 as its /64.
+    return normalize_client_address(request.client.host if request.client else None)
 
 
 def _enforce_rate_limit(request: Request) -> None:
-    """Per-IP throttle for init/unseal to slow online brute-force of the master key."""
-    retry = unseal_limiter.hit(_client_ip(request))
+    """Throttle init/unseal per client address AND over all clients together
+    (slows online brute-force of the master key, bounds the Argon2 load)."""
+    retry = unseal_retry_after(_client_ip(request))
     if retry > 0:
         raise HTTPException(
             status_code=429,
