@@ -14,6 +14,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
 | `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
 | `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → at once: `/api/ready` 503, `draining` published to the peers, leases handed over (`lost` callbacks first) → wait → close SSE → tombstone → exit |
+| `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` | `600` | 1 | cluster mode: after boot `/api/ready` stays 503 (`plugins:converging`) until the plugins recorded in `plugin_states` are installed and activated on this instance — at most this long, then it turns ready anyway (preflight `plugins: warn`). `0` = do not wait |
 | `LYNDRIX_RESTART_GRACE_SECONDS` | `90` | 1 | how long an instance that stopped gracefully counts as `restarting` (not `dead`) for its peers: `ctx.has_live_role()` stays true, pinned plugins answer `Retry-After: 5`. Should cover a container restart |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
 | `DB_HOST` | `db` | 0 | the **single-writer endpoint** (MaxScale/ProxySQL/Service); the preflight warns when it is a Galera node addressed directly |
@@ -49,6 +50,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `storage_secret` | **this** instance's `STORAGE_SECRET` fingerprint differs from the one most live instances share (tie: the longest-running instance's value wins) | another instance's fingerprint differs (named in the message; that instance fails its own check) |
 | `versions` | — | mixed core versions (expected during a rolling update) |
 | `plugin_artifacts` | — | the loaded plugin set differs between instances |
+| `plugins` | — | this instance has not finished installing/activating the cluster's plugins yet (not ready), or gave up waiting after `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` (ready, plugins may be missing) |
 | `roles` | a `pinned:<role>` plugin has no live instance with that role; no leader-capable instance | — |
 | `ui_engine` | — | NiceGUI enabled in cluster mode |
 | `trusted_proxies` | — | `X-Forwarded-For` arrives (or cluster mode) while `LYNDRIX_TRUSTED_PROXIES` is the default |
@@ -68,6 +70,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `database` / `vault` | not connected |
 | `draining` | SIGTERM received, the instance is leaving |
 | `coordinator` | cluster mode: the coordinator has not started yet (it retries with back-off) |
+| `plugins:converging` | cluster mode: boot finished, but the plugins of the cluster are still being installed/activated here (new pod with an empty plugin directory). Ends when they are, or after `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` |
 | `instance_id_conflict` | cluster mode: a process that started later registered under this `LYNDRIX_INSTANCE_ID`; this (older) process stands back until the other stops |
 | `heartbeat` | cluster mode: no heartbeat succeeded for a full lease TTL — the peers already count this instance as dead (no leases, no shards), so it must not receive traffic either. Clears with the next successful beat |
 | `preflight:storage_secret` | this instance's `STORAGE_SECRET` differs from the cluster's |

@@ -448,3 +448,54 @@ def test_db_driver_refreshes_the_pool_once_per_ttl_and_never_for_sqlite(tmp_path
     assert coord.refresh_connections("again") is False          # rate-limited
     assert engine.disposed == [False]                           # de-referenced, never closed under a caller
     assert coord.pool_refreshes == 1
+
+
+# --- CL-02 (cluster side): ready only after the plugins converged ---------------------
+
+def test_readiness_waits_for_plugin_convergence_up_to_the_cap(svc, monkeypatch):
+    """A fresh pod (empty plugin dir) used to turn ready right after boot and
+    answered 404 for every plugin route while it still installed them."""
+    from core.components.plugins.logic.manager import module_manager
+
+    clock = FakeClock()
+    monkeypatch.setattr(svc, "_clock", clock)
+    monkeypatch.setattr(svc, "plugin_wait_s", 600.0)
+    monkeypatch.setattr(svc, "_boot_complete_at", None)
+    asyncio.run(svc._heartbeat_once())
+
+    # a manager without the flag (this branch, older cores) never blocks readiness
+    monkeypatch.delattr(module_manager, "boot_converged", raising=False)
+    assert svc.readiness() == (True, [])
+
+    monkeypatch.setattr(module_manager, "boot_converged", False, raising=False)
+    assert svc.readiness() == (False, ["plugins:converging"])          # boot done, plugins not yet
+    monkeypatch.setattr(svc, "_boot_complete_at", clock())
+    clock.advance(20)
+    assert svc.readiness() == (False, ["plugins:converging"])
+    checks = {c.id: c for c in asyncio.run(run_checks(svc))}
+    assert checks["plugins"].status == "warn" and "not ready" in checks["plugins"].message
+
+    monkeypatch.setattr(module_manager, "boot_converged", True, raising=False)
+    assert svc.readiness() == (True, [])                               # converged → ready
+    assert {c.id: c for c in asyncio.run(run_checks(svc))}["plugins"].status == "ok"
+
+    # … or the cap: a dead plugin repo must not keep the instance out forever
+    monkeypatch.setattr(module_manager, "boot_converged", False, raising=False)
+    clock.advance(600)
+    asyncio.run(svc._heartbeat_once())
+    assert svc.readiness() == (True, [])
+    late = {c.id: c for c in asyncio.run(run_checks(svc))}["plugins"]
+    assert late.status == "warn" and "serves traffic anyway" in late.message
+
+    monkeypatch.setattr(svc, "mode", "single")                          # single mode never waits
+    monkeypatch.setattr(svc, "_boot_complete_at", clock())
+    assert svc.readiness() == (True, [])
+
+
+def test_plugin_wait_can_be_switched_off(svc, monkeypatch):
+    from core.components.plugins.logic.manager import module_manager
+
+    monkeypatch.setattr(module_manager, "boot_converged", False, raising=False)
+    monkeypatch.setattr(svc, "plugin_wait_s", 0.0)
+    asyncio.run(svc._heartbeat_once())
+    assert svc.readiness() == (True, [])

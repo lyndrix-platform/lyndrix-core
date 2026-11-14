@@ -152,6 +152,9 @@ class ClusterService:
         self._peers: dict[str, dict] = {}
         # Set while another process uses this instance id (heartbeat refused).
         self.id_conflict: Optional[str] = None
+        # clock() when boot completed — start of the wait for plugin convergence.
+        self._boot_complete_at: Optional[float] = None
+        self.plugin_wait_s = float(settings.LYNDRIX_READY_PLUGIN_WAIT_SECONDS)
         self._drain_task: Optional[asyncio.Task] = None
         self._stopped = False
         self._hb_task: Optional[asyncio.Task] = None
@@ -299,6 +302,8 @@ class ClusterService:
                 delay = min(delay * 2, 30)
 
     async def on_boot_complete(self, payload: Optional[dict] = None) -> None:
+        if self._boot_complete_at is None:
+            self._boot_complete_at = self._clock()
         try:
             await self.run_preflight()
         except Exception:
@@ -878,6 +883,8 @@ class ClusterService:
                 reasons.append("instance_id_conflict")
             elif self.heartbeat_stale:
                 reasons.append("heartbeat")
+            if self.plugins_converging and not any(r.startswith("boot:") for r in reasons):
+                reasons.append("plugins:converging")
         # Only contract failures that make THIS instance unfit for traffic gate
         # readiness. A cluster-level problem (e.g. no live runner instance) is a
         # red check on the Cluster page, not a reason to take every instance out.
@@ -886,6 +893,30 @@ class ClusterService:
             if c.get("status") == "fail" and c.get("id") in _READINESS_CHECKS
         )
         return (not reasons, reasons)
+
+    @staticmethod
+    def _plugins_converged() -> bool:
+        """Did the module manager finish its boot-time convergence (saved
+        plugins activated, missing ones installed)? Managers without the flag
+        (older cores, tests) count as converged."""
+        try:
+            from core.components.plugins.logic.manager import module_manager
+
+            return bool(getattr(module_manager, "boot_converged", True))
+        except Exception:
+            return True
+
+    def plugin_wait_elapsed_s(self) -> float:
+        """Seconds since boot completed (0 until then)."""
+        return 0.0 if self._boot_complete_at is None else max(0.0, self._clock() - self._boot_complete_at)
+
+    @property
+    def plugins_converging(self) -> bool:
+        """Cluster mode: plugins are still being installed/activated after boot
+        and the wait (``LYNDRIX_READY_PLUGIN_WAIT_SECONDS``) is not over."""
+        if not self.is_cluster or self.plugin_wait_s <= 0 or self._plugins_converged():
+            return False
+        return self.plugin_wait_elapsed_s() < self.plugin_wait_s
 
     async def run_preflight(self) -> list[dict]:
         from .preflight import run_checks

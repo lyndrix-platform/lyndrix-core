@@ -232,6 +232,13 @@ class Settings(BaseSettings):
     # Retry-After meanwhile. Should cover a container restart (image pull
     # excluded); rows are pruned after grace + TTL at the earliest.
     LYNDRIX_RESTART_GRACE_SECONDS: int = 90
+    # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
+    # the plugins recorded in plugin_states are installed and activated on this
+    # instance — a fresh pod with an empty plugin directory would otherwise take
+    # traffic and answer 404 for every plugin route while it still downloads
+    # them. After this many seconds the instance turns ready anyway (a broken
+    # plugin repo must not keep it out forever); 0 = do not wait.
+    LYNDRIX_READY_PLUGIN_WAIT_SECONDS: int = 600
     # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
     # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
     # UI shows any instance's log from any instance; the leader keeps
@@ -408,6 +415,8 @@ class Settings(BaseSettings):
             raise ValueError("LYNDRIX_DRAIN_SECONDS must be >= 0")
         if self.LYNDRIX_RESTART_GRACE_SECONDS < 0:
             raise ValueError("LYNDRIX_RESTART_GRACE_SECONDS must be >= 0")
+        if self.LYNDRIX_READY_PLUGIN_WAIT_SECONDS < 0:
+            raise ValueError("LYNDRIX_READY_PLUGIN_WAIT_SECONDS must be >= 0")
         return self
 
     # ------------------------------------------------------------------

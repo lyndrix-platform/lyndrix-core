@@ -240,6 +240,25 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     else:
         add("plugin_artifacts", "skip", "single-instance mode")
 
+    # 5b. boot-time plugin convergence (readiness waits for it, up to a cap)
+    if not cluster:
+        add("plugins", "skip", "single-instance mode")
+    elif getattr(service, "_plugins_converged", lambda: True)():
+        add("plugins", "ok", "plugins recorded for the cluster are installed and activated here")
+    elif getattr(service, "plugins_converging", False):
+        add("plugins", "warn",
+            f"plugins are still being installed/activated ({service.plugin_wait_elapsed_s():.0f}s since boot) — "
+            "not ready for traffic yet",
+            "A new instance pulls the plugins recorded in plugin_states before it joins the load balancer "
+            "(/api/ready: plugins:converging).", recheck=True)
+    else:
+        add("plugins", "warn",
+            f"plugin convergence did not finish within {getattr(service, 'plugin_wait_s', 0):.0f}s — "
+            "this instance serves traffic anyway",
+            "Routes of plugins that are not installed here answer 404. Check the log for RECONCILE / install "
+            "errors (repository unreachable?) and GET /api/plugins on this instance; "
+            "LYNDRIX_READY_PLUGIN_WAIT_SECONDS sets the wait.", recheck=True)
+
     # 6. role coverage
     alive_roles = {r for i in alive for r in i.roles} | set(service.roles)
     pinned = _pinned_roles()
