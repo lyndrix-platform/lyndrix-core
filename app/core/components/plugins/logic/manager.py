@@ -1820,27 +1820,12 @@ class ModuleManager:
             safe_name = repo.replace("-", "_")
             plugin_path = plugin_service.plugin_dir / safe_name
 
-            # Check DB state for auto_update preference. Copy the values out of
-            # the session: after commit() the row is expired and reading it
-            # outside the ``with`` raised DetachedInstanceError (seen on first
-            # boot with pinned plugins, which aborted the install handler).
-            should_update = settings.LYNDRIX_PLUGINS_AUTO_UPDATE
-            state_found = False
-            state_installed: str | None = None
-            if db_instance.SessionLocal:
-                with db_instance.SessionLocal() as session:
-                    state = session.query(PluginState).filter(
-                        (PluginState.repo_url == url) |
-                        (PluginState.module_id.like(f"%{safe_name}%"))
-                    ).first()
-                    if state:
-                        state_found = True
-                        state_installed = state.installed_version
-                        if state.auto_update is not None:
-                            should_update = state.auto_update
-                        state.repo_url = url
-                        state.desired_version = version
-                        session.commit()
+            # Row lookup + update is sync DB work — off the event loop. The
+            # loaded plugin id is resolved here (registry access stays on the loop).
+            state_found, state_installed, row_auto_update = await asyncio.to_thread(
+                self._apply_desired_spec, url, version, safe_name, self._find_plugin_id_by_folder(safe_name),
+            )
+            should_update = settings.LYNDRIX_PLUGINS_AUTO_UPDATE if row_auto_update is None else row_auto_update
 
             # Tags are "v1.4.0", manifests say "1.4.0" — compare without the prefix
             # or a pinned plugin would be re-downloaded on every boot.
@@ -1862,6 +1847,49 @@ class ModuleManager:
                 log.debug(f"RECONCILE: Plugin '{repo}' already satisfies desired state.")
 
         log.info("RECONCILE: Desired plugin check complete.")
+
+    def _apply_desired_spec(self, url: str, version: str, safe_name: str, loaded_id: str | None):
+        """Record a ``LYNDRIX_PLUGINS_DESIRED`` pin on the plugin's own row.
+
+        Returns ``(row found, installed_version, auto_update)`` — plain values,
+        the ORM row never leaves the session. Blocking; call via ``to_thread``.
+
+        The row is matched exactly: by the plugin id (loaded module, else the
+        manifest id read from the folder on disk) or by the normalised repo URL.
+        The former ``module_id LIKE '%<repo_name>%'`` was a substring match in
+        which ``_`` is a wildcard — the pin of ``…plugin-ai`` could rewrite
+        ``repo_url``/``desired_version`` of ``lyndrix.plugin.ai_assistant``, and
+        the cluster reconcile then installed the wrong repo for that id.
+        """
+        if not db_instance.SessionLocal:
+            return False, None, None
+        from .plugin_service import plugin_service
+
+        plugin_id = loaded_id or self._read_plugin_manifest_id(safe_name)
+        url_key = plugin_service._norm_url_key(url)
+
+        def _tx():
+            with self._state_session() as session:
+                rows = session.query(PluginState).all()
+                state = next((r for r in rows if plugin_id and r.module_id == plugin_id), None)
+                if state is None:
+                    state = next(
+                        (r for r in rows if r.repo_url and plugin_service._norm_url_key(r.repo_url) == url_key),
+                        None,
+                    )
+                if state is None:
+                    return False, None, None
+                found = (True, state.installed_version, state.auto_update)
+                state.repo_url = url
+                state.desired_version = version
+                session.commit()
+                return found
+
+        try:
+            return self._retry_state_write(_tx)
+        except Exception as exc:
+            log.warning(f"RECONCILE: could not record the desired state of '{safe_name}': {exc}")
+            return False, None, None
 
     def _ensure_plugin_state_schema(self):
         """Apply additive schema upgrades for plugin_states on existing installs."""
