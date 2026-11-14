@@ -21,6 +21,7 @@ import hmac
 import json
 import secrets
 import time
+import weakref
 from typing import Optional, Set
 
 from fastapi import APIRouter, HTTPException, Request
@@ -36,6 +37,41 @@ log = get_logger("Core:EventsAPI")
 events_router = APIRouter(tags=["Events"])
 
 _SSE_QUEUES: Set[asyncio.Queue] = set()
+
+# Who opened which stream ("user:<name>" / "addr:<client address>"), for the
+# per-user connection cap. Weak keys and counted against _SSE_QUEUES, so an
+# entry can never outlive its stream and keep somebody locked out.
+_SSE_OWNERS: "weakref.WeakKeyDictionary[asyncio.Queue, str]" = weakref.WeakKeyDictionary()
+# Streams without a login (boot/login/unseal pages) share a client address
+# behind NAT or an untrusted proxy — their cap is this many times the user cap.
+_ANONYMOUS_CAP_FACTOR = 5
+
+
+def _admit_stream(owner: str, *, anonymous: bool) -> None:
+    """Refuse another stream for ``owner`` beyond the cap (429).
+
+    Every open stream holds a queue, a task and a socket; without a cap one
+    account (or one unauthenticated client) could open them without bound.
+    The shell uses one stream per tab and retries with backoff, falling back
+    to polling meanwhile.
+    """
+    try:
+        from config import settings
+
+        cap = int(getattr(settings, "LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER", 0) or 0)
+    except Exception:  # pragma: no cover - defensive
+        cap = 0
+    if cap <= 0:
+        return
+    if anonymous:
+        cap *= _ANONYMOUS_CAP_FACTOR
+    open_streams = sum(1 for q, who in list(_SSE_OWNERS.items()) if who == owner and q in _SSE_QUEUES)
+    if open_streams >= cap:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many open event streams for this account. Close a tab or try again shortly.",
+            headers={"Retry-After": "30"},
+        )
 
 # Topics sent to authenticated clients.
 _AUTH_TOPICS = frozenset({
@@ -243,8 +279,16 @@ async def sse_stream(
         identity = None  # scoped key without api:read → public topics only
     allowed = _AUTH_TOPICS if (identity or ticket_user) else _PUBLIC_TOPICS
     username = identity.username if identity else ticket_user
+    if username:
+        owner = f"user:{username}"
+    else:
+        from core.components.vault.logic.rate_limit import normalize_client_address
+
+        owner = f"addr:{normalize_client_address(request.client.host if request.client else None)}"
+    _admit_stream(owner, anonymous=not username)
     q: asyncio.Queue = asyncio.Queue(maxsize=128)
     _SSE_QUEUES.add(q)
+    _SSE_OWNERS[q] = owner
 
     async def generator():
         try:

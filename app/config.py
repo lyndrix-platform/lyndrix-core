@@ -140,6 +140,11 @@ class Settings(BaseSettings):
     # in hours; after that the token answers 401 and the user signs in again.
     # 0 = never expires. Named API keys a user creates are NOT affected.
     LYNDRIX_SESSION_MAX_AGE_HOURS: int = 720
+    # Open event streams (GET /api/events, one per browser tab) a single user
+    # may hold on one instance; further ones get 429 and the shell falls back
+    # to polling until one closes. Streams without a login are limited per
+    # client address at five times this value. 0 = unlimited.
+    LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER: int = 20
 
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636

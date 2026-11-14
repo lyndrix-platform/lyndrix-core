@@ -65,6 +65,22 @@ _KEY_ERROR_RETRY_SECONDS = 2.0
 _key_cache: dict = {"value": None, "expires": 0.0}
 
 
+def constant_time_equals(presented: Optional[str], expected: Optional[str]) -> bool:
+    """Timing-safe comparison of two secrets given as text — never raises.
+
+    ``hmac.compare_digest`` accepts ``str`` only when both are pure ASCII and
+    raises ``TypeError`` otherwise. Header values are attacker-controlled, so a
+    single non-ASCII byte in ``X-API-Key`` turned every route (public ones
+    included) into a 500. Comparing the UTF-8 bytes has no such precondition.
+    """
+    if presented is None or expected is None:
+        return False
+    return hmac.compare_digest(
+        str(presented).encode("utf-8", "surrogatepass"),
+        str(expected).encode("utf-8", "surrogatepass"),
+    )
+
+
 def invalidate_system_api_key_cache() -> None:
     """Drop the cached Vault key so the next resolve re-reads from Vault.
 
@@ -251,7 +267,7 @@ def _try_api_key(request: Request) -> Optional[ApiIdentity]:
     if not configured:
         return None  # method disabled when no key is set
 
-    if hmac.compare_digest(presented.strip(), configured):
+    if constant_time_equals(presented.strip(), configured):
         return ApiIdentity(
             method="api_key",
             username="system",
