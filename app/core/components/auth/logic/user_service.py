@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
 from .models import User
-from .hashing import hash_password, verify_password
+from .hashing import hash_password
 
 log = get_logger("Core:UserService")
 
@@ -38,7 +38,13 @@ class UserService:
     # ------------------------------------------------------------------
 
     def change_password(
-        self, username: str, current_password: str, new_password: str
+        self,
+        username: str,
+        current_password: str,
+        new_password: str,
+        *,
+        client_ip: Optional[str] = None,
+        raise_rejected: bool = False,
     ) -> Tuple[bool, str]:
         """
         Change a user's password after verifying the current one.
@@ -46,16 +52,34 @@ class UserService:
         Returns (success, message).
         Note: on next restart, LYNDRIX_ADMIN_PASSWORD in .env will overwrite
         the admin password if it differs from the new hash.
+
+        The current-password check is one throttled login attempt
+        (``login_guard``): otherwise this would be a password oracle for
+        whoever holds a session of the account. A throttled/busy attempt is
+        reported as ``(False, message)``, or raised as ``LoginRejected`` with
+        ``raise_rejected=True`` so an API caller can answer 429/503.
         """
+        from .auth_service import auth_service
+        from .login_guard import LoginRejected
+
         if len(new_password) < 8:
             return False, "Neues Passwort muss mindestens 8 Zeichen lang sein."
+        if self.get_by_username(username) is None:
+            return False, "Benutzer nicht gefunden."
+
+        try:
+            verified = auth_service.verify_local_login(username, current_password, client_ip)
+        except LoginRejected:
+            if raise_rejected:
+                raise
+            return False, "Zu viele Fehlversuche. Bitte später erneut versuchen."
+        if verified is None:
+            return False, "Aktuelles Passwort ist falsch."
 
         with db_instance.SessionLocal() as s:
             user = s.query(User).filter(User.username == username).first()
             if not user:
                 return False, "Benutzer nicht gefunden."
-            if not verify_password(str(user.hashed_password), current_password):
-                return False, "Aktuelles Passwort ist falsch."
             user.hashed_password = hash_password(new_password)
             s.commit()
 

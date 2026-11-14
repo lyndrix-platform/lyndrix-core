@@ -12,7 +12,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_LEASE_TTL_SECONDS` | `30` | 1 | a lease not renewed within the TTL is up for grabs — this is the failover time for a dead instance |
 | `LYNDRIX_LEASE_HEARTBEAT_SECONDS` | `10` | 1 | heartbeat / renewal interval; must fit at least twice into the TTL |
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
-| `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
+| `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or CIDR. `*` trusts `X-Forwarded-For` from every sender — only safe while nothing but the balancer can reach the core port (preflight warns; see [Security → Password logins](../security.md#password-logins)) |
 | `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → `/api/ready` 503 → wait → close SSE → release leases → exit |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
 | `DB_HOST` | `db` | 0 | the **single-writer endpoint** (MaxScale/ProxySQL/Service); the preflight warns when it is a Galera node addressed directly |
@@ -47,7 +47,7 @@ and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run ch
 | `plugin_artifacts` | — | the loaded plugin set differs between instances |
 | `roles` | a `pinned:<role>` plugin has no live instance with that role; no leader-capable instance | — |
 | `ui_engine` | — | NiceGUI enabled in cluster mode |
-| `trusted_proxies` | — | `X-Forwarded-For` arrives (or cluster mode) while `LYNDRIX_TRUSTED_PROXIES` is the default |
+| `trusted_proxies` | — | `X-Forwarded-For` arrives (or cluster mode) while `LYNDRIX_TRUSTED_PROXIES` is the default; or it is `*` (client addresses can be forged by anyone who reaches the core port directly) |
 | `database` | — | `DB_HOST` is a Galera node (`wsrep_on`) and `DB_ALLOW_DIRECT_NODE` is not set |
 | `clock` | — | this instance's clock is more than 5 s off the database clock |
 | `vault_nodes` | — | a node in `VAULT_NODES` does not answer `/v1/sys/health` |

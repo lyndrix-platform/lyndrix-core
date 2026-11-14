@@ -10,61 +10,14 @@ from pydantic import BaseModel
 
 from config import settings
 from core.api.security import ApiIdentity, require_api_auth, require_permission
-from core.components.vault.logic.rate_limit import SlidingWindowRateLimiter
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
 
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
-# Per-(username, client IP) throttle for failed login attempts. Argon2's cost
-# makes an unthrottled login endpoint a CPU-exhaustion amplifier — 5 failures
-# within 60s locks that key out, independent of the vault unseal limiter.
-# Only FAILED attempts are recorded; a successful login never counts against
-# the budget.
-_LOGIN_MAX_FAILURES = 5
-_LOGIN_WINDOW_S = 60
-# Kept for the single-process fallback when the cluster KV is unavailable.
-_login_limiter = SlidingWindowRateLimiter(max_attempts=_LOGIN_MAX_FAILURES, window_seconds=_LOGIN_WINDOW_S)
-
-
-def _login_rate_limit_key(username: str, request: Request) -> str:
-    # request.client.host is the real client only when uvicorn trusts the proxy
-    # (LYNDRIX_TRUSTED_PROXIES → FORWARDED_ALLOW_IPS); otherwise it is the LB.
-    ip = request.client.host if request.client else "unknown"
-    return f"{username.strip().lower()}|{ip}"
-
-
-def _login_bucket(rl_key: str) -> tuple[str, int]:
-    """Fixed-window counter key shared by every core instance via the cluster KV."""
-    import time as _time
-
-    now = int(_time.time())
-    window_start = now - now % _LOGIN_WINDOW_S
-    return f"login:fail:{rl_key}:{window_start}", _LOGIN_WINDOW_S - (now - window_start)
-
-
-async def _login_retry_after(rl_key: str) -> int:
-    """Seconds until another attempt is allowed (0 = allowed). Cluster-wide counter;
-    falls back to the in-process sliding window when the KV is unreachable."""
-    from core.components.cluster.logic.cluster_service import cluster_service
-
-    key, remaining = _login_bucket(rl_key)
-    try:
-        count = int(await cluster_service.kv_get(key) or 0)
-    except Exception:
-        return _login_limiter.retry_after(rl_key)
-    return max(1, remaining) if count >= _LOGIN_MAX_FAILURES else 0
-
-
-async def _login_record_failure(rl_key: str) -> None:
-    from core.components.cluster.logic.cluster_service import cluster_service
-
-    key, remaining = _login_bucket(rl_key)
-    try:
-        await cluster_service.kv_incr(key, ttl=max(1, remaining))
-    except Exception:
-        _login_limiter.record(rl_key)
+# Login throttling lives in core.components.auth.logic.login_guard — the one
+# choke point shared with HTTP Basic and the NiceGUI login form.
 
 
 # Per-user background images live on the filesystem (no DB change). Existence on
@@ -191,32 +144,34 @@ async def login(payload: LoginRequest, request: Request):
     UserApiKey row and returns the raw key once; the React frontend stores it
     as a bearer token. Providers run credential checks off the event loop.
 
-    Rate-limited per (username, client IP): more than 5 FAILED attempts within
-    60s reject with 429 before the provider chain (and its Argon2 cost) ever
-    runs — an unthrottled login is a CPU-exhaustion amplifier.
+    Throttled through ``login_guard`` (shared with HTTP Basic and the NiceGUI
+    form): after 5 FAILED attempts within 60s for one account from one address
+    — and on the account-wide / per-address budgets — the answer is 429 +
+    ``Retry-After`` before any provider (and its Argon2 cost) runs. 503 +
+    ``Retry-After`` means "not evaluated, try again": every verification slot
+    was busy, or the identity could not be linked.
     """
     from core.components.auth.logic.identity_link_service import IdentityLinkError
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
     from core.components.auth.logic.providers.registry import provider_registry
     from core.components.auth.logic.api_key_service import api_key_service
 
-    rl_key = _login_rate_limit_key(payload.username, request)
-    retry = await _login_retry_after(rl_key)
-    if retry > 0:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(retry)},
-        )
-
     try:
-        result = await provider_registry.authenticate(payload.username, payload.password)
+        result = await provider_registry.authenticate(
+            payload.username, payload.password, client_ip=client_host(request)
+        )
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except IdentityLinkError:
         # The credentials were fine but no local profile could be bound to the
         # login. Deny it (no token for an unlinked identity) without counting a
         # failed attempt; the client may simply retry.
         raise _link_failed_response()
     if result is None:
-        await _login_record_failure(rl_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",

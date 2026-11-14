@@ -105,6 +105,42 @@ Authorization is **group-based RBAC**, resolved server-side for every request
 - **Per-plugin API scoping**: prefer `plugin:<id>:api:read` / `:api:write` (and plugin-declared custom permissions) over the broad global `api:read` / `api:write`, so a token/group can be limited to individual plugins.
 - **Notification visibility** can be gated per endpoint by permission id, so sensitive events (e.g. plugin lifecycle) are only visible to admins.
 
+### Password logins
+
+Every password check goes through one choke point (`login_guard`): the login
+form (`POST /api/auth/login`, NiceGUI), HTTP Basic on API routes and "confirm
+your current password". Only **verified wrong passwords** are counted; an
+attempt that was turned away never extends a block, so every block ends by
+itself. The response is `429` + `Retry-After` (never `401`) while blocked.
+
+| Budget | Limit | Purpose |
+|---|---|---|
+| account + client address | 5 failures / minute, 10 / 10 minutes | plain guessing from one address |
+| account, addresses that already failed on it | 20 failures / 10 minutes | guessing spread over a few addresses |
+| account, addresses without a failure of their own | 10 more / 10 minutes | room for the real user while the account is under attack |
+| client address, any account | 30 failures / minute | one password sprayed over many accounts; load on the directory |
+
+Rules that keep legitimate clients working:
+
+- An account + address that produced the **correct** password within the last 30 days is only checked against its own budget (first row) — other people's failures do not block it.
+- The **same wrong password** repeated (a script with an outdated password) counts once per 10 minutes and costs one Argon2 run, so it does not block the account for correctly configured clients.
+- A confirmed password is remembered while it keeps being used (5 minutes idle, bound to the stored hash), so HTTP Basic costs one Argon2 run, not one per request.
+- An unreachable directory is not a wrong password: such attempts use the address budget only, so an LDAP outage does not leave its users blocked afterwards. A local account's wrong password counts regardless.
+- At most `LYNDRIX_LOGIN_VERIFY_CONCURRENCY` (4) Argon2 verifications run at once; the rest wait up to 5 s and then get `503` + `Retry-After`.
+
+What an attacker can still do — the price of a hard ceiling on guesses per account:
+
+- **Many addresses** (botnet, or a forgeable `X-Forwarded-For`, see below): about 30 guesses per account, 10 minutes and instance. While that budget is full, the account's password login is refused from addresses that never logged in successfully — for as long as the attack lasts plus at most 10 minutes. Known-good addresses, existing sessions and API keys keep working.
+- **One shared address** (clients behind a load balancer the core does not trust, NAT): they share the account + address budget, so anybody there can keep an account's password login blocked *from that address* while they keep failing. Configure `LYNDRIX_TRUSTED_PROXIES` so the core sees real client addresses.
+- The counters are **per instance** (only the login form's 5-per-minute counter is shared through the cluster coordinator): with N instances behind the balancer the budgets are up to N times larger.
+
+`LYNDRIX_TRUSTED_PROXIES=*` makes the core believe `X-Forwarded-For` from every
+sender. That is fine while only the load balancer can open a connection to the
+core; if the core port is reachable in any other way (other pods, a published
+port), a client chooses the address the limiters see, and only the per-account
+ceiling above holds. Prefer the balancer's address or CIDR; the preflight
+reports `*` as a warning.
+
 ### External identity linking
 
 Each login resolves to one local profile via a stable identity link

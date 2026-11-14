@@ -1,7 +1,7 @@
 import asyncio
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.api.security import ApiIdentity, require_api_auth, require_permission
@@ -119,17 +119,29 @@ def _user_service():
 def change_password(
     username: str,
     payload: PasswordChangeRequest,
+    request: Request,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     """Self-service for your own account; changing another user's password
     requires the ``admin:write`` permission. The current password is always
-    verified by the service before the change is applied."""
+    verified by the service before the change is applied — as a throttled
+    login attempt, so a wrong one answers 400 and too many wrong ones 429."""
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
+
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Cannot change another user's password")
 
-    ok, msg = _user_service().change_password(
-        username, payload.current_password, payload.new_password
-    )
+    try:
+        ok, msg = _user_service().change_password(
+            username, payload.current_password, payload.new_password,
+            client_ip=client_host(request), raise_rejected=True,
+        )
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 

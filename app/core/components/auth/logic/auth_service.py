@@ -343,9 +343,18 @@ class AuthService:
                     session.commit()
                     log.info(f"UPDATE: Added '{username}' to default group(s) {missing}.")
 
-    def authenticate_user(self, username: str, password: str):
-        """Verifies credentials and returns the User object or None."""
-        log.info(f"AUTH: Login attempt for user: {username}")
+    def verify_local_login(self, username: str, password: str, client_ip: str | None = None):
+        """Check ``username``/``password`` against the LOCAL accounts (blocking).
+
+        The entry point for every local password check that is not the login
+        form: HTTP Basic on API routes and "confirm your current password".
+        Runs as one throttled attempt through ``login_guard`` and returns the
+        ``User`` row, or ``None`` for wrong credentials.
+
+        Raises ``LoginThrottled`` / ``LoginBusy`` (``login_guard.LoginRejected``)
+        when the attempt was not evaluated — answer 429/503, never 401.
+        """
+        from . import login_guard
 
         if not db_instance.SessionLocal:
             log.error("AUTH: Login impossible: Database session unavailable.")
@@ -353,16 +362,32 @@ class AuthService:
 
         with db_instance.SessionLocal() as session:
             user = session.query(User).filter(User.username == username).first()
+        stored_hash = user.hashed_password if user is not None else None
 
-            if not user:
-                log.warning(f"AUTH: Login failed: User '{username}' does not exist.")
-                return None
+        def _check():
+            return user if login_guard.verify_login_password(stored_hash, password) else None
 
-            if verify_password(str(user.hashed_password), password):
-                log.info(f"SUCCESS: Login successful: {username} ({user.full_name})")
-                return user
+        verified = login_guard.guarded_verify(
+            username, password, client_ip, _check,
+            local_username=str(user.username) if user is not None else None,
+        )
+        if verified is None:
+            # repr(): the name is attacker-chosen text and must not forge log lines.
+            log.warning(f"AUTH: Login failed for {username!r} (unknown account or wrong password).")
+        return verified
 
-            log.warning(f"AUTH: Login failed: Incorrect password for '{username}'.")
+    def authenticate_user(self, username: str, password: str, client_ip: str | None = None):
+        """Verifies credentials and returns the User object or None.
+
+        Plugin-facing wrapper around ``verify_local_login`` that keeps the old
+        contract: it never raises, a throttled or busy attempt is ``None``.
+        """
+        from .login_guard import LoginRejected
+
+        try:
+            return self.verify_local_login(username, password, client_ip)
+        except LoginRejected as exc:
+            log.warning(f"AUTH: Login for {username!r} not evaluated: {exc.detail}")
             return None
 
 

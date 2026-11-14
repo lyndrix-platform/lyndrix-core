@@ -125,6 +125,18 @@ class Settings(BaseSettings):
     # Resolution order: this env var > Vault > disabled.
     LYNDRIX_SYSTEM_API_KEY: Optional[str] = None
 
+    # --- PASSWORD LOGIN ---
+    # HTTP Basic (``Authorization: Basic``) against the LOCAL accounts on API
+    # routes. On by default so existing automation keeps working; set to false
+    # once every client uses an API key or a session token. Basic is throttled
+    # like the login form and is never evaluated on the routes that answer
+    # without authentication (/api/health, /api/auth/whoami, /api/events).
+    LYNDRIX_API_BASIC_AUTH: bool = True
+    # Password verifications (Argon2id, 64 MiB each) one process runs at the
+    # same time. More of them wait a few seconds for a free slot and are then
+    # answered 503 + Retry-After — memory stays bounded under a login flood.
+    LYNDRIX_LOGIN_VERIFY_CONCURRENCY: int = 4
+
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
     LYNDRIX_LDAP_URL: Optional[str] = None

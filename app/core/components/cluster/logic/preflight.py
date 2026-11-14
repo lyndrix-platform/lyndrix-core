@@ -170,9 +170,20 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     # 8. trusted proxies
     proxies = (settings.LYNDRIX_TRUSTED_PROXIES or "").strip()
     default_proxies = proxies in ("", "127.0.0.1")
-    if service.saw_forwarded_for and default_proxies:
+    trust_everyone = "*" in {p.strip() for p in proxies.split(",")}
+    if trust_everyone:
+        # Not a failure (the usual Kubernetes setting, and fine while only the
+        # ingress can reach the core) — but the operator has to know what it means.
+        add("trusted_proxies", "warn", "LYNDRIX_TRUSTED_PROXIES is '*' — X-Forwarded-For is believed from every sender",
+            "Whoever reaches the core port directly (other pods, a published port, a NodePort) can send any "
+            "X-Forwarded-For and so choose the client address the login/unseal limiters and the logs see: the "
+            "per-address limits are then free to dodge and only the per-account limit holds. Set "
+            "LYNDRIX_TRUSTED_PROXIES to the address(es) or CIDR of the load balancer / ingress pods, or make sure "
+            "nothing but the load balancer can open a connection to the core (NetworkPolicy, no published port).")
+    elif service.saw_forwarded_for and default_proxies:
         add("trusted_proxies", "warn", "X-Forwarded-For arrives but LYNDRIX_TRUSTED_PROXIES is the default",
-            "The login rate limiter and audit entries see the proxy's IP — set LYNDRIX_TRUSTED_PROXIES to the load balancer address(es) or '*'.")
+            "The login rate limiter and audit entries see the proxy's IP, so all clients share one limiter bucket "
+            "— set LYNDRIX_TRUSTED_PROXIES to the address(es) or CIDR of the load balancer.")
     elif cluster and default_proxies:
         add("trusted_proxies", "warn", "LYNDRIX_TRUSTED_PROXIES is the default (127.0.0.1)",
             "Set it to your load balancer address(es) so forwarded client IPs are honoured.")

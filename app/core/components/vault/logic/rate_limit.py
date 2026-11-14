@@ -6,8 +6,36 @@ identity (client IP or NiceGUI client id). Keeping the state keyed per source
 avoids the cross-session lockout problem of a single global counter.
 """
 
+import ipaddress
 import time
 from collections import defaultdict
+from typing import Optional
+
+
+def normalize_client_address(host: Optional[str]) -> str:
+    """Limiter key for a client address (``request.client.host``).
+
+    * IPv6 is reduced to its /64 network: one subscriber controls a whole /64,
+      so per-address budgets keyed on single addresses would be free to dodge.
+    * An IPv4-mapped IPv6 address counts as the IPv4 address.
+    * Anything that is not an IP address (unix socket, test client) is kept as
+      an opaque, length-bounded name; a missing address is ``"unknown"``.
+
+    The address is whatever uvicorn resolved from the trusted proxies
+    (``LYNDRIX_TRUSTED_PROXIES``); this function never looks at headers itself.
+    """
+    raw = (host or "").strip()
+    if not raw:
+        return "unknown"
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw[:64].lower()
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network((ip, 64), strict=False))
+    return str(ip)
 
 
 class SlidingWindowRateLimiter:

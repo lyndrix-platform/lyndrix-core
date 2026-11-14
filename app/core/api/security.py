@@ -12,11 +12,17 @@ caller:
                          If neither is configured the method is DISABLED: no empty
                          or implicit key is ever accepted, so a fresh install with
                          the key unset is simply inaccessible via API key.
-  2. HTTP Basic       — ``Authorization: Basic <base64(user:pass)>`` validated
-                         against the local IAM via ``auth_service.authenticate_user``.
-  3. Session cookie   — an already-authenticated NiceGUI dashboard session
-                         (``core.session.is_authenticated``), when the request is
-                         processed inside NiceGUI's storage context.
+  2. Per-user API key — same headers, a ``lyk_…`` key or session token from the
+                         key store (``api_key_service``).
+  3. HTTP Basic       — ``Authorization: Basic <base64(user:pass)>`` validated
+                         against the LOCAL accounts via
+                         ``auth_service.verify_local_login``. Throttled like the
+                         login form (429/503 + ``Retry-After`` instead of 401
+                         when an attempt is not evaluated), only on routes that
+                         REQUIRE authentication, and switched off with
+                         ``LYNDRIX_API_BASIC_AUTH=false``. Not advertised in
+                         ``WWW-Authenticate`` — a browser must never prompt for
+                         it and then replay the password with every request.
 
 Usage in a route::
 
@@ -280,10 +286,28 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
     )
 
 
+def basic_auth_enabled() -> bool:
+    """Whether HTTP Basic is accepted on API routes (``LYNDRIX_API_BASIC_AUTH``)."""
+    try:
+        from config import settings
+
+        return bool(getattr(settings, "LYNDRIX_API_BASIC_AUTH", True))
+    except Exception:  # pragma: no cover - defensive
+        return True
+
+
 def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
-    """Validate HTTP Basic credentials against the local IAM."""
+    """Validate HTTP Basic credentials against the local IAM.
+
+    Every attempt is one throttled login attempt (``login_guard``). When it is
+    not evaluated — too many failures, or no verification slot — this raises
+    429/503 with ``Retry-After``: answering 401 would tell a correctly
+    configured client that its password is wrong.
+    """
     auth = request.headers.get("Authorization", "")
     if not auth.lower().startswith("basic "):
+        return None
+    if not basic_auth_enabled():
         return None
 
     try:
@@ -295,10 +319,18 @@ def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
         return None
     username, password = raw.split(":", 1)
 
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
+
     try:
         from core.components.auth.logic.auth_service import auth_service
 
-        user = auth_service.authenticate_user(username, password)
+        user = auth_service.verify_local_login(username, password, client_host(request))
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"API basic-auth check failed: {exc}")
         return None
@@ -340,15 +372,23 @@ def _try_session(request: Request) -> Optional[ApiIdentity]:
     return None
 
 
-def authenticate_request(request: Request) -> Optional[ApiIdentity]:
+def authenticate_request(request: Request, *, allow_basic: bool = True) -> Optional[ApiIdentity]:
     """
     Attempt every supported auth method and return the first identity found.
 
-    Returns ``None`` when the request carries no valid credentials.
+    Returns ``None`` when the request carries no valid credentials. A throttled
+    HTTP Basic attempt raises ``HTTPException`` (429/503 + ``Retry-After``).
+
+    ``allow_basic=False`` skips HTTP Basic: routes that also answer anonymous
+    callers must not check passwords, or they become an oracle that tells
+    "right" from "wrong" without ever answering 401.
     """
     # TODO(agent): re-add a session method here once React has a proper
     # JWT/cookie session that works outside the NiceGUI storage context.
-    for method in (_try_api_key, _try_user_api_key, _try_basic_auth):
+    methods = [_try_api_key, _try_user_api_key]
+    if allow_basic:
+        methods.append(_try_basic_auth)
+    for method in methods:
         identity = method(request)
         if identity is not None:
             return identity
@@ -370,14 +410,21 @@ def require_api_auth(request: Request) -> ApiIdentity:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
-            headers={"WWW-Authenticate": 'Bearer, Basic realm="Lyndrix"'},
+            # Bearer only: advertising Basic makes browsers prompt for a
+            # password and attach it to every later request to this origin.
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return identity
 
 
 def optional_api_auth(request: Request) -> Optional[ApiIdentity]:
-    """FastAPI dependency: return an identity if present, otherwise ``None``."""
-    return authenticate_request(request)
+    """FastAPI dependency: return an identity if present, otherwise ``None``.
+
+    API keys and session tokens only. HTTP Basic is deliberately ignored here
+    (the caller is treated as anonymous): these routes never answer 401, so
+    checking a password on them would be an unthrottled yes/no oracle.
+    """
+    return authenticate_request(request, allow_basic=False)
 
 
 def require_permission(permission: str):

@@ -7,6 +7,7 @@
     "remember": "Remember me",
     "failed": "Sign-in failed: incorrect user or password.",
     "locked": "Account locked.",
+    "throttled": "Too many failed sign-in attempts. Please try again in %{seconds} seconds.",
     "empty_creds": "Please enter username and password.",
     "welcome": "Welcome back, %{name}!",
     "or": "or",

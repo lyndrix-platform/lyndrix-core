@@ -11,6 +11,9 @@ class LocalProvider(AuthProvider):
     """
     Authenticates users against the local Lyndrix database using Argon2 hashes.
     This is always the fallback provider and requires no external infrastructure.
+
+    Throttling is NOT done here: the provider chain runs as one throttled
+    attempt in ``provider_registry.authenticate`` (see ``login_guard``).
     """
 
     provider_id = "local"
@@ -20,13 +23,12 @@ class LocalProvider(AuthProvider):
         from core.components.database.logic.db_service import db_instance
         return db_instance.SessionLocal is not None
 
-    async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
+    def _authenticate_blocking(self, username: str, password: str) -> Optional[AuthResult]:
+        """Row lookup + Argon2 comparison (worker thread)."""
         # Local imports to avoid circular dependencies at module load time
         from core.components.database.logic.db_service import db_instance
+        from core.components.auth.logic.login_guard import verify_login_password
         from core.components.auth.logic.models import User
-        from core.components.auth.logic.hashing import verify_password
-
-        # TODO: add throttling / backoff for repeated login attempts before calling the password verifier.
 
         if not db_instance.SessionLocal:
             log.error("AUTH:Local: Database session unavailable.")
@@ -40,7 +42,7 @@ class LocalProvider(AuthProvider):
 
             # Snapshot the fields we need before leaving the session scope so the
             # (slow) hash verification can run without holding the DB session.
-            hashed_password = str(user.hashed_password)
+            hashed_password = user.hashed_password
             result = AuthResult(
                 username=user.username,
                 full_name=user.full_name or username,
@@ -49,12 +51,17 @@ class LocalProvider(AuthProvider):
                 provider=self.provider_id,
             )
 
-        # Argon2 verification is deliberately CPU/memory-heavy; run it off the
-        # event loop so a login (or API basic-auth) never blocks the loop and
-        # stalls every other connected client (NiceGUI "connection lost").
-        if await asyncio.to_thread(verify_password, hashed_password, password):
-            log.info(f"AUTH:Local: Login successful for '{username}'.")
+        # Bounded: at most LYNDRIX_LOGIN_VERIFY_CONCURRENCY Argon2 runs at a
+        # time; raises LoginBusy when no slot frees up (the chain passes it on).
+        if verify_login_password(hashed_password, password):
+            log.info(f"AUTH:Local: Login successful for '{result.username}'.")
             return result
 
-        log.warning(f"AUTH:Local: Incorrect password for '{username}'.")
+        log.warning(f"AUTH:Local: Incorrect password for '{result.username}'.")
         return None
+
+    async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
+        # The row lookup is blocking pymysql and Argon2 is deliberately
+        # CPU/memory-heavy: both run off the event loop so a login never stalls
+        # every other connected client.
+        return await asyncio.to_thread(self._authenticate_blocking, username, password)

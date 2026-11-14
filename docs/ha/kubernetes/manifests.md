@@ -91,7 +91,7 @@ data:
   LYNDRIX_CLUSTER_MODE: "cluster"
   LYNDRIX_INSTANCE_ROLES: "api,leader"      # no "runner" — the IaC Orchestrator needs a Docker host
   LYNDRIX_UI_ENGINE: "api"                  # React is served by the lyndrix-ui pods
-  LYNDRIX_TRUSTED_PROXIES: "*"
+  LYNDRIX_TRUSTED_PROXIES: "*"              # better: the ingress pod CIDR — "*" lets every pod forge X-Forwarded-For
   LYNDRIX_DRAIN_SECONDS: "10"
   DB_HOST: "lyndrix-db"
   DB_NAME: "lyndrix_db"

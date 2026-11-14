@@ -48,6 +48,25 @@ def _hash(password: str) -> str:
     return _HASHES[password]
 
 
+@pytest.fixture(autouse=True)
+def fresh_login_guard():
+    """Every test starts with an empty throttle, verdict memory and shared counter."""
+    from core.components.auth.logic import login_guard
+    from core.components.cluster.logic.cluster_service import cluster_service
+
+    def _reset():
+        login_guard.reset_for_tests()
+        # The login form's burst counter lives in the coordinator KV (in memory
+        # for the single-instance "local" driver the tests run with).
+        kv = getattr(cluster_service.coordinator, "_kv", None)
+        if isinstance(kv, dict):
+            kv.clear()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture()
 def auth_db(monkeypatch):
     """In-memory IAM database with the built-in groups and three accounts.
@@ -90,6 +109,36 @@ def auth_db(monkeypatch):
 def passwords():
     """Plaintext dummy passwords of the seeded accounts."""
     return dict(PASSWORDS)
+
+
+@pytest.fixture()
+def fast_argon2(monkeypatch):
+    """Replace the Argon2 comparison of the login path by a table lookup.
+
+    Tests that fire dozens of wrong passwords would otherwise spend ~100 ms on
+    each. Returns the list of (hash, password) comparisons that were made.
+    """
+    from core.components.auth.logic import login_guard
+
+    calls: list[tuple[str, str]] = []
+
+    def _verify(stored_hash: str, password: str) -> bool:
+        calls.append((stored_hash, password))
+        return _HASHES.get(password) == stored_hash
+
+    monkeypatch.setattr(login_guard, "verify_password", _verify)
+    return calls
+
+
+@pytest.fixture()
+def client_at(app):
+    """A test client that connects from a given address."""
+    from fastapi.testclient import TestClient
+
+    def _client(address: str):
+        return TestClient(app, raise_server_exceptions=False, client=(address, 50000))
+
+    return _client
 
 
 @pytest.fixture()

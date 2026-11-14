@@ -39,6 +39,7 @@ from core.api import (
     require_permission,
     system_api_key_configured,
 )
+from core.api.security import basic_auth_enabled
 from core.api.permissions_api import permissions_router
 from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
@@ -131,11 +132,6 @@ def _custom_openapi():
                 "scheme": "bearer",
                 "description": "Send the API key as a Bearer token.",
             },
-            "BasicAuth": {
-                "type": "http",
-                "scheme": "basic",
-                "description": "Dashboard username and password (local IAM).",
-            },
         }
     )
     # Offered globally so the Authorize button applies the chosen credential to
@@ -143,8 +139,15 @@ def _custom_openapi():
     schema["security"] = [
         {"ApiKeyHeader": []},
         {"BearerAuth": []},
-        {"BasicAuth": []},
     ]
+    if basic_auth_enabled():
+        # Only advertised while LYNDRIX_API_BASIC_AUTH is on.
+        components["securitySchemes"]["BasicAuth"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "Username and password of a LOCAL account (throttled; prefer an API key).",
+        }
+        schema["security"].append({"BasicAuth": []})
     app.openapi_schema = schema
     return schema
 
@@ -786,7 +789,12 @@ async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
 
     Returns whether the request is authenticated, by which method, and whether
     the system API key mechanism is enabled on this instance. Useful for clients
-    to verify their credentials without hitting a protected endpoint.
+    to verify an API key or session token without hitting a protected endpoint.
+
+    HTTP Basic credentials are NOT evaluated here (the caller counts as
+    anonymous): this route never answers 401, so checking a password on it
+    would be a password oracle. Verify Basic credentials against a protected
+    route such as ``GET /api/auth/me``.
     """
     return {
         "authenticated": identity is not None,
