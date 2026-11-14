@@ -1077,12 +1077,13 @@ class PluginService:
             # Extraction is CPU + IO heavy for large archives — run it off the loop.
             extracted_dir = await asyncio.to_thread(_extract_archive)
 
-            # 4. Dependency Management in Staging
-            await self._install_requirements(extracted_dir)
-
-            # 4b. Identity verification — when upgrading an existing plugin we
+            # 4. Identity verification — when upgrading an existing plugin we
             # know the expected manifest.id from the installed copy. Refuse the
-            # swap if the freshly downloaded archive declares a different id.
+            # archive if it declares a different id. This runs BEFORE the
+            # dependency install on purpose (SC-03): pip may execute build code
+            # of the archive's dependencies, and that must not happen for an
+            # archive that is not the plugin being upgraded. The check is
+            # static (AST), so it needs no dependencies.
             if upgrade and plugin_path.exists():
                 expected_id = self._read_manifest_id(plugin_path)
                 if expected_id and not self._verify_plugin_identity(
@@ -1098,6 +1099,9 @@ class PluginService:
                     )
                     await self._report_operation_failure(safe_repo_name, "identity_mismatch")
                     return False
+
+            # 4b. Dependency Management in Staging
+            await self._install_requirements(extracted_dir)
 
             # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes).
             # Runs off the event loop: staging is a tempdir that may be on a

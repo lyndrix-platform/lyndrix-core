@@ -120,3 +120,32 @@ def test_stale_backup_is_not_restored_over_a_working_plugin(tmp_path):
     PluginService._restore_after_failed_install(current, stale, True, False)
 
     assert PluginService()._read_manifest_version(current) == "3.0.0"
+
+
+# --- SC-03 remainder: identity before dependencies -------------------------------
+
+def test_identity_mismatch_aborts_the_upgrade_before_pip_runs(tmp_path, monkeypatch):
+    pip = FakePip()
+    svc = service_on(tmp_path, monkeypatch, pip)
+    current = _existing_version(svc)
+    # The installed plugin has another manifest id than the downloaded archive.
+    (current / "entrypoint.py").write_text(
+        ENTRYPOINT.format(version="1.0.0").replace("lyndrix.plugin.sample", "lyndrix.plugin.other"))
+    install_provider(monkeypatch, plugin_archive(version="2.0.0"))
+
+    assert _install(svc, upgrade=True) is False
+    assert pip.calls == []                       # no dependency code was fetched or built
+    assert _leftovers(svc) == ["sample_plugin"]
+    assert svc._read_manifest_version(current) == "1.0.0"
+
+
+def test_matching_identity_still_installs_dependencies_and_upgrades(tmp_path, monkeypatch):
+    pip = FakePip()
+    svc = service_on(tmp_path, monkeypatch, pip)
+    _existing_version(svc)
+    install_provider(monkeypatch, plugin_archive(version="2.0.0"))
+
+    assert _install(svc, upgrade=True) is True
+    assert len(pip.calls) == 1
+    assert svc._read_manifest_version(svc.plugin_dir / "sample_plugin") == "2.0.0"
+    assert svc.previous_version("sample_plugin") == "1.0.0"
