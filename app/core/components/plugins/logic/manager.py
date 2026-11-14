@@ -962,6 +962,14 @@ class ModuleManager:
                 elif entry.get("status") != "active":
                     log.info(f"DB_RESTORE: Activating plugin '{module_id}'")
                     self._execute_setup(module_id)
+            elif self._is_running(entry):
+                # The row says "disabled" but setup() ran here (a peer disabled
+                # the plugin, or the row changed while this instance was away).
+                # Flipping the status alone left its tasks, subscriptions, leases
+                # and routes alive behind a "disabled" label — stop it properly
+                # (teardown awaited, see _stop_module_async).
+                log.info(f"DB_RESTORE: Plugin '{module_id}' is disabled in plugin_states — stopping it.")
+                await self.set_module_active(module_id, False, persist=False)
             else:
                 if entry.get("status") != "disabled":
                     log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
@@ -970,6 +978,16 @@ class ModuleManager:
         self._activate_unblocked()
 
         await self._converge_after_restore()
+
+    @staticmethod
+    def _is_running(entry: dict) -> bool:
+        """Did ``setup()`` run (or is it running) for this entry? True for
+        ``active``/``remote`` and for an async setup still in flight — not for
+        a freshly loaded entry that merely waits for its first activation."""
+        if entry.get("status") in ("active", "remote"):
+            return True
+        setup_task = entry.get("setup_task")
+        return setup_task is not None and not setup_task.done()
 
     def _restore_row_states(self, loaded: list) -> dict:
         """Bring ``plugin_states`` in line with the plugins loaded here and return

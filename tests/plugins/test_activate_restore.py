@@ -204,3 +204,40 @@ def test_stale_setup_task_cannot_flip_a_disabled_or_reloaded_entry(mgr):
         assert mgr.registry["p.b"]["error_message"] is None
 
     asyncio.run(run())
+
+
+def test_running_plugin_is_stopped_when_its_row_says_inactive(mgr):
+    """Step 2 used to flip the status to "disabled" only: tasks, subscriptions,
+    leases and routes of the plugin stayed alive behind the label."""
+    log = []
+
+    async def run():
+        async def teardown(ctx):
+            await asyncio.sleep(0.01)
+            log.append("teardown")
+
+        async def worker():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                log.append("worker cancelled")
+                raise
+
+        entry = _entry("p.live", "active", lambda ctx: None)
+        entry["module"].teardown = teardown
+        entry["context"].create_task(worker(), name="p.live:worker")
+        mgr.registry["p.live"] = entry
+        # never set up (fresh load) and disabled in the row: no teardown, just the label
+        fresh = _entry("p.fresh", "initializing", lambda ctx: log.append("fresh setup"))
+        fresh["module"].teardown = lambda ctx: log.append("fresh teardown")
+        mgr.registry["p.fresh"] = fresh
+        mgr.row_states = {"p.live": False, "p.fresh": False}
+        await asyncio.sleep(0)
+
+        await mgr._activate_saved_plugins()
+        await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert log == ["teardown", "worker cancelled"]
+    assert mgr.registry["p.live"]["status"] == "disabled"
+    assert mgr.registry["p.fresh"]["status"] == "disabled"
