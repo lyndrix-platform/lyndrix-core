@@ -1575,7 +1575,12 @@ class ModuleManager:
 
         # --- ROBUST UNLOAD: Purge all submodules of the plugin from memory ---
         base_package_name = ".".join(entry["module"].__name__.split('.')[:-1])
-        modules_to_delete = [m for m in sys.modules if m.startswith(base_package_name)]
+        # "." boundary: `plugins.monitoring` must not take `plugins.monitoring_agent`
+        # (a running sibling) with it.
+        modules_to_delete = [
+            m for m in sys.modules
+            if m == base_package_name or m.startswith(base_package_name + ".")
+        ]
         # The plugin's SQLAlchemy models stay registered on the shared Base after
         # the module objects are gone; a re-import of the same folder (reload,
         # auto-revert, cluster reconcile) then fails with "Table '…' is already
