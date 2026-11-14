@@ -720,10 +720,18 @@ class ModuleManager:
 
         if hasattr(module, 'setup'):
             if inspect.iscoroutinefunction(module.setup):
-                bus.create_tracked_task(
-                    self._safe_async_setup(module, ctx, module_id),
-                    name=f"module_setup:{module_id}"
-                )
+                # An async setup() is still running: status stays "initializing"
+                # until it finishes, and every further activation pass (the
+                # restore loop, the pass after each install event) must not
+                # start it a second time.
+                running = entry.get("setup_task")
+                if running is not None and not running.done():
+                    return
+                coro = self._safe_async_setup(module, ctx, module_id)
+                # Owned by the context so dispose() (disable/unload/reload)
+                # cancels a setup that is still in flight.
+                create_task = getattr(ctx, "create_task", None) or bus.create_tracked_task
+                entry["setup_task"] = create_task(coro, name=f"module_setup:{module_id}")
             else:
                 try:
                     module.setup(ctx)
@@ -816,19 +824,37 @@ class ModuleManager:
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
 
+    def _owns_setup(self, module_id: str, ctx) -> bool:
+        """Does the running task still own the setup of ``module_id``?
+
+        False once the entry was disabled, unloaded or replaced by a reload
+        while ``setup()`` was awaiting — a finishing stale task must not flip
+        the status of (or mount statics for) a disabled entry or the new
+        incarnation.
+        """
+        entry = self.registry.get(module_id)
+        if not entry or entry.get("context") is not ctx or entry.get("status") != "initializing":
+            return False
+        return entry.get("setup_task") in (None, asyncio.current_task())
+
     async def _safe_async_setup(self, module, ctx, module_id):
         try:
             await module.setup(ctx)
-            if module_id in self.registry:
-                self.registry[module_id]["status"] = "active"
-                self._mount_plugin_statics(module_id)
+            if not self._owns_setup(module_id, ctx):
+                log.info(f"SETUP: async setup of '{module_id}' finished after it was disabled/reloaded — ignored.")
+                return
+            self.registry[module_id]["status"] = "active"
+            self._mount_plugin_statics(module_id)
+            # Plugins parked as "blocked" because they depend on this one.
+            self._activate_unblocked()
         except Exception as e:
             log.error(f"RUNTIME_ERROR: Async setup failed for '{module_id}': {e}")
-            if module_id in self.registry:
-                self.registry[module_id]["status"] = "failed"
-                self.registry[module_id]["error_message"] = str(e)
-                if hasattr(ctx, "reset_runtime"):
-                    ctx.reset_runtime()
+            if not self._owns_setup(module_id, ctx):
+                return
+            self.registry[module_id]["status"] = "failed"
+            self.registry[module_id]["error_message"] = str(e)
+            if hasattr(ctx, "reset_runtime"):
+                ctx.reset_runtime()
             # Emit on the global bus directly (bypass plugin permissions in ctx).
             try:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
@@ -876,8 +902,6 @@ class ModuleManager:
             custom_repo_service.ensure_schema()
         except Exception as exc:
             log.warning(f"PLUGIN_MANAGER: custom repo schema bootstrap failed: {exc}")
-
-        enabled_plugin_ids = []
 
         # Rows for plugins seen for the first time are inserted one per
         # transaction up front: two instances booting together may both find a
@@ -935,7 +959,6 @@ class ModuleManager:
             manifest = entry["manifest"]
             entry["persisted"] = True
             if row_states[module_id]:
-                enabled_plugin_ids.append(module_id)
                 if not self._check_dependencies_met(manifest):
                     entry["status"] = "blocked"
                     log.warning(
@@ -949,30 +972,31 @@ class ModuleManager:
                     log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
                     entry["status"] = "disabled"
 
-        pending_enabled = set(enabled_plugin_ids)
-        while pending_enabled:
+        self._activate_unblocked()
+
+        await self._converge_after_restore()
+
+    def _activate_unblocked(self) -> None:
+        """Set up every plugin parked as ``blocked`` whose dependencies became
+        active, repeating until no further plugin can start.
+
+        Only ``blocked`` entries are retried. ``degraded`` (critical manifest
+        issue), ``failed`` and ``initializing`` (async setup in flight) are left
+        alone: resetting those to "initializing" used to slip a degraded plugin
+        past the guard in ``_execute_setup`` and ran an async ``setup()`` twice.
+        """
+        progressed = True
+        while progressed:
             progressed = False
-            for module_id in list(pending_enabled):
-                entry = self.registry.get(module_id)
-                if not entry or entry.get("status") == "active":
-                    pending_enabled.discard(module_id)
+            for module_id, entry in list(self.registry.items()):
+                if entry.get("status") != "blocked":
                     continue
-
-                manifest = entry["manifest"]
-                if not self._check_dependencies_met(manifest):
-                    entry["status"] = "blocked"
+                if not self._check_dependencies_met(entry["manifest"]):
                     continue
-
                 log.info(f"DB_RESTORE: Activating dependency-ready plugin '{module_id}'")
                 entry["status"] = "initializing"
                 self._execute_setup(module_id)
-                pending_enabled.discard(module_id)
                 progressed = True
-
-            if not progressed:
-                break
-
-        await self._converge_after_restore()
 
     async def _converge_after_restore(self) -> None:
         """Bring this instance to the desired plugin set after the saved states
@@ -1040,6 +1064,9 @@ class ModuleManager:
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
         else:
             entry["status"] = "disabled"
+            # A still-running async setup() is cancelled by dispose() below and
+            # no longer owns this entry (see _owns_setup).
+            entry.pop("setup_task", None)
             log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
             # "Soft" unload: remove UI and call teardown, but keep module in memory.
             self._teardown_ui(module_id)
