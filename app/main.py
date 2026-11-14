@@ -649,7 +649,9 @@ async def set_runtime_config(
     from core.components.settings.logic.system_config_service import system_config_service
 
     try:
-        result = system_config_service.apply(
+        # Vault read-modify-write (sync hvac) → off the event loop.
+        result = await asyncio.to_thread(
+            system_config_service.apply,
             updates,
             persist=payload.persist_in_vault,
             apply_runtime=payload.apply_runtime,

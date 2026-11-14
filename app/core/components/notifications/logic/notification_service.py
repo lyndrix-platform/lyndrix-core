@@ -518,6 +518,68 @@ class NotificationService:
             except Exception as exc:
                 log.debug("broadcast_toast: skipped a client: %s", exc)
 
+    # --- permission-gated toasts, without DB work on the event loop ---------
+
+    @staticmethod
+    def _session_identity() -> tuple[str, bool]:
+        """Inside a ``with client:`` block: ``(username, is_superadmin)`` of that session."""
+        from nicegui import app as _app
+
+        roles = list(_app.storage.user.get("roles", []) or [])
+        return str(_app.storage.user.get("username", "") or ""), "superadmin" in roles
+
+    def _connected_sessions(self) -> list[tuple[Any, str, bool]]:
+        """``(client, username, is_superadmin)`` for every connected NiceGUI client."""
+        sessions = []
+        for client in list(Client.instances.values()):
+            try:
+                if client.has_socket_connection:
+                    with client:
+                        sessions.append((client, *self._session_identity()))
+            except Exception as exc:
+                log.debug("broadcast_toast: skipped a client: %s", exc)
+        return sessions
+
+    @staticmethod
+    def _notify_client(client, message: str, toast_type: str) -> None:
+        with client:
+            ui.notify(message, type=toast_type, position="top-right", multi_line=True, timeout=3.0)
+
+    async def broadcast_toast_async(
+        self, message: str, type_: str, *, required_permission: str | None = None
+    ) -> None:
+        """``broadcast_toast`` for async callers (the notification router).
+
+        The sync variant resolves the permission per client on the event loop
+        (a SELECT whenever the 5 s access cache misses). Here the session users
+        are collected first, their permissions are resolved in ONE worker-thread
+        call, and only the notifying happens on the loop.
+        """
+        if not required_permission:
+            self.broadcast_toast(message, type_)
+            return
+        toast_type = type_ if type_ in ["positive", "negative", "warning", "info"] else "info"
+        sessions = self._connected_sessions()
+        usernames = {user for _client, user, is_super in sessions if user and not is_super}
+
+        def _resolve() -> set[str]:
+            from core.components.auth.logic import access_service
+
+            return {u for u in usernames if access_service.username_has_permission(u, required_permission)}
+
+        try:
+            permitted = await asyncio.to_thread(_resolve) if usernames else set()
+        except Exception as exc:
+            log.debug("broadcast_toast: permission resolution failed (%s) — superadmins only", exc)
+            permitted = set()
+        for client, username, is_super in sessions:
+            if not (is_super or username in permitted):
+                continue
+            try:
+                self._notify_client(client, message, toast_type)
+            except Exception as exc:
+                log.debug("broadcast_toast: skipped a client: %s", exc)
+
     def remove_notification(self, notif_id: str) -> None:
         """System-level hard delete of a notification for *all* users.
 

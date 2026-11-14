@@ -605,7 +605,9 @@ class NotificationRouterService:
 
         if decl.internal_toast:
             try:
-                notification_service.broadcast_toast(
+                # Async variant: permission lookups for the audience gate run
+                # off the event loop.
+                await notification_service.broadcast_toast_async(
                     message, legacy_type,
                     required_permission=state.required_permission,
                 )

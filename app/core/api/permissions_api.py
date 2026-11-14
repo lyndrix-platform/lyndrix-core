@@ -45,6 +45,9 @@ from core.logger import get_logger
 
 log = get_logger("Core:PermissionsAPI")
 
+# Handlers are plain ``def`` on purpose: they call the sync group/user/role
+# services (SQLAlchemy). FastAPI runs ``def`` handlers in its threadpool; as
+# ``async def`` every admin CRUD call blocked the event loop for its DB round trips.
 permissions_router = APIRouter(prefix="/api/permissions", tags=["Permissions"])
 
 
@@ -171,7 +174,7 @@ def _is_superadmin(identity: ApiIdentity) -> bool:
     summary="List all known permission definitions",
     response_model=Dict[str, object],
 )
-async def list_permission_catalog(
+def list_permission_catalog(
     identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
     """Return every permission id the system knows about (route/plugin/feature/api)."""
@@ -232,7 +235,7 @@ def _implications(ids: List[str]) -> Dict[str, List[str]]:
 
 # ── Roles (manifest-declared bundles — read-only reference) ─────────────────
 @permissions_router.get("/roles", summary="List manifest-declared roles")
-async def list_roles(identity: ApiIdentity = Depends(require_permission("admin:read"))):
+def list_roles(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     """Read-only: roles are registry metadata, not assignable entities.
 
     Their effect (permissions attached to auto_map groups) is applied once via
@@ -260,13 +263,13 @@ async def list_roles(identity: ApiIdentity = Depends(require_permission("admin:r
 
 # ── Groups ───────────────────────────────────────────────────────────────────
 @permissions_router.get("/groups", summary="List groups and their permissions")
-async def list_groups(identity: ApiIdentity = Depends(require_permission("admin:read"))):
+def list_groups(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     groups = [_group_to_out(g).model_dump() for g in _group_service().get_all()]
     return {"status": "ok", "count": len(groups), "groups": groups}
 
 
 @permissions_router.post("/groups", summary="Create a group")
-async def create_group(
+def create_group(
     payload: GroupCreateRequest,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
@@ -290,7 +293,7 @@ async def create_group(
 
 
 @permissions_router.get("/groups/{group_id}", summary="Read a single group")
-async def get_group(
+def get_group(
     group_id: int,
     identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
@@ -301,7 +304,7 @@ async def get_group(
 
 
 @permissions_router.patch("/groups/{group_id}", summary="Update a group")
-async def update_group(
+def update_group(
     group_id: int,
     payload: GroupUpdateRequest,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -334,7 +337,7 @@ async def update_group(
 
 
 @permissions_router.delete("/groups/{group_id}", summary="Delete a group")
-async def delete_group(
+def delete_group(
     group_id: int,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
@@ -359,7 +362,7 @@ async def delete_group(
 @permissions_router.get(
     "/groups/{group_id}/roles", summary="List role ids assigned to a group"
 )
-async def get_group_roles(
+def get_group_roles(
     group_id: int,
     identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
@@ -372,7 +375,7 @@ async def get_group_roles(
 @permissions_router.post(
     "/groups/{group_id}/roles/{role_id}", summary="Assign a registered role to a group"
 )
-async def assign_group_role(
+def assign_group_role(
     group_id: int,
     role_id: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -401,7 +404,7 @@ async def assign_group_role(
 @permissions_router.delete(
     "/groups/{group_id}/roles/{role_id}", summary="Unassign a role from a group"
 )
-async def unassign_group_role(
+def unassign_group_role(
     group_id: int,
     role_id: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -432,7 +435,7 @@ async def unassign_group_role(
 @permissions_router.post(
     "/groups/{group_id}/members/{username}", summary="Add a user to a group"
 )
-async def add_group_member(
+def add_group_member(
     group_id: int,
     username: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -465,7 +468,7 @@ async def add_group_member(
 @permissions_router.delete(
     "/groups/{group_id}/members/{username}", summary="Remove a user from a group"
 )
-async def remove_group_member(
+def remove_group_member(
     group_id: int,
     username: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -496,7 +499,7 @@ async def remove_group_member(
 @permissions_router.get(
     "/users/{username}", summary="Effective permissions for a user"
 )
-async def get_user_permissions(
+def get_user_permissions(
     username: str,
     identity: ApiIdentity = Depends(require_permission("admin:read")),
 ):
@@ -584,7 +587,7 @@ def _assign_user_role(username: str, role_id: str, identity: ApiIdentity, *, add
 @permissions_router.post(
     "/users/{username}/roles/{role_id}", summary="Assign a registry role directly to a user (core 1.8)"
 )
-async def assign_user_role(
+def assign_user_role(
     username: str,
     role_id: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -595,7 +598,7 @@ async def assign_user_role(
 @permissions_router.delete(
     "/users/{username}/roles/{role_id}", summary="Remove a directly assigned registry role from a user"
 )
-async def unassign_user_role(
+def unassign_user_role(
     username: str,
     role_id: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -606,7 +609,7 @@ async def unassign_user_role(
 @permissions_router.put(
     "/users/{username}/extra", summary="Replace a user's direct permission grants"
 )
-async def set_user_extra_permissions(
+def set_user_extra_permissions(
     username: str,
     payload: ExtraPermissionsRequest,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
@@ -632,7 +635,7 @@ async def set_user_extra_permissions(
     "/users/{username}/extra/{permission:path}",
     summary="Grant a single direct permission to a user",
 )
-async def add_user_extra_permission(
+def add_user_extra_permission(
     username: str,
     permission: str,
     allow_unknown: bool = False,
@@ -659,7 +662,7 @@ async def add_user_extra_permission(
     "/users/{username}/extra/{permission:path}",
     summary="Revoke a single direct permission from a user",
 )
-async def remove_user_extra_permission(
+def remove_user_extra_permission(
     username: str,
     permission: str,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
