@@ -113,7 +113,7 @@ class DatabaseService:
         return self._max_retries
 
     @contextmanager
-    def advisory_lock(self, name: str, timeout: int = 60) -> Iterator[bool]:
+    def advisory_lock(self, name: str, timeout: int = 60, *, warn: bool = True) -> Iterator[bool]:
         """Serialize a critical section across core instances with MariaDB ``GET_LOCK``.
 
         Used around bootstrap DDL and seeds so two instances booting at the same
@@ -122,6 +122,10 @@ class DatabaseService:
         duration of the block. Yields ``True`` when the lock was obtained,
         ``False`` on timeout or on non-MySQL dialects (SQLite tests) — callers
         proceed either way; the lock only narrows the race window.
+
+        Callers that must NOT run unlocked on MySQL (they skip and retry later
+        instead) pass ``warn=False`` and check the yielded value themselves, so
+        the log does not claim "continuing unlocked".
         """
         engine = self.engine
         if engine is None or engine.dialect.name not in ("mysql", "mariadb"):
@@ -137,7 +141,7 @@ class DatabaseService:
                 acquired = bool(conn.execute(text("SELECT GET_LOCK(:n, :t)"), {"n": name, "t": timeout}).scalar())
             except Exception as exc:
                 log.warning(f"DATABASE: GET_LOCK('{name}') failed ({exc}) — continuing unlocked")
-            if not acquired:
+            if not acquired and warn:
                 log.warning(f"DATABASE: could not obtain lock '{name}' within {timeout}s — continuing unlocked")
             yield acquired
         finally:
