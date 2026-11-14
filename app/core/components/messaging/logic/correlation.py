@@ -73,10 +73,11 @@ class CorrelationStore:
         if not session:
             return
         try:
-            # Create table (idempotent — checkfirst=True)
-            PendingActionRecord.__table__.create(
-                bind=db_instance.engine, checkfirst=True
-            )
+            # Create the table once, under the cluster bootstrap lock (instances
+            # booting together used to race the CREATE → error 1050).
+            from core.components.database.logic.tx import ensure_table_once
+
+            ensure_table_once(PendingActionRecord.__table__)
             # Reload unresolved, non-expired rows
             now = datetime.now(timezone.utc)
             rows = (

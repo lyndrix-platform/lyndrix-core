@@ -17,7 +17,9 @@ dialects (SQLite in tests) the helpers degrade to a plain session.
 from __future__ import annotations
 
 import random
+import threading
 import time
+import weakref
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional, TypeVar
 
@@ -135,3 +137,37 @@ def run_with_retry(
                 raise
             time.sleep(base_delay * (2 ** (attempt - 1)) * random.uniform(0.5, 1.5))
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+# Tables already ensured, per engine (a new engine after a reconnect/reconfigure
+# is checked again). Guarded by a lock: callers run in worker threads.
+_ensured_tables: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_ensured_lock = threading.Lock()
+
+
+def ensure_table_once(table) -> bool:
+    """Create ``table`` if it is missing — once per engine, cluster-safe.
+
+    ``table.create(checkfirst=True)`` costs an information_schema round trip on
+    every call and races between instances booting together (error 1050). This
+    runs it a single time per engine under the cluster-wide bootstrap lock and
+    treats a lost race as "a peer created it". Returns ``False`` when the
+    database is not available or the DDL failed (the next call tries again).
+    """
+    engine = db_instance.engine
+    if engine is None:
+        return False
+    with _ensured_lock:
+        if table.name in _ensured_tables.get(engine, ()):
+            return True
+    try:
+        with db_instance.advisory_lock("lyndrix_bootstrap"):
+            table.create(bind=engine, checkfirst=True)
+    except Exception as exc:
+        if not is_ddl_race(exc):
+            log.error(f"DATABASE: could not ensure table '{table.name}': {exc}")
+            return False
+        log.info(f"DATABASE: table '{table.name}' was created by a peer instance.")
+    with _ensured_lock:
+        _ensured_tables.setdefault(engine, set()).add(table.name)
+    return True

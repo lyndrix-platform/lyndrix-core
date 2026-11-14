@@ -219,7 +219,10 @@ class PluginService:
             from .models import PluginVersionHistory
             if not db_instance.engine:
                 return
-            PluginVersionHistory.__table__.create(bind=db_instance.engine, checkfirst=True)
+            # Once per engine, under the cluster bootstrap lock (was: a checkfirst
+            # round trip per call, racing between instances).
+            from core.components.database.logic.tx import ensure_table_once
+            ensure_table_once(PluginVersionHistory.__table__)
             with db_instance.SessionLocal() as session:
                 session.add(PluginVersionHistory(
                     module_id=module_id, repo_name=repo_name, version=version,

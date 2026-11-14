@@ -41,13 +41,12 @@ class CustomRepositoryService:
         """
         if self._schema_ready or not db_instance.engine:
             return
-        try:
-            with db_instance.engine.begin() as connection:
-                CustomPluginRepository.__table__.create(bind=connection, checkfirst=True)
+        from core.components.database.logic.tx import ensure_table_once
+
+        # Under the cluster bootstrap lock; a lost CREATE race counts as done.
+        if ensure_table_once(CustomPluginRepository.__table__):
             self._schema_ready = True
             log.info("CUSTOM_REPO: Schema ready.")
-        except Exception as exc:
-            log.error(f"CUSTOM_REPO: Failed to ensure schema: {exc}")
 
     # ------------------------------------------------------------------- vault
     def _vault(self):
