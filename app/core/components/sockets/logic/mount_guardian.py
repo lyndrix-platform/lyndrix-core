@@ -22,7 +22,7 @@ REPAIR_MODES_SECRET = frozenset({0o700})
 
 def is_valid_owner(user: str) -> bool:
     """True for ``name``, ``name:group``, ``uid`` or ``uid:gid``."""
-    return isinstance(user, str) and bool(_OWNER_RE.match(user))
+    return isinstance(user, str) and bool(_OWNER_RE.fullmatch(user))
 
 
 class MountGuardian:

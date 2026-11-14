@@ -40,7 +40,7 @@ def test_valid_owners(user):
     assert is_valid_owner(user)
 
 
-@pytest.mark.parametrize("user", ["", "-R", "--reference=/etc/shadow", "root;id", "a b", "Root", "1000:", "../x", "a" * 40])
+@pytest.mark.parametrize("user", ["", "-R", "--reference=/etc/shadow", "root;id", "a b", "Root", "1000:", "../x", "a" * 40, "root\n"])
 def test_invalid_owners(user):
     assert not is_valid_owner(user)
 

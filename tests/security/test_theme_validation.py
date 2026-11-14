@@ -64,7 +64,7 @@ def test_unsafe_free_form_values(value):
 
 @pytest.mark.parametrize("name,ok", [
     ("--lx-accent", True), ("--my_var-2", True), ("lx-accent", False), ("--", False),
-    ("--x:red;--y", False), ("--x}</style>", False), ("--" + "a" * 65, False),
+    ("--x:red;--y", False), ("--x}</style>", False), ("--" + "a" * 65, False), ("--lx-accent\n", False),
 ])
 def test_css_var_names(name, ok):
     assert schema.is_valid_css_var_name(name) is ok

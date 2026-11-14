@@ -53,7 +53,7 @@ def check_requirements(text: str) -> list[str]:
         line = _COMMENT_RE.sub("", raw).strip()
         if not line:
             continue
-        if not _REQUIREMENT_RE.match(line):
+        if not _REQUIREMENT_RE.fullmatch(line):
             problems.append(
                 f"line {number}: only 'name[extras] <version constraints> ; <marker>' is "
                 f"allowed (no options, URLs, VCS references or paths)"

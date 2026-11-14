@@ -134,12 +134,12 @@ def is_valid_css_color(value: str) -> bool:
 
 def is_valid_css_var_name(name: str) -> bool:
     """True for a custom-property name such as ``--lx-accent``."""
-    return isinstance(name, str) and bool(_CSS_VAR_NAME_RE.match(name))
+    return isinstance(name, str) and bool(_CSS_VAR_NAME_RE.fullmatch(name))
 
 
 def is_safe_asset_filename(name: str) -> bool:
     """True for a plain image filename inside a theme's ``assets/`` directory."""
-    if not isinstance(name, str) or not _ASSET_FILENAME_RE.match(name) or ".." in name:
+    if not isinstance(name, str) or not _ASSET_FILENAME_RE.fullmatch(name) or ".." in name:
         return False
     return any(name.lower().endswith(suffix) for suffix in THEME_IMAGE_SUFFIXES)
 
