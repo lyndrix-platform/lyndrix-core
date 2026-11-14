@@ -25,6 +25,22 @@ def _is_superadmin(identity: ApiIdentity) -> bool:
     return identity.is_system or "superadmin" in identity.roles
 
 
+def _require_superadmin_for(target, identity: ApiIdentity, action: str) -> None:
+    """Credentials of a superadmin account are superadmin business (AZ-07).
+
+    ``superadmin`` is the one unbounded tier. An ``admin:write`` holder who could
+    mint a key for such an account, reset its password, point its email (the
+    identity auto-link target) somewhere else or delete it would BE that tier.
+    ``target`` is the stored user row; a superadmin acting on their own account
+    passes because they are one.
+    """
+    if "superadmin" in (getattr(target, "roles", None) or []) and not _is_superadmin(identity):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only a superadmin may {action} of a superadmin account",
+        )
+
+
 def _registry_role_exists(role_id: str) -> bool:
     """A plugin/core-declared role (core 1.8: assignable directly on a user)."""
     try:
@@ -130,6 +146,9 @@ def change_password(
 
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Cannot change another user's password")
+    target = _user_service().get_by_username(username)
+    if target is not None:
+        _require_superadmin_for(target, identity, "change the password")
 
     try:
         ok, msg = _user_service().change_password(
@@ -323,6 +342,16 @@ async def update_user(
     if payload.password is not None and len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
+    email_changes = (
+        payload.email is not None
+        and payload.email.strip().casefold() != (current.email or "").strip().casefold()
+    )
+    if payload.password is not None:
+        _require_superadmin_for(current, identity, "reset the password")
+    if email_changes:
+        # The email is what an LDAP/OIDC identity is auto-linked by.
+        _require_superadmin_for(current, identity, "change the email")
+
     # Hash off the event loop before opening the DB session (Argon2 is heavy).
     hashed = (
         await asyncio.to_thread(hash_password, payload.password)
@@ -394,6 +423,7 @@ def delete_user(
     # self and blocked.
     if _same_username(target.username, identity.username):
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    _require_superadmin_for(target, identity, "delete the account")
 
     with _db().SessionLocal() as s:
         user = s.query(User).filter(User.username == username).first()
@@ -435,8 +465,10 @@ def create_api_key(
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + key insert are blocking DB calls.
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    _require_superadmin_for(target, identity, "create API keys")
 
     raw_key, info = _api_key_service().create(username, label=payload.label, scopes=payload.scopes)
     log.info(f"API: API key '{info.label}' created for '{username}' by '{identity.username}'.")
@@ -459,8 +491,10 @@ def revoke_api_key(
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + revoke are blocking DB calls.
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    _require_superadmin_for(target, identity, "revoke API keys or sessions")
     ok = _api_key_service().delete(key_id, username=username)
     if not ok:
         raise HTTPException(status_code=404, detail=f"API key {key_id} not found for '{username}'")

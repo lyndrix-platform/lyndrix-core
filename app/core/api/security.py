@@ -68,10 +68,9 @@ _key_cache: dict = {"value": None, "expires": 0.0}
 def invalidate_system_api_key_cache() -> None:
     """Drop the cached Vault key so the next resolve re-reads from Vault.
 
-    Call after the system API key is changed via the settings UI/API.
-    TODO(agent): wire this into the settings-write path in
-    core/components/settings (out of this unit's scope) so the change is
-    instant rather than bounded by the cache TTL.
+    Called by ``system_config_service.apply`` whenever the key is written or
+    cleared, and on every peer instance through the bridged
+    ``settings:changed`` event, so a rotated key stops working at once.
     """
     _key_cache["value"] = None
     _key_cache["expires"] = 0.0

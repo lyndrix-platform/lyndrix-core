@@ -524,13 +524,22 @@ async def render_settings_page():
                                     return
                                 from core.components.settings.logic.system_config_service import system_config_service
                                 new_value = (api_key_input.value or '').strip()
+                                # The system key is a superadmin matter (AZ-07); the
+                                # service refuses it for everybody else.
+                                from core.session import get_user_value
+                                may_set = 'superadmin' in (get_user_value('roles', []) or [])
                                 try:
                                     if new_value:
                                         system_config_service.apply(
-                                            {'system_api_key': new_value}, persist=True, apply_runtime=False)
+                                            {'system_api_key': new_value}, persist=True, apply_runtime=False,
+                                            allow_system_api_key=may_set)
                                     else:
                                         system_config_service.apply(
-                                            {}, persist=True, apply_runtime=False, remove_keys=['system_api_key'])
+                                            {}, persist=True, apply_runtime=False, remove_keys=['system_api_key'],
+                                            allow_system_api_key=may_set)
+                                except PermissionError as e:
+                                    ui.notify(str(e), type='negative')
+                                    return
                                 except RuntimeError:
                                     ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
                                     return

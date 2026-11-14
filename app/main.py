@@ -699,23 +699,41 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
+    from core.components.settings.logic.system_config_service import (
+        SYSTEM_API_KEY,
+        system_config_service,
+    )
+
+    # The system API key is the master credential (an ``is_system`` identity
+    # that bypasses every permission check): admin:write alone must not be able
+    # to mint it — superadmin or the system key itself only.
+    is_superadmin = identity.is_system or "superadmin" in (identity.roles or [])
+    if SYSTEM_API_KEY in updates and not is_superadmin:
+        raise HTTPException(status_code=403, detail="Only a superadmin may set the system API key")
+
     # Reject env-locked keys up-front: an OS env var always wins on the next boot,
     # so persisting it to Vault would silently no-op and confuse the operator.
-    locked = [key for key in updates if os.getenv(key) is not None]
+    # (Only editable settings can be locked; anything else is refused with 422
+    # by the service, whether or not an environment variable of that name exists.)
+    editable_fields = {spec.field for spec in EDITABLE_SETTINGS}
+    locked = [key for key in updates if key in editable_fields and os.getenv(key) is not None]
+    if SYSTEM_API_KEY in updates and (os.getenv("LYNDRIX_SYSTEM_API_KEY") or "").strip():
+        locked.append(SYSTEM_API_KEY)
     if locked:
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": sorted(locked)},
         )
 
-    from core.components.settings.logic.system_config_service import system_config_service
-
     try:
         result = system_config_service.apply(
             updates,
             persist=payload.persist_in_vault,
             apply_runtime=payload.apply_runtime,
+            allow_system_api_key=is_superadmin,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         # Structured pydantic errors or an unsupported-keys message.
         raise HTTPException(status_code=422, detail=exc.args[0]) from exc
@@ -846,6 +864,11 @@ async def _on_settings_changed_remote(payload=None):
     """A peer saved settings → re-read Vault here (bridged ``settings:changed``)."""
     if not (payload or {}).get("_origin"):
         return  # our own save already applied the values in-process
+    if "system_api_key" in set(payload.get("keys") or []) | set(payload.get("removed") or []):
+        # A peer rotated/cleared the system API key: stop serving the cached one.
+        from core.api.security import invalidate_system_api_key_cache
+
+        invalidate_system_api_key_cache()
     await _hydrate_settings_from_vault()
     import logging as _logging
 
