@@ -37,7 +37,7 @@ from typing import Optional
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
 from core.components.database.logic.tx import run_with_retry, write_session
-from .models import Group, User, UserIdentity
+from .models import Group, User, UserIdentity, email_is_trusted
 from .providers.base import AuthResult
 
 log = get_logger("Core:IdentityLink")
@@ -194,10 +194,19 @@ def _resolve_once(result: AuthResult, provider: str, stable_id: str) -> AuthResu
         # Backfill profile fields the local row is missing.
         if result.full_name and not (user.full_name or "").strip():
             user.full_name = result.full_name.strip()[:_FULL_NAME_MAX]
-        if not (user.email or "").strip():
-            email = _storable_email(result.email)
-            if email:
-                user.email = email
+        provider_email = _storable_email(result.email)
+        if provider_email:
+            if not (user.email or "").strip():
+                user.email = provider_email
+                user.email_trusted = bool(result.email_verified)
+            elif (
+                result.email_verified
+                and user.email_trusted is False
+                and user.email.strip().lower() == provider_email.lower()
+            ):
+                # The provider now vouches, for THIS account, for the address
+                # its owner typed in — that is the proof self-service lacked.
+                user.email_trusted = True
 
         # Legacy LDAP role-mapping compatibility: historically the LDAP
         # provider folded directory→role_mapping values into result.roles and
@@ -254,13 +263,25 @@ def _match_or_create(session, result: AuthResult, provider: str, stable_id: str)
     the caller can record how the link came to be.
     """
     # 1. Trusted email → exactly one local user without an identity for this provider.
+    #    "Trusted" on BOTH sides: the provider vouches for the address
+    #    (email_verified) AND the local profile got it from an administrator or
+    #    a provider. An address the account owner typed in themselves is not
+    #    proof of ownership — matching on it would hand the next person who
+    #    logs in with that address (and their directory groups) to that account.
     email = (result.email or "").strip().lower()
     if email and len(email) <= _EMAIL_MAX and result.email_verified:
         matches = [
             u for u in session.query(User).all()
             if (u.email or "").strip().lower() == email
         ]
-        if len(matches) == 1:
+        if len(matches) == 1 and not email_is_trusted(matches[0]):
+            log.warning(
+                f"IDENTITY: email '{email}' matches local user '{matches[0].username}', but that "
+                f"address was set by the user themselves (unverified) — NOT auto-linking "
+                f"{provider}/{stable_id}; creating a separate account. An administrator can "
+                f"confirm the address by saving it on the user."
+            )
+        elif len(matches) == 1:
             candidate = matches[0]
             existing = (
                 session.query(UserIdentity)
@@ -296,10 +317,13 @@ def _match_or_create(session, result: AuthResult, provider: str, stable_id: str)
         g for g in _DEFAULT_SSO_GROUPS
         if session.query(Group).filter(Group.name == g).first() is not None
     ]
+    new_email = _storable_email(result.email)
     user = User(
         username=username,
         full_name=((result.full_name or "").strip() or username)[:_FULL_NAME_MAX],
-        email=_storable_email(result.email),
+        email=new_email,
+        # Provider-supplied: trusted exactly when the provider vouches for it.
+        email_trusted=bool(new_email) and bool(result.email_verified),
         hashed_password=None,
         roles=[],
         groups=default_groups,

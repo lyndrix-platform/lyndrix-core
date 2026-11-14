@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.api.security import ApiIdentity, require_api_auth, require_permission
+from core.components.auth.logic.models import email_is_trusted
 from core.logger import get_logger
 
 log = get_logger("Core:UsersAPI")
@@ -61,6 +62,9 @@ class UserOut(BaseModel):
     username: str
     full_name: Optional[str] = None
     email: Optional[str] = None
+    # False = the owner typed the address in themselves: it is shown, but never
+    # used to auto-link an LDAP/OIDC identity to this account.
+    email_trusted: bool = False
     roles: List[str] = Field(default_factory=list)
     groups: List[str] = Field(default_factory=list)
     extra_permissions: List[str] = Field(default_factory=list)
@@ -148,6 +152,7 @@ def _to_user_out(user) -> UserOut:
         username=str(user.username),
         full_name=str(user.full_name or "") or None,
         email=str(user.email or "") or None,
+        email_trusted=email_is_trusted(user),
         roles=list(user.roles or []),
         groups=list(user.groups or []),
         extra_permissions=list(user.extra_permissions or []),
@@ -209,13 +214,16 @@ async def create_user(
     # never blocks every other client (same rule as change_password).
     hashed = await asyncio.to_thread(hash_password, payload.password)
 
+    new_email = (payload.email or "").strip() or None
+
     def _persist():
         with _db().SessionLocal() as s:
             user = User(
                 username=uname,
                 hashed_password=hashed,
                 full_name=(payload.full_name or "").strip() or None,
-                email=(payload.email or "").strip() or None,
+                email=new_email,
+                email_trusted=bool(new_email),  # set by an administrator
                 roles=requested_roles,
                 groups=sorted(set(payload.groups)),
                 extra_permissions=[],
@@ -309,6 +317,9 @@ async def update_user(
         if payload.password is not None
         else None
     )
+    # An administrator may already set any other account's email, so their own
+    # counts as an admin edit too; everyone else's own edit is self-service.
+    email_set_by_admin = identity.allows("admin:write")
 
     def _persist():
         with _db().SessionLocal() as s:
@@ -319,7 +330,15 @@ async def update_user(
             if payload.full_name is not None:
                 user.full_name = payload.full_name.strip() or None
             if payload.email is not None:
-                user.email = payload.email.strip() or None
+                new_email = payload.email.strip() or None
+                # Echoing the stored address back (the profile form always
+                # sends it) is not a change and keeps its provenance.
+                if (new_email or "").casefold() != (user.email or "").strip().casefold():
+                    # Trusted only when set with administrative authority; an
+                    # address the owner types in is unverified and must never
+                    # become a target for identity auto-linking (AZ-02).
+                    user.email_trusted = bool(new_email) and email_set_by_admin
+                user.email = new_email
             if hashed is not None:
                 user.hashed_password = hashed
             if payload.roles is not None:

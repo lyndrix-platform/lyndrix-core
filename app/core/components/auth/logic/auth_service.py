@@ -168,9 +168,16 @@ class AuthService:
             ("users", "extra_permissions",  "JSON NULL"),
             ("groups", "ldap_mappings",     "JSON NULL"),
             ("groups", "roles",             "JSON NULL"),
+            # Email provenance (AZ-02). Nullable WITHOUT a default on purpose:
+            # existing rows — and rows an older core still writes during a
+            # rolling update — stay NULL, which reads as "trusted" (the
+            # behaviour before the column existed). See models.email_is_trusted.
+            ("users", "email_trusted",      "BOOLEAN NULL"),
         ]
         with db_instance.engine.connect() as conn:
             for table, column, col_def in migrations:
+                if self._column_exists(conn, table, column):
+                    continue  # the normal case on every boot after the first: no DDL at all
                 try:
                     conn.execute(
                         text(
@@ -180,12 +187,26 @@ class AuthService:
                     conn.commit()
                     log.info(f"MIGRATE: Added column `{table}.{column}`.")
                 except Exception as e:
-                    err = str(e)
-                    if "Duplicate column name" in err or "already exists" in err:
-                        pass  # column already present — nothing to do
+                    conn.rollback()
+                    err = str(e).lower()
+                    # MariaDB 1060 / SQLite "duplicate column name": a peer
+                    # instance added it between our check and the ALTER.
+                    if "duplicate column name" in err or "already exists" in err:
+                        pass
                     else:
                         log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
         self._migrate_users_id_type()
+
+    @staticmethod
+    def _column_exists(conn, table: str, column: str) -> bool:
+        """True when ``table.column`` is present (False when that cannot be told —
+        the ALTER then runs and reports a duplicate column itself)."""
+        try:
+            from sqlalchemy import inspect
+
+            return column in {c["name"] for c in inspect(conn).get_columns(table)}
+        except Exception:
+            return False
 
     def _migrate_users_id_type(self):
         """Databases created before 1.1 have ``users.id`` as INT AUTO_INCREMENT while the
@@ -291,6 +312,7 @@ class AuthService:
                     username=username,
                     full_name=full_name,
                     email=email,
+                    email_trusted=True,  # operator-provided (environment), not self-service
                     hashed_password=hash_password(password),
                     roles=roles,
                     groups=list(groups or []),

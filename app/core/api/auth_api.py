@@ -500,6 +500,7 @@ def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("ad
 @auth_router.get("/me", summary="Current user profile")
 def me(identity: ApiIdentity = Depends(require_api_auth)):
     """Returns full profile for the authenticated user (sync DB read → threadpool)."""
+    from core.components.auth.logic.models import email_is_trusted
     from core.components.auth.logic.user_service import user_service
 
     user = user_service.get_by_username(identity.username)
@@ -508,6 +509,7 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
             "username": identity.username,
             "full_name": None,
             "email": None,
+            "email_trusted": False,
             "roles": identity.roles,
             "groups": [],
             "extra_permissions": identity.extra_permissions,
@@ -518,6 +520,7 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
         "username": str(user.username),
         "full_name": str(user.full_name or "") or None,
         "email": str(user.email or "") or None,
+        "email_trusted": email_is_trusted(user),
         "roles": list(user.roles or []),
         "groups": list(user.groups or []),
         "extra_permissions": list(user.extra_permissions or []),
