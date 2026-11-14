@@ -29,7 +29,13 @@ def test_local_login_queries_in_a_worker_thread(monkeypatch):
         return Session()
 
     monkeypatch.setattr(db_instance, "SessionLocal", session_factory, raising=False)
-    monkeypatch.setattr(hashing, "verify_password", lambda hashed, pw: hashed == "stored-hash-not-real" and pw == "pw")
+    fake_verify = lambda hashed, pw: hashed == "stored-hash-not-real" and pw == "pw"  # noqa: E731
+    monkeypatch.setattr(hashing, "verify_password", fake_verify)
+    # The local provider verifies through the login guard (bounded Argon2 slots),
+    # which holds its own reference to the hashing function.
+    from core.components.auth.logic import login_guard
+    monkeypatch.setattr(login_guard, "verify_password", fake_verify)
+    login_guard._verifier.reset()
     provider = LocalProvider()
 
     ok = asyncio.run(provider.authenticate("alice", "pw"))

@@ -54,15 +54,19 @@ def test_constant_time_equals_handles_any_text():
 def test_webhook_token_with_non_ascii_bytes_is_rejected_not_crashing(monkeypatch):
     from core.components.notifications import api as notifications_api
 
+    import asyncio
+
     class Ctx:
-        def get_secret(self, key):
+        # The check reads the token through the async accessor (off the event loop).
+        async def aget_secret(self, key):
             return "dummy-webhook-token-not-real"
 
     monkeypatch.setattr(notifications_api.notification_service, "ctx", Ctx(), raising=False)
     with pytest.raises(HTTPException) as exc:
-        notifications_api._require_webhook_token("t\xf6ken")
+        asyncio.run(notifications_api._require_webhook_token("t\xf6ken"))
     assert exc.value.status_code == 401
-    notifications_api._require_webhook_token("dummy-webhook-token-not-real")     # the right one passes
+    # the right one passes
+    asyncio.run(notifications_api._require_webhook_token("dummy-webhook-token-not-real"))
 
 
 # ── event stream cap ────────────────────────────────────────────────────────
