@@ -14,6 +14,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
 | `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
 | `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → at once: `/api/ready` 503, `draining` published to the peers, leases handed over (`lost` callbacks first) → wait → close SSE → tombstone → exit |
+| `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS` | `300` | 1 | rolling restart: how long the leader waits for one restarted instance to be ready again before it aborts the run |
 | `LYNDRIX_STORAGE_SHARED_ROLES` | `api` | 1 | roles whose instances must see one shared `STORAGE_DIR` (comma list; they serve user files). The preflight `storage` check compares only those; empty = nobody has to share |
 | `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` | `600` | 1 | cluster mode: after boot `/api/ready` stays 503 (`plugins:converging`) until the plugins recorded in `plugin_states` are installed and activated on this instance — at most this long, then it turns ready anyway (preflight `plugins: warn`). `0` = do not wait |
 | `LYNDRIX_RESTART_GRACE_SECONDS` | `90` | 1 | how long an instance that stopped gracefully counts as `restarting` (not `dead`) for its peers: `ctx.has_live_role()` stays true, pinned plugins answer `Retry-After: 5`. Should cover a container restart |
@@ -93,7 +94,7 @@ is shared, so every instance would leave at once.
 | `GET /api/cluster/preflight` | `api:read` | re-run the checks now |
 | `POST /api/cluster/leases/{name}/release` | `admin:write` | hand a lease over (also clears a dead instance's stale row) |
 | `GET /api/health` | optional | plugin health round (cached 10 s) + `ready`; **not** a load-balancer check |
-| `POST /api/system/restart` | `admin:write` | cluster mode: staggered rolling restart of every instance, leader last, no Docker socket needed |
+| `POST /api/system/restart` | `admin:write` | cluster mode: sequential rolling restart driven by the leader — one instance at a time, each must be ready again before the next, leader last; runners only with `?include_runners=true`; 409 when no leader can coordinate it |
 
 ## Testing note
 

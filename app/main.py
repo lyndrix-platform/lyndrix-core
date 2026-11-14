@@ -729,7 +729,8 @@ async def set_runtime_config(
 
 
 @app.post("/api/system/restart", tags=["System"], summary="Restart the core container")
-async def system_restart(identity: ApiIdentity = Depends(require_permission("admin:write"))):
+async def system_restart(include_runners: bool = False,
+                         identity: ApiIdentity = Depends(require_permission("admin:write"))):
     """Restart THIS core's own Docker container — e.g. to make a plugin upgrade take
     effect without an external ``docker restart`` (a recurring gotcha).
 
@@ -738,12 +739,20 @@ async def system_restart(identity: ApiIdentity = Depends(require_permission("adm
     the container goes down and comes back — the UI should show "restarting" and poll for
     the core to return. Requires the ``api:write`` permission.
 
-    Cluster mode: no Docker socket needed. ``system:restart_requested`` is broadcast to
-    every instance; each one drains and exits in a staggered order (leader last) and the
-    restart policy / kubelet brings it back — a rolling restart without an external tool.
+    Cluster mode: no Docker socket needed. The leader restarts the instances ONE AT A TIME
+    (each drains, exits and is brought back by the restart policy / kubelet), waits until the
+    restarted one is ready again before it continues, and restarts itself last. Instances with
+    the ``runner`` role are left alone unless ``include_runners=true``. 409 when no leader can
+    coordinate the run (or one is already running). Progress: ``GET /api/cluster`` → ``restart``
+    on the leader.
     """
     if cluster_service.is_cluster:
-        payload = cluster_service.request_restart(identity.username)
+        from core.components.cluster.logic.restart import RestartRefused
+
+        try:
+            payload = cluster_service.request_restart(identity.username, include_runners=include_runners)
+        except RestartRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         log.warning(f"SYSTEM: cluster rolling restart requested by '{identity.username}' (order {payload['order']}).")
         return {"status": "restarting", "mode": "cluster", **payload}
 

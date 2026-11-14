@@ -43,6 +43,14 @@ from .bridge import ClusterBridge
 from .coordinator import Coordinator, InstanceIdConflict, InstanceInfo
 from .drain import DrainController
 from .leases import RELEASED_TOPIC, LeaseKeeper
+from .restart import (
+    RESTART_INSTANCE_TOPIC,
+    RESTART_REQUEST_TOPIC,
+    RestartRefused,
+    RollingRestart,
+    plan as plan_restart,
+    supports_sequential_restart,
+)
 from .storage import StorageProbe
 
 log = get_logger("Core:Cluster")
@@ -56,8 +64,10 @@ LEADER_TOPIC = "cluster:leader_changed"
 # comes back and dies later.
 INSTANCE_LOST_TOPIC = "cluster:instance_lost"
 _STATE_RANK = {"alive": 4, "draining": 3, "restarting": 2, "unknown": 1, "dead": 0}
+# Legacy broadcast of core ≤ 1.11 ("everybody restart, staggered by 5 s"). Never
+# emitted any more; when an old instance sends it during a rollout, the leader
+# answers with a sequential restart instead (see restart.py).
 RESTART_TOPIC = "system:restart_requested"
-_RESTART_STAGGER_S = 5
 _PREFLIGHT_REFRESH_S = 300
 # A check that could not decide (timeout, transient error, peer too young) asks
 # for a re-run after this many heartbeats instead of the full refresh interval;
@@ -160,6 +170,9 @@ class ClusterService:
         self.plugin_wait_s = float(settings.LYNDRIX_READY_PLUGIN_WAIT_SECONDS)
         self._drain_task: Optional[asyncio.Task] = None
         self._stopped = False
+        self._restart_task: Optional[asyncio.Task] = None
+        # Progress of the rolling restart this instance leads/led (GET /api/cluster → "restart").
+        self.restart_status: Optional[dict] = None
         self._hb_task: Optional[asyncio.Task] = None
         self._start_task: Optional[asyncio.Task] = None
         self._hb_failures = 0
@@ -185,6 +198,8 @@ class ClusterService:
             bus.subscribe("db:connected")(self.on_db_connected)
             bus.subscribe("system:boot_complete")(self.on_boot_complete)
             bus.subscribe(RESTART_TOPIC)(self._on_restart_requested)
+            bus.subscribe(RESTART_REQUEST_TOPIC)(self._on_restart_requested)
+            bus.subscribe(RESTART_INSTANCE_TOPIC)(self._on_restart_instance)
             bus.subscribe(RELEASED_TOPIC)(self._on_peer_released_lease)
 
     def _on_peer_released_lease(self, payload: Optional[dict] = None) -> None:
@@ -1023,28 +1038,87 @@ class ClusterService:
             return await self.leases.release_now(name)
         return await self.coordinator.force_release(name)
 
-    def request_restart(self, requested_by: str) -> dict:
-        """Cluster mode: ask every instance to exit gracefully, staggered, leader last."""
-        order = sorted(i.instance_id for i in self._instances if i.alive) or [self.instance_id]
-        if self.leader_id in order:
-            order.remove(self.leader_id)
-            order.append(self.leader_id)
-        payload = {"requested_by": requested_by, "order": order, "requested_at": _utcnow().isoformat()}
-        bus.emit(RESTART_TOPIC, payload)  # bridged → every instance (incl. this one) handles it
+    def request_restart(self, requested_by: str, *, include_runners: bool = False) -> dict:
+        """Cluster mode: restart the instances ONE AT A TIME, leader last.
+
+        The leader drives the run (restart.py); when this instance is not the
+        leader the request is handed to it over the bridge. Raises
+        :class:`RestartRefused` when no leader can take it.
+        """
+        leader = next((i for i in self._instances if i.instance_id == self.leader_id), None)
+        if not self.is_leader:
+            if leader is None or leader.state != "alive":
+                raise RestartRefused("no leader is known right now — try again in a moment")
+            if not supports_sequential_restart(leader):
+                raise RestartRefused(
+                    f"the leader ({leader.instance_id}) runs core {leader.core_version}, which cannot coordinate a "
+                    "sequential restart — finish the rolling update first")
+        if self._restart_task is not None and not self._restart_task.done():
+            raise RestartRefused("a rolling restart is already running")
+        order, skipped = plan_restart(self._instances, self.leader_id or self.instance_id,
+                                      include_runners=include_runners)
+        payload = {"requested_by": requested_by, "include_runners": bool(include_runners),
+                   "requested_at": _utcnow().isoformat(), "leader": self.leader_id,
+                   "order": order, "skipped": skipped, "strategy": "sequential"}
+        if self.is_leader:
+            self._start_rolling_restart(requested_by, bool(include_runners))
+        else:
+            bus.emit(RESTART_REQUEST_TOPIC, {"requested_by": requested_by, "include_runners": bool(include_runners)},
+                     cluster=True)
         return payload
 
-    async def _on_restart_requested(self, payload: Optional[dict] = None) -> None:
-        if not self.is_cluster:
+    def _start_rolling_restart(self, requested_by: str, include_runners: bool) -> None:
+        if self._restart_task is not None and not self._restart_task.done():
+            log.warning("CLUSTER: rolling restart already running — request of %s ignored", requested_by)
             return
-        order = list((payload or {}).get("order") or [])
-        position = order.index(self.instance_id) if self.instance_id in order else len(order)
-        delay = position * _RESTART_STAGGER_S
-        log.warning("CLUSTER: restart requested by %s — exiting in %ss (position %s/%s)",
-                    (payload or {}).get("requested_by"), delay, position + 1, max(len(order), 1))
-        await asyncio.sleep(delay)
+
+        async def _view() -> list[InstanceInfo]:
+            return await asyncio.wait_for(self.refresh_instances(), timeout=_IO_TIMEOUT_S)
+
+        run = RollingRestart(
+            leader_id=self.instance_id, instances=_view, send=self._send_restart, restart_self=self._restart_self,
+            is_leader=lambda: self.is_leader, requested_by=requested_by, include_runners=include_runners,
+            instance_timeout_s=float(settings.LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS), clock=lambda: self._clock(),
+            on_change=self._on_restart_progress,
+        )
+        self.restart_status = dict(run.status)
+        self._restart_task = bus.create_tracked_task(run.run(), name="cluster:rolling_restart")
+
+    def _on_restart_progress(self, status: dict) -> None:
+        self.restart_status = status
+        self._emit_changed("restart", restart=status)
+
+    def _send_restart(self, target: InstanceInfo) -> None:
+        bus.emit(RESTART_INSTANCE_TOPIC, {"instance_id": target.instance_id, "incarnation": target.incarnation,
+                                          "requested_by": (self.restart_status or {}).get("requested_by")},
+                 cluster=True)
+
+    def _restart_self(self) -> None:
         import signal
 
         os.kill(os.getpid(), signal.SIGTERM)  # → drain → uvicorn shutdown → restart policy / kubelet
+
+    async def _on_restart_requested(self, payload: Optional[dict] = None) -> None:
+        """A peer asks for a rolling restart (``cluster:restart_requested``), or
+        an instance of core ≤ 1.11 broadcast its "everybody restart" event.
+        Only the leader acts, and only by restarting one instance at a time."""
+        payload = payload or {}
+        if not self.is_cluster or not payload.get("_origin") or not self.is_leader:
+            return
+        self._start_rolling_restart(str(payload.get("requested_by") or payload.get("_origin")),
+                                    bool(payload.get("include_runners")))
+
+    async def _on_restart_instance(self, payload: Optional[dict] = None) -> None:
+        """The leader's "restart now" for one instance — this one?"""
+        payload = payload or {}
+        if not self.is_cluster or payload.get("instance_id") != self.instance_id:
+            return
+        if payload.get("incarnation") not in (None, self.incarnation):
+            return  # meant for the process that ran under this id before us
+        log.warning("CLUSTER: restart requested by %s (rolling restart) — draining and exiting",
+                    payload.get("requested_by"))
+        await asyncio.sleep(0.5)
+        self._restart_self()
 
     # ------------------------------------------------------------------
     # views
@@ -1110,6 +1184,7 @@ class ClusterService:
             "view_ready": self.view_ready,
             "leases": {"held": self.leases.held, "wanted": self.leases.wanted},
             "storage": self.storage_status(),
+            "restart": self.restart_status,
             "work": self.assigner.report(),
             "preflight": {**self.preflight_summary(), "checks": self.preflight_results},
             "settings": {

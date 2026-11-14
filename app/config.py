@@ -232,6 +232,10 @@ class Settings(BaseSettings):
     # Retry-After meanwhile. Should cover a container restart (image pull
     # excluded); rows are pruned after grace + TTL at the earliest.
     LYNDRIX_RESTART_GRACE_SECONDS: int = 90
+    # Rolling restart (POST /api/system/restart in cluster mode): how long the
+    # leader waits for ONE restarted instance to be back and ready before it
+    # aborts the run instead of restarting the next one.
+    LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS: int = 300
     # Roles whose instances must see ONE shared STORAGE_DIR (comma list): they
     # serve user files (uploads, attachments, themes). The preflight "storage"
     # check compares only these instances; a runner-only instance on another
