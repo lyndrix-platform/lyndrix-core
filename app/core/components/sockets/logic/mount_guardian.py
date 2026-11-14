@@ -2,11 +2,27 @@
 
 import logging
 import os
+import re
 import subprocess
 import stat
 from typing import Dict, List, Optional
 
 from ..models.socket_models import MountStatus, HealthCheckResult
+
+# SC-15: the repair call ends in ``chown -R <user>`` / ``chmod -R <mode>`` as root.
+# A POSIX account name or a numeric uid[:gid] — nothing that could be read as an option.
+_OWNER_RE = re.compile(r"^(?:[a-z_][a-z0-9_-]{0,31}(?::[a-z_][a-z0-9_-]{0,31})?|[0-9]{1,10}(?::[0-9]{1,10})?)$")
+
+# Modes a repair may apply. Nothing world-writable, no setuid/setgid/sticky bits:
+# these trees hold plugin code and secrets the core loads as root.
+REPAIR_MODES = frozenset({0o700, 0o750, 0o755, 0o770, 0o775})
+# The security directory holds the Vault key blob — owner-only, always.
+REPAIR_MODES_SECRET = frozenset({0o700})
+
+
+def is_valid_owner(user: str) -> bool:
+    """True for ``name``, ``name:group``, ``uid`` or ``uid:gid``."""
+    return isinstance(user, str) and bool(_OWNER_RE.match(user))
 
 
 class MountGuardian:
@@ -48,9 +64,20 @@ class MountGuardian:
             self.logger.warning(f"Directory does not exist: {target_dir}")
             return f"Directory does not exist: {target_dir}"
 
+        if not is_valid_owner(user):
+            return "Invalid owner: expected a user name or a numeric uid[:gid]"
+        if mode not in REPAIR_MODES:
+            return "Mode not allowed: use one of " + ", ".join(
+                oct(m)[2:] for m in sorted(REPAIR_MODES)
+            )
+
+        # The shipped image runs as root and has no sudo binary; only escalate
+        # when the core runs unprivileged.
+        elevate = [] if os.geteuid() == 0 else ["sudo"]
         try:
             result = subprocess.run(
-                ["sudo", "chown", "-R", user, target_dir],
+                # "--" ends option parsing so neither argument can become a flag.
+                [*elevate, "chown", "-R", "--", user, target_dir],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -61,7 +88,7 @@ class MountGuardian:
                 return error_msg
 
             result = subprocess.run(
-                ["sudo", "chmod", "-R", oct(mode)[2:], target_dir],
+                [*elevate, "chmod", "-R", "--", oct(mode)[2:], target_dir],
                 capture_output=True,
                 text=True,
                 timeout=10,
