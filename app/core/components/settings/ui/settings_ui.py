@@ -16,6 +16,7 @@ from core.logger import get_logger
 from core.theming import get_theme_engine
 from core.theming.engine import THEMES_BASE_DIR
 from ui.theme import UIStyles
+from ui.secret_fields import entered_secret, is_configured, secret_hint
 from version import __version__, __codename__, __release_date__, get_uptime
 
 from core.components.auth.ui.auth_cards import render_user_settings_card
@@ -99,9 +100,11 @@ def _render_editable_settings_card() -> None:
                             elif spec.kind == 'int':
                                 widget = ui.number(value=current).props('dense outlined').classes('w-44')
                             else:
+                                # Sensitive settings are never prefilled (SC-08).
                                 widget = ui.input(
-                                    value='' if current is None else str(current),
+                                    value='' if (current is None or spec.sensitive) else str(current),
                                     password=spec.sensitive,
+                                    placeholder=secret_hint(is_configured(current)) if spec.sensitive else None,
                                 ).props('outlined dark dense').classes('w-72 max-w-full')
 
                             if is_locked:
@@ -124,6 +127,8 @@ def _render_editable_settings_card() -> None:
                     widget = widgets.get(spec.field)
                     if widget is None:
                         continue
+                    if spec.sensitive and entered_secret(widget.value) is None:
+                        continue  # blank secret = keep the stored value
                     try:
                         updates[spec.field] = spec.coerce(widget.value)
                     except Exception:
@@ -343,14 +348,48 @@ async def render_settings_page():
     # stalls every other websocket client while the page builds.
     from core.components.settings.logic.system_config_service import system_config_service
 
-    def _load_secrets():
+    def _load_secret_flags():
+        # Only "is it set?" leaves this function — the values themselves must
+        # never reach the page (SC-08: an input prefilled with a secret sends
+        # it to the browser, whatever password=True suggests).
         return {
-            'github_token': system_config_service.get_value('github_token', ''),
-            'gitlab_token': system_config_service.get_value('gitlab_token', ''),
-            'system_api_key': system_config_service.get_value('system_api_key', ''),
+            key: is_configured(system_config_service.get_value(key, ''))
+            for key in ('github_token', 'gitlab_token', 'system_api_key')
         }
 
-    _secrets = await asyncio.to_thread(_load_secrets)
+    _secrets = await asyncio.to_thread(_load_secret_flags)
+
+    def _save_secret(key: str, widget, hint_label, saved_message: str) -> None:
+        """Store a newly entered secret; a blank input keeps the current one."""
+        new_value = entered_secret(widget.value)
+        if new_value is None:
+            ui.notify('Nothing entered — the stored value was kept.', type='info')
+            return
+        try:
+            system_config_service.apply({key: new_value}, persist=True, apply_runtime=False)
+        except RuntimeError:
+            ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+            return
+        except ValueError as e:
+            ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+            return
+        widget.value = ''
+        hint_label.text = secret_hint(True)
+        ui.notify(saved_message, type='positive')
+
+    def _remove_secret(key: str, widget, hint_label, removed_message: str) -> None:
+        """Explicitly delete a stored secret (blank no longer means "clear")."""
+        try:
+            system_config_service.apply({}, persist=True, apply_runtime=False, remove_keys=[key])
+        except RuntimeError:
+            ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
+            return
+        except ValueError as e:
+            ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
+            return
+        widget.value = ''
+        hint_label.text = secret_hint(False)
+        ui.notify(removed_message, type='positive')
 
     with ui.column().classes('w-full max-w-5xl mx-auto gap-6'):
         # ── Page Header ─────────────────────────────────────────────────────
@@ -451,27 +490,18 @@ async def render_settings_page():
                             ui.label(t('core.settings.system.github_rate_limit_hint')).classes(UIStyles.TEXT_HINT)
                             ui.label('GitHub Personal Access Token, stored in Vault.  ·  Env: GITHUB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            current_token = _secrets['github_token']
-
-                            gh_input = ui.input(t('core.settings.system.github_api_token'), value=current_token, password=True).classes('w-full max-w-md').props('outlined dark')
+                            gh_input = ui.input(t('core.settings.system.github_api_token'), value='', password=True).classes('w-full max-w-md').props('outlined dark')
+                            gh_hint = ui.label(secret_hint(_secrets['github_token'])).classes(UIStyles.TEXT_HINT)
 
                             def save_github_token():
-                                from core.components.settings.logic.system_config_service import system_config_service
-                                try:
-                                    system_config_service.apply(
-                                        {'github_token': gh_input.value}, persist=True, apply_runtime=False)
-                                except RuntimeError:
-                                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
-                                    return
-                                except ValueError as e:
-                                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
-                                    return
-                                ui.notify(t('core.settings.system.token_saved'), type='positive')
+                                _save_secret('github_token', gh_input, gh_hint, t('core.settings.system.token_saved'))
 
                             vault_ok = vault_instance.is_connected
                             vault_cls = 'text-emerald-400' if vault_ok else 'text-red-400'
                             with ui.row().classes('items-center gap-3 mt-1'):
                                 ui.button(t('core.settings.system.save_token'), icon='save', on_click=save_github_token).props('outline size=sm color=primary')
+                                ui.button('Remove', icon='delete', on_click=lambda: _remove_secret(
+                                    'github_token', gh_input, gh_hint, 'GitHub token removed.')).props('flat size=sm color=negative')
                                 with ui.row().classes(f'items-center gap-1 {vault_cls}'):
                                     ui.icon('lock' if vault_ok else 'lock_open', size='14px')
                                     ui.label(t('core.settings.system.vault_connected') if vault_ok else t('core.settings.system.vault_offline')).classes('text-xs')
@@ -480,25 +510,16 @@ async def render_settings_page():
                             ui.separator().classes('my-3 bg-slate-200 dark:bg-white/10')
                             ui.label('GitLab Personal Access Token, stored in Vault.  ·  Env: GITLAB_TOKEN (overrides the stored value when set)').classes(UIStyles.TEXT_HINT)
 
-                            current_gl_token = _secrets['gitlab_token']
-
-                            gl_input = ui.input(t('core.settings.system.gitlab_api_token'), value=current_gl_token, password=True).classes('w-full max-w-md').props('outlined dark')
+                            gl_input = ui.input(t('core.settings.system.gitlab_api_token'), value='', password=True).classes('w-full max-w-md').props('outlined dark')
+                            gl_hint = ui.label(secret_hint(_secrets['gitlab_token'])).classes(UIStyles.TEXT_HINT)
 
                             def save_gitlab_token():
-                                from core.components.settings.logic.system_config_service import system_config_service
-                                try:
-                                    system_config_service.apply(
-                                        {'gitlab_token': gl_input.value}, persist=True, apply_runtime=False)
-                                except RuntimeError:
-                                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
-                                    return
-                                except ValueError as e:
-                                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
-                                    return
-                                ui.notify(t('core.settings.system.token_saved'), type='positive')
+                                _save_secret('gitlab_token', gl_input, gl_hint, t('core.settings.system.token_saved'))
 
                             with ui.row().classes('items-center gap-3 mt-1'):
                                 ui.button(t('core.settings.system.save_token'), icon='save', on_click=save_gitlab_token).props('outline size=sm color=primary')
+                                ui.button('Remove', icon='delete', on_click=lambda: _remove_secret(
+                                    'gitlab_token', gl_input, gl_hint, 'GitLab token removed.')).props('flat size=sm color=negative')
 
                             # ── System API Key ───────────────────────────────
                             ui.separator().classes('my-3 bg-slate-200 dark:bg-white/10')
@@ -518,51 +539,45 @@ async def render_settings_page():
                             else:
                                 ui.label(
                                     'Master key for machine-to-machine API access (header X-API-Key or '
-                                    'Authorization: Bearer). Unset by default — leave empty to keep the '
-                                    'API-key method disabled.'
+                                    'Authorization: Bearer). Unset by default. The stored key is never '
+                                    'shown — enter a new one to replace it, or remove it to disable the method.'
                                 ).classes(UIStyles.TEXT_HINT)
 
-                            current_api_key = _secrets['system_api_key']
-
+                            # Never prefilled: this key bypasses every permission check.
                             api_key_input = ui.input(
                                 'System API Key',
-                                value=current_api_key,
+                                value='',
                                 password=True,
                             ).classes('w-full max-w-md').props('outlined dark')
+                            api_key_hint = ui.label(
+                                secret_hint(env_locked or _secrets['system_api_key'])
+                            ).classes(UIStyles.TEXT_HINT)
                             if env_locked:
                                 api_key_input.props('readonly').classes('opacity-60')
 
-                            def save_api_key():
+                            def _api_key_locked() -> bool:
                                 if env_locked:
                                     ui.notify(
                                         'Key is locked by the LYNDRIX_SYSTEM_API_KEY environment variable.',
                                         type='warning',
                                     )
-                                    return
-                                from core.components.settings.logic.system_config_service import system_config_service
-                                new_value = (api_key_input.value or '').strip()
-                                try:
-                                    if new_value:
-                                        system_config_service.apply(
-                                            {'system_api_key': new_value}, persist=True, apply_runtime=False)
-                                    else:
-                                        system_config_service.apply(
-                                            {}, persist=True, apply_runtime=False, remove_keys=['system_api_key'])
-                                except RuntimeError:
-                                    ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
-                                    return
-                                except ValueError as e:
-                                    ui.notify(t('core.settings.system.error', error=str(e)), type='negative')
-                                    return
-                                ui.notify(
-                                    'System API key saved.' if new_value else 'System API key cleared (API-key method disabled).',
-                                    type='positive',
-                                )
+                                return env_locked
+
+                            def save_api_key():
+                                if not _api_key_locked():
+                                    _save_secret('system_api_key', api_key_input, api_key_hint, 'System API key saved.')
+
+                            def remove_api_key():
+                                if not _api_key_locked():
+                                    _remove_secret('system_api_key', api_key_input, api_key_hint,
+                                                   'System API key cleared (API-key method disabled).')
 
                             with ui.row().classes('items-center gap-3 mt-1'):
                                 save_btn = ui.button('Save API Key', icon='save', on_click=save_api_key).props('outline size=sm color=primary')
+                                remove_btn = ui.button('Remove', icon='delete', on_click=remove_api_key).props('flat size=sm color=negative')
                                 if env_locked:
                                     save_btn.props('disable')
+                                    remove_btn.props('disable')
                                     with ui.row().classes('items-center gap-1 text-amber-400'):
                                         ui.icon('lock', size='14px')
                                         ui.label('Locked by environment').classes('text-xs')
