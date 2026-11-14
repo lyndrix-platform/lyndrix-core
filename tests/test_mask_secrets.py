@@ -185,3 +185,31 @@ def test_formatter_output_is_cached_per_record():
 def test_logger_name_is_never_masked():
     line, _ = _format("ready")
     assert line == "Core:Test | ready"
+
+
+# --- SC-05 gap: bare positional args -------------------------------------------------
+# A value logged without a name next to it ("token %s") is only recognisable by
+# its shape. Every token format the platform hands out or consumes has one.
+_JWT = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJkdW1teSJ9" + "." + "ZHVtbXktc2lnbmF0dXJl"
+
+
+@pytest.mark.parametrize("secret", [
+    "lyk_" + "A1b2C3d4E5f6G7h8",                 # Lyndrix user / system API keys
+    "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2",         # GitHub PAT (classic)
+    "github_pat_" + "11AAAAAAA0_abcdefghijklmn",  # GitHub PAT (fine-grained)
+    "glpat-" + "a1B2c3D4e5F6g7H8i9J0",           # GitLab PAT
+    "hvs." + "CAESIabcdefghijklmnopqrstu",       # Vault service token
+    "sk-" + "abcdefghijklmnopqrstuvwx",          # model provider key
+    _JWT,                                        # OIDC / signed tickets
+])
+def test_bare_positional_secret_args_are_masked_by_shape(secret):
+    for template in ("token %s", "using %s for the request", "rejected: %s"):
+        line, _ = _format(template, secret)
+        assert secret not in line, template
+        assert "********" in line
+
+
+def test_jwt_like_dotted_identifiers_are_not_mistaken_for_tokens():
+    for text in ("module eyJ.short.x loaded", "version 1.11.1 of lyndrix.plugin.monitoring",
+                 "file eyJustATest.txt saved"):
+        assert mask_text(text) == text

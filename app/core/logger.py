@@ -150,7 +150,7 @@ def _sensitive_name(name: str) -> bool:
 # One cheap pre-check decides whether any of the substitutions can apply at all;
 # the vast majority of log lines stop there.
 _TEXT_HINT_RE = re.compile(
-    r"://|[:=]|bearer|lyk_|ghp_|gh[ousr]_|github_pat_|glpat-|hvs\.|sk-", re.IGNORECASE
+    r"://|[:=]|bearer|lyk_|ghp_|gh[ousr]_|github_pat_|glpat-|hvs\.|sk-|eyJ", re.IGNORECASE
 )
 # https://user:secret@host and https://secret@host (``git@`` is a login, not a secret).
 _URL_USERINFO_RE = re.compile(r"(?<=://)(?!git@)[^/\s:@\"']+(?::[^/\s@\"']*)?@")
@@ -164,6 +164,8 @@ _TOKEN_PREFIX_RE = re.compile(
     r"\b(?:lyk_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-)[A-Za-z0-9_.\-]{6,}"
     r"|\bhvs\.[A-Za-z0-9_\-]{16,}"
     r"|\bsk-[A-Za-z0-9_\-]{16,}"
+    # JSON Web Tokens (OIDC id/access tokens, signed tickets): header.payload.signature
+    r"|\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"
 )
 # name=value / name: value / "name": "value" — the callback decides by the name.
 _ASSIGNMENT_RE = re.compile(
@@ -191,8 +193,12 @@ def mask_text(text: str) -> str:
 
     Covers URL userinfo (``https://user:token@host``), ``Authorization`` /
     ``PRIVATE-TOKEN``-style header values, ``Bearer <token>``, well-known token
-    prefixes (``lyk_``, ``ghp_``, ``github_pat_``, ``glpat-``, ``hvs.``, ``sk-``)
-    and ``name=value`` pairs whose name marks a secret.
+    prefixes (``lyk_``, ``ghp_``, ``github_pat_``, ``glpat-``, ``hvs.``, ``sk-``),
+    JWTs and ``name=value`` pairs whose name marks a secret.
+
+    Known limit: a secret with no recognisable shape that is logged without a
+    name next to it (``log.info("token %s", opaque)``) cannot be told apart
+    from ordinary text — log secrets as ``name=%s`` or not at all.
     """
     if not text or not _TEXT_HINT_RE.search(text):
         return text
