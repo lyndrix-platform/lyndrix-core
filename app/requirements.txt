@@ -19,7 +19,9 @@ pycryptodome>=3.20.0,<4.0.0
 
 # --- Utilities & Integrations ---
 python-dotenv==1.2.2
-requests>=2.31.0,<3.0.0
+# >=2.32.4: CVE-2024-35195 (verify=False sticks to the session, <2.32.0) and
+# CVE-2024-47081 (.netrc credentials leak to another host, <2.32.4).
+requests>=2.32.4,<3.0.0
 httpx>=0.28.0,<1.0.0
 icmplib>=3.0.4,<4.0.0
 pyyaml>=6.0.1,<7.0.0
