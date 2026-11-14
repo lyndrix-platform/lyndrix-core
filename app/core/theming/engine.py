@@ -443,6 +443,11 @@ class ThemeEngine:
         """
         self._plugin_overrides[plugin_id] = dict(overrides)
 
+    def unregister_plugin_overrides(self, plugin_id: str) -> None:
+        """Drop a plugin's overrides again (called when the plugin is disabled
+        or unloaded; its setup() registers them anew)."""
+        self._plugin_overrides.pop(plugin_id, None)
+
     def list_available_themes(self) -> list[str]:
         """All theme IDs on disk: built-in ones plus uploads on the shared storage."""
         ids: set[str] = set()
