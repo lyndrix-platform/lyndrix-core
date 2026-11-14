@@ -45,6 +45,11 @@ class PluginHealthRound:
         self._worst = "ok"
         self._plugins: Dict[str, Any] = {}
         self._lock: Optional[asyncio.Lock] = None
+        # health() calls that outlived their timeout, per plugin. A call that
+        # hangs in a worker thread (NFS, a dead socket) cannot be cancelled;
+        # starting another one every round would leak one executor thread per
+        # poll window until the default executor is exhausted.
+        self._still_running: Dict[str, asyncio.Task] = {}
 
     async def get(self, module_manager) -> Tuple[str, Dict[str, Any], bool]:
         """Return ``(worst_status, per_plugin, served_from_cache)``."""
@@ -81,8 +86,7 @@ class PluginHealthRound:
                 worst = health_status.status
         self._worst, self._plugins, self._at = worst, plugins, time.monotonic()
 
-    @staticmethod
-    async def _call_health(module_id: str, entry: dict) -> Tuple[str, PluginHealthStatus]:
+    async def _call_health(self, module_id: str, entry: dict) -> Tuple[str, PluginHealthStatus]:
         module = entry.get("module")
         ctx = entry.get("context")
         if module is None or ctx is None or not hasattr(module, "health"):
@@ -90,18 +94,41 @@ class PluginHealthRound:
         reason = skip_reason(getattr(ctx, "runtime", None))
         if reason:
             return module_id, PluginHealthStatus(status="unknown", details={"reason": reason})
+
+        previous = self._still_running.get(module_id)
+        if previous is not None:
+            if not previous.done():
+                # Never stack a second call on top of a hanging one.
+                return module_id, PluginHealthStatus(
+                    status="degraded", details={"reason": "health check still running"}
+                )
+            del self._still_running[module_id]
+
         try:
             t0 = time.monotonic()
-            result = await asyncio.wait_for(module.health(ctx), timeout=HEALTH_TIMEOUT_SECONDS)
+            task = asyncio.ensure_future(module.health(ctx))
+            done, _pending = await asyncio.wait({task}, timeout=HEALTH_TIMEOUT_SECONDS)
+            if not done:
+                # Not cancelled on purpose: cancelling the awaiting task would
+                # not stop a blocked worker thread, it would only hide it and
+                # let the next round start another. Remember it instead.
+                task.add_done_callback(_consume_result)
+                self._still_running[module_id] = task
+                return module_id, PluginHealthStatus(status="error", details={"reason": "health() timed out"})
+            result = task.result()
             elapsed_ms = (time.monotonic() - t0) * 1000
             if not isinstance(result, PluginHealthStatus):
                 result = PluginHealthStatus(status="unknown", details={"raw": str(result)})
             result.latency_ms = round(elapsed_ms, 2)
             return module_id, result
-        except asyncio.TimeoutError:
-            return module_id, PluginHealthStatus(status="error", details={"reason": "health() timed out"})
         except Exception as exc:
             return module_id, PluginHealthStatus(status="error", details={"reason": str(exc)})
+
+
+def _consume_result(task: asyncio.Task) -> None:
+    """Retrieve a late health() outcome so asyncio does not log it as unhandled."""
+    if not task.cancelled():
+        task.exception()
 
 
 plugin_health_round = PluginHealthRound()

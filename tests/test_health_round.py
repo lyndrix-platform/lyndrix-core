@@ -98,3 +98,45 @@ def test_failing_and_slow_health_are_reported_not_raised(monkeypatch):
     assert worst == "error"
     assert plugins["a"]["details"]["reason"] == "db gone"
     assert "timed out" in plugins["b"]["details"]["reason"]
+
+
+def test_hanging_health_is_not_called_again_while_it_still_runs(monkeypatch):
+    """A health() stuck in a worker thread must not get a new thread per poll window."""
+    import threading
+
+    release = threading.Event()
+    started = {"n": 0}
+
+    def blocked():
+        started["n"] += 1
+        release.wait(5)
+        return PluginHealthStatus(status="ok")
+
+    async def hanging(_ctx):
+        return await asyncio.to_thread(blocked)
+
+    async def fine(_ctx):
+        return PluginHealthStatus(status="ok")
+
+    monkeypatch.setattr(mod, "HEALTH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(mod, "CACHE_TTL_SECONDS", 0.0)       # every get() is a new round
+    manager = _manager(stuck=(hanging, None), ok=(fine, None))
+    rounds = mod.PluginHealthRound()
+
+    async def run():
+        _w, first, _ = await rounds.get(manager)
+        assert first["stuck"]["status"] == "error" and "timed out" in first["stuck"]["details"]["reason"]
+        for _ in range(3):                                    # later poll windows
+            worst, later, _ = await rounds.get(manager)
+            assert later["stuck"]["status"] == "degraded"
+            assert later["stuck"]["details"] == {"reason": "health check still running"}
+            assert later["ok"]["status"] == "ok" and worst == "degraded"
+        assert started["n"] == 1                              # ONE thread, not one per round
+
+        release.set()                                         # the mount came back
+        await asyncio.sleep(0.05)
+        _w, healed, _ = await rounds.get(manager)
+        assert healed["stuck"]["status"] == "ok"
+        assert started["n"] == 2
+
+    asyncio.run(run())
