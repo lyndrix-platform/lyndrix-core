@@ -800,6 +800,10 @@ class PluginService:
         async with self._install_lock(safe_repo_name):
             if not upgrade and (self.plugin_dir / safe_repo_name / "entrypoint.py").exists():
                 log.info(f"INSTALL: '{safe_repo_name}' is already installed — duplicate install request skipped.")
+                # Nothing gets loaded, so nobody else would ever report: without
+                # this an operation opened for the request sat "running" until
+                # the timeout sweep closed it as "install failed / no report".
+                await self._report_operation_outcome(safe_repo_name, "done", "already installed")
                 return True
             return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade,
                                                        notify=notify, lead=lead)
@@ -834,6 +838,9 @@ class PluginService:
 
         if plugin_path.exists() and not upgrade:
             log.warning(f"CONFLICT: Plugin directory '{safe_repo_name}' already exists. Operation aborted")
+            await self._report_operation_failure(
+                safe_repo_name, f"plugin directory '{safe_repo_name}' already exists (no entrypoint.py) — remove it first",
+            )
             return False
 
         try:
@@ -1005,15 +1012,22 @@ class PluginService:
     async def _report_operation_failure(repo_name: str, message: str) -> None:
         """This instance could not even get the files in place — tell the
         cluster-wide operation (core 1.8) so it does not wait for a load report."""
+        await PluginService._report_operation_outcome(repo_name, "failed", message)
+
+    @staticmethod
+    async def _report_operation_outcome(repo_name: str, status: str, message: str) -> None:
+        """Report this instance's outcome for an install that ends before the
+        ModuleManager's load handler (the usual reporter) ever runs. A no-op
+        when no operation tracks the repo."""
         try:
             from .operations import operation_tracker
 
             await asyncio.to_thread(
                 operation_tracker.report, plugin_id=None, repo_name=repo_name,
-                status="failed", message=message[:500],
+                status=status, message=message[:500],
             )
         except Exception:
-            log.debug("OPS: failure report skipped", exc_info=True)
+            log.debug("OPS: outcome report skipped", exc_info=True)
 
     @staticmethod
     def _announces_updates() -> bool:

@@ -208,11 +208,26 @@ async def install_plugin(
         ref = svc.validate_repo_url(payload.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    repo_name = ref.repo.replace("-", "_")
+    # Refuse a duplicate up front instead of opening an operation nothing will
+    # ever work on: the install would short-circuit ("already installed"), and
+    # a second operation for a repo that is being installed right now would
+    # never receive a report (reports attach to the newest running operation).
+    if (svc.plugin_dir / repo_name / "entrypoint.py").exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Plugin '{ref.repo}' is already installed — use upgrade to change its version.",
+        )
+    if await asyncio.to_thread(_tracker().has_running, repo_name=repo_name):
+        raise HTTPException(
+            status_code=409,
+            detail=f"An install/upgrade of '{ref.repo}' is already in progress — wait for it to finish.",
+        )
     log.info(f"API: Install queued for '{payload.url}' v{payload.version} by '{identity.username}'.")
     # Cluster-wide operation (core 1.8): every live instance reports its outcome,
     # the operator gets one notification when all did.
     op_id = await asyncio.to_thread(
-        _tracker().start, plugin_id=None, repo_name=ref.repo.replace("-", "_"), action="install",
+        _tracker().start, plugin_id=None, repo_name=repo_name, action="install",
         version=payload.version, requested_by=identity.username,
     )
     background_tasks.add_task(svc.install_plugin, payload.url, payload.version, False)
