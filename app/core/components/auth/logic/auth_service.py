@@ -54,6 +54,26 @@ _DEFAULT_GROUPS: list[tuple[str, str, list]] = [
 _warn_logger = logging.getLogger("Core:AuthService")
 
 
+def _warn_about_ldap_transport(url: str, tls_verify: bool) -> None:
+    """Say it in the log when LDAP passwords are not protected in transit.
+
+    A warning only: refusing ``ldap://`` would break existing deployments.
+    TODO(agent): support StartTLS and require it (or ldaps://) outside dev.
+    """
+    scheme = (url or "").strip().lower()
+    if scheme.startswith("ldap://"):
+        log.warning(
+            "SECURITY: LDAP is configured with ldap:// — the service account's and every user's "
+            "password cross the network UNENCRYPTED (StartTLS is not used). Switch LYNDRIX_LDAP_URL "
+            "to ldaps://."
+        )
+    elif scheme.startswith("ldaps://") and not tls_verify:
+        log.warning(
+            "SECURITY: LDAP TLS certificate verification is OFF (LYNDRIX_LDAP_TLS_VERIFY=false) — "
+            "the directory is not authenticated, passwords can be intercepted."
+        )
+
+
 class AuthService:
     def __init__(self):
         bus.subscribe("db:connected")(self.initialize_iam)
@@ -248,6 +268,7 @@ class AuthService:
         if "ldap" in active:
             kwargs = auth_config_service.build_ldap_kwargs(vault_data)
             if kwargs["url"]:
+                _warn_about_ldap_transport(kwargs["url"], kwargs.get("tls_verify", True))
                 provider_registry.register(LDAPProvider(**kwargs))
             else:
                 log.warning("AUTH: 'ldap' in provider chain but no URL configured — skipped.")

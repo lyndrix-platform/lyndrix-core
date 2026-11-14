@@ -77,6 +77,19 @@ class AuthConfigUpdate(BaseModel):
 # Vault keys whose values must never be returned in plaintext over the API.
 _SECRET_CONFIG_KEYS = {"ldap_bind_password", "oidc_client_secret"}
 
+# endpoint field → the stored secret the core SENDS to that endpoint on the
+# next login (LDAP service bind / OIDC token request). Whoever may re-point the
+# endpoint must also know the secret — otherwise changing the URL is a way to
+# have a secret delivered that the API never shows (AZ-14).
+_SECRET_DESTINATIONS = {
+    "ldap_url": "ldap_bind_password",
+    "oidc_issuer": "oidc_client_secret",
+}
+
+
+def _same_endpoint(a: str, b: str) -> bool:
+    return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
+
 
 class LoginResponse(BaseModel):
     token: str
@@ -474,6 +487,15 @@ def update_auth_config(
     the stored key (same semantics as the NiceGUI page)."""
     from core.components.auth.logic.auth_config import auth_config_service, _SPEC_MAP
 
+    # Only the documented fields: anything else would be merged into the
+    # core/auth secret unseen (and unvalidated).
+    unknown = sorted(k for k in payload.updates if k not in _SPEC_MAP)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown auth config key(s): {', '.join(unknown)} — see GET /api/auth/config for the fields",
+        )
+
     effective = auth_config_service.get_all_effective()
 
     # Reject up-front if any requested field is env-locked.
@@ -485,6 +507,35 @@ def update_auth_config(
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": sorted(locked)},
+        )
+
+    # Re-pointing an endpoint that receives a stored secret needs that secret
+    # in the same request (the shell re-sends unchanged fields — only a real
+    # change of the address counts, and clearing it sends the secret nowhere).
+    for endpoint_key, secret_key in _SECRET_DESTINATIONS.items():
+        if endpoint_key not in payload.updates:
+            continue
+        new_endpoint = str(payload.updates[endpoint_key] or "").strip()
+        current_endpoint, _ = effective[endpoint_key]
+        secret_value, secret_source = effective[secret_key]
+        if not new_endpoint or not secret_value or _same_endpoint(new_endpoint, current_endpoint):
+            continue
+        if str(payload.updates.get(secret_key) or "").strip():
+            continue  # re-entered: the caller knows it
+        secret_label, endpoint_label = _SPEC_MAP[secret_key].label, _SPEC_MAP[endpoint_key].label
+        if secret_source == "env":
+            hint = (
+                f"the {secret_label} comes from the environment ({_SPEC_MAP[secret_key].env_var}); "
+                f"change {_SPEC_MAP[endpoint_key].env_var} there as well"
+            )
+        else:
+            hint = f"enter the {secret_label} ('{secret_key}') again in the same request"
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Changing the {endpoint_label} ('{endpoint_key}') would send the stored "
+                f"{secret_label} to the new address — {hint}."
+            ),
         )
 
     # Skip blank sensitive values so a masked secret is kept, not deleted.
