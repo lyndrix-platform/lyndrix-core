@@ -1384,6 +1384,22 @@ class ModuleManager:
             await self._await_teardown_work(module_id, ctx, snapshot, waiting, label)
         finally:
             self._dispose_context(module_id, ctx, snapshot, label)
+        await self._await_lease_release()
+
+    @staticmethod
+    async def _await_lease_release() -> None:
+        """``dispose()`` gives the module's leases up in the background; wait
+        until they are free at the coordinator, so a re-enable that follows
+        immediately contends for a free lease instead of having the stale
+        release hit its fresh interest."""
+        try:
+            from core.components.cluster.logic.cluster_service import cluster_service
+
+            wait_released = getattr(cluster_service.leases, "wait_released", None)
+            if wait_released is not None:
+                await wait_released()
+        except Exception:  # never let lease bookkeeping fail a stop
+            log.debug("STOP: waiting for the lease release failed", exc_info=True)
 
     async def _await_teardown_work(self, module_id: str, ctx, snapshot: list, waiting: set, label: str) -> None:
         loop = asyncio.get_running_loop()

@@ -117,6 +117,7 @@ class LeaseKeeper:
         # One-shot holdings of ``ctx.lease()`` scopes: name → ttl. Renewed and
         # fenced like wanted leases, but never re-acquired once lost or released.
         self._scoped: dict[str, float] = {}
+        self._releasing: set = set()      # background release tasks (see wait_released)
         # name → counter bumped on every local transition (acquired, lost,
         # forgotten, released). An attempt only counts if it is unchanged.
         self._generation: dict[str, int] = {}
@@ -253,7 +254,24 @@ class LeaseKeeper:
             return
         # Clean context: the release broadcast must reach the peers even when
         # the release was triggered from a relayed event's handler.
-        bus.create_tracked_task(coro, name=f"cluster:lease_release:{name}", context=clean_context())
+        task = bus.create_tracked_task(coro, name=f"cluster:lease_release:{name}", context=clean_context())
+        # Remembered so a caller that must not continue before the lease is
+        # really free (plugin stop → immediate re-enable) can wait for it.
+        self._releasing.add(task)
+        task.add_done_callback(self._releasing.discard)
+
+    async def wait_released(self, timeout: float = 5.0) -> None:
+        """Wait (bounded) until the releases started by :meth:`forget` reached
+        the coordinator.
+
+        ``forget`` is sync and releases in the background. A plugin that is
+        stopped and set up again right away would otherwise register its new
+        interest first and then have the stale release take the lease away
+        from the new incarnation until the next tick.
+        """
+        pending = [t for t in self._releasing if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=timeout)
 
     async def release_now(self, name: str) -> bool:
         """Give a held lease up explicitly (admin action, drain).
