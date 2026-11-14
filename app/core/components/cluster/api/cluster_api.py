@@ -42,13 +42,16 @@ async def ready():
     return JSONResponse(body, status_code=200 if ok else 503, headers=_NO_STORE)
 
 
+# Instance host names, database server details, the lease table and the
+# preflight (which re-runs on demand) are operator information: admin:read, like
+# the shell's Cluster page that shows them.
 @cluster_router.get("/api/cluster", summary="Cluster status: instances, leader, leases, placements")
-async def cluster_status(identity: ApiIdentity = Depends(require_permission("api:read"))):
+async def cluster_status(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     return await cluster_service.describe()
 
 
 @cluster_router.get("/api/cluster/preflight", summary="Re-run the HA preflight checks")
-async def cluster_preflight(identity: ApiIdentity = Depends(require_permission("api:read"))):
+async def cluster_preflight(identity: ApiIdentity = Depends(require_permission("admin:read"))):
     checks = await cluster_service.run_preflight()
     return {"checks": checks, **cluster_service.preflight_summary(), "instance_id": cluster_service.instance_id}
 

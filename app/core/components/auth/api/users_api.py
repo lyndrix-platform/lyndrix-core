@@ -361,6 +361,12 @@ async def update_user(
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
 
+    # Authorization BEFORE the lookup: without admin rights the answer for any
+    # other name is 403, whether or not such a user exists (404 here would let
+    # every account enumerate usernames).
+    if not _same_username(username, identity.username) and not identity.allows("admin:write"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
+
     current = await asyncio.to_thread(_user_service().get_by_username, username)
     if not current:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")

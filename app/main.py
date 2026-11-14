@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
@@ -82,9 +82,13 @@ app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",
     version=__version__,
+    # The interactive docs and the schema are served by the gated routes below.
     docs_url=None,
     redoc_url=None,
+    openapi_url=None,
 )
+
+_OPENAPI_URL = "/openapi.json"
 
 app.add_middleware(
     CORSMiddleware,
@@ -155,11 +159,29 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
+def _api_docs_access(request: Request) -> None:
+    """Who may read the API map (OpenAPI schema, Swagger UI, ReDoc).
+
+    It lists every core and plugin route with its parameters — reconnaissance
+    material. Open while ``ENV_TYPE=dev``; otherwise it needs ``admin:read``
+    (send an API key / session token header, e.g. with curl — a browser cannot
+    attach one to a page load).
+    """
+    if settings.ENV_TYPE == "dev":
+        return
+    require_permission("admin:read")(request)
+
+
+@app.get(_OPENAPI_URL, include_in_schema=False)
+async def openapi_schema(_: None = Depends(_api_docs_access)):
+    return JSONResponse(app.openapi())
+
+
 @app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
+async def custom_swagger_ui_html(_: None = Depends(_api_docs_access)):
     """Swagger UI with the Lyndrix dark theme and an Authorize button."""
     response = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — Docs",
         swagger_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
         swagger_ui_parameters={"persistAuthorization": True, "tryItOutEnabled": True},
@@ -173,9 +195,9 @@ async def custom_swagger_ui_html():
 
 
 @app.get("/redoc", include_in_schema=False)
-async def custom_redoc_html():
+async def custom_redoc_html(_: None = Depends(_api_docs_access)):
     return get_redoc_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — ReDoc",
         redoc_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
     )
@@ -224,6 +246,32 @@ def _public_config_snapshot() -> dict:
         for s in EDITABLE_SETTINGS
     ]
     return sanitized
+
+
+# What every signed-in user's shell needs from the configuration: branding,
+# locale and theme defaults. Everything else in the snapshot (database and
+# Vault hosts, bootstrap account names, LDAP/OIDC mappings, plugin sources) is
+# for administrators.
+_USER_CONFIG_FIELDS = (
+    "APP_NAME",
+    "APP_TITLE",
+    "DEFAULT_LOCALE",
+    "SUPPORTED_LOCALES",
+    "DEFAULT_THEME_ID",
+    "THEME_ENGINE_ENABLED",
+)
+
+
+def _user_config_snapshot() -> dict:
+    """The configuration view of a caller without ``admin:read``.
+
+    Same shape as the full snapshot (``env_locked`` / ``editable_settings``
+    are present but empty) so a shell reads both the same way.
+    """
+    view = {name: getattr(settings, name, None) for name in _USER_CONFIG_FIELDS}
+    view["env_locked"] = []
+    view["editable_settings"] = []
+    return view
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -670,13 +718,16 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_permission(
     """Expose runtime settings from config.py with secrets redacted.
 
     Requires authentication and the ``api:read`` permission (system API key,
-    HTTP Basic, per-user API key, or dashboard session).
+    HTTP Basic, per-user API key, or dashboard session). Callers with
+    ``admin:read`` get the full snapshot; everybody else only the branding,
+    locale and theme fields a shell needs (``restricted: true``).
     """
-    snapshot = _public_config_snapshot()
+    full = identity.allows("admin:read")
     return {
         "status": "ok",
         "authenticated_as": identity.username,
-        "config": snapshot,
+        "config": _public_config_snapshot() if full else _user_config_snapshot(),
+        "restricted": not full,
     }
 
 
