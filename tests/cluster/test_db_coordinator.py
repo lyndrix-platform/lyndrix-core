@@ -1,4 +1,4 @@
-"""``db`` coordinator driver against an in-memory SQLite engine shared by two
+"""``db`` coordinator driver against one SQLite database shared by two
 "instances" (same tables, different instance ids).
 
 Run inside the lyndrix-core runtime:
@@ -8,16 +8,18 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, insert, select, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import insert, select, text
 
+from cluster_harness import make_engine
 from core.components.cluster.logic.drivers.db import DbCoordinator
 from core.components.cluster.logic.models import ClusterEvent, ClusterInstance
 
 
 @pytest.fixture()
-def engine():
-    eng = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+def engine(tmp_path):
+    # File database, one connection per thread — see cluster_harness for why an
+    # in-memory StaticPool engine made these tests flaky.
+    eng = make_engine(tmp_path)
     yield eng
     eng.dispose()
 
