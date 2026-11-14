@@ -37,6 +37,11 @@ class ModuleManager:
         self._plugin_state_schema_ready = False
         # module_id → (failures, monotonic time of the next allowed install attempt)
         self._reconcile_install_backoff: dict = {}
+        # (module_id, version) → (failures, monotonic time of the next allowed
+        # attempt): versions that were installed here but failed verification.
+        # In-memory on purpose — plugin_states keeps the version the cluster was
+        # asked to run and has exactly one writer (the operator's lead instance).
+        self._reconcile_verify_backoff: dict = {}
         # module_ids whose version upgrade (towards plugin_states) is in flight here
         self._reconcile_upgrading: set = set()
         self._mounted_static_paths: set = set()
@@ -399,6 +404,7 @@ class ModuleManager:
             and await self._verify_after_install(resolved_module_id)
         )
         if verified:
+            self._reconcile_verify_cleared(resolved_module_id)
             # Push the new state to connected UIs. The fresh-install path
             # (load_module) emits no ui:needs_refresh of its own, and the React
             # client invalidates its plugin list + bundle caches only on
@@ -408,6 +414,11 @@ class ModuleManager:
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
             await self._report_operation(resolved_module_id, module_name, "done", None)
         else:
+            # Remember the version that failed here BEFORE the revert swaps the
+            # files back: the row keeps saying "the cluster runs <failed>", and
+            # without this the reconcile would download, swap, verify and revert
+            # the same version again on every pass.
+            self._reconcile_verify_failed(resolved_module_id, self._read_folder_version(module_name))
             reverted = await self._auto_revert(module_name, resolved_module_id)
             entry = self.registry.get(resolved_module_id) if resolved_module_id else None
             detail = (
@@ -1093,6 +1104,46 @@ class ModuleManager:
             f"If the plugin no longer exists, remove its plugin_states row."
         )
 
+    @staticmethod
+    def _verify_backoff_key(module_id: str, version) -> tuple:
+        return (module_id, str(version or "").strip().lstrip("vV"))
+
+    def _reconcile_verify_allowed(self, module_id: str, version) -> bool:
+        """False while ``version`` of the plugin is backed off after it failed
+        verification on this instance."""
+        entry = self._reconcile_verify_backoff.get(self._verify_backoff_key(module_id, version))
+        if entry is None:
+            return True
+        import time as _time
+
+        failures, next_attempt = entry
+        if _time.monotonic() >= next_attempt:
+            return True
+        log.debug(
+            f"RECONCILE: '{module_id}' {version} failed verification here {failures}× — backed off."
+        )
+        return False
+
+    def _reconcile_verify_failed(self, module_id, version) -> None:
+        """Back off (10 min → 24 h) from a version that failed verification here."""
+        if not module_id or not version:
+            return
+        import time as _time
+
+        key = self._verify_backoff_key(module_id, version)
+        failures = self._reconcile_verify_backoff.get(key, (0, 0.0))[0] + 1
+        delay = min(_RECONCILE_INSTALL_BACKOFF_BASE_S * (2 ** (failures - 1)), _RECONCILE_INSTALL_BACKOFF_MAX_S)
+        self._reconcile_verify_backoff[key] = (failures, _time.monotonic() + delay)
+        log.warning(
+            f"RECONCILE: '{module_id}' {version} failed verification on this instance {failures}× — "
+            f"the cluster reconcile retries it in {delay // 60} min at the earliest."
+        )
+
+    def _reconcile_verify_cleared(self, module_id) -> None:
+        """A version of the plugin verified fine here: forget earlier failures."""
+        for key in [k for k in self._reconcile_verify_backoff if k[0] == module_id]:
+            self._reconcile_verify_backoff.pop(key, None)
+
     def _drop_legacy_plugin_states(self) -> None:
         """Delete plugin_states rows of plugins that became core components."""
         if not db_instance.SessionLocal:
@@ -1277,6 +1328,15 @@ class ModuleManager:
         if not want or not have or want.lstrip("vV") == have.lstrip("vV"):
             return False
         if mid in self._reconcile_upgrading or not self._reconcile_install_allowed(mid):
+            return False
+        # This instance already tried ``want`` and reverted it (verification
+        # failed): do not download → swap → verify → revert it again on every
+        # pass. ``reverted_from`` covers a revert whose back-off was not recorded.
+        key = self._verify_backoff_key(mid, want)
+        if self._verify_backoff_key(mid, entry.get("reverted_from")) == key \
+                and key not in self._reconcile_verify_backoff:
+            self._reconcile_verify_failed(mid, want)
+        if not self._reconcile_verify_allowed(mid, want):
             return False
         module_file = getattr(entry.get("module"), "__file__", None)
         if module_file and self._install_in_flight(Path(module_file).parent.name):
