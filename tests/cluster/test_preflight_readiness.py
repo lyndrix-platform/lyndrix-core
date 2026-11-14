@@ -58,10 +58,10 @@ class _FakeClusterService:
         return dict(self._markers)
 
 
-def _instance(iid, roles, secret_fp, plugins_fp="p1", version="1.4.0"):
+def _instance(iid, roles, secret_fp, plugins_fp="p1", version="1.4.0", me="a", started_at=None):
     return InstanceInfo(
         instance_id=iid, hostname=iid, roles=roles, core_version=version, api_version="1.7.0",
-        started_at=None, heartbeat_at=None, age_s=1.0, alive=True, is_self=iid == "a",
+        started_at=started_at, heartbeat_at=None, age_s=1.0, alive=True, is_self=iid == me,
         meta={"secret_fp": secret_fp, "plugins_fp": plugins_fp},
     )
 
@@ -79,7 +79,9 @@ def test_cluster_preflight_flags_contract_violations(monkeypatch):
     checks = _by_id(asyncio.run(run_checks(svc)))
     assert checks["coordinator"].status == "ok"
     assert checks["redundancy"].status == "ok"
-    assert checks["storage_secret"].status == "fail"
+    # 1:1 tie without start times → the lowest id ("a", this instance) is the
+    # reference: the mismatch is reported, but only "b" is unfit for traffic.
+    assert checks["storage_secret"].status == "warn" and "b" in checks["storage_secret"].message
     assert checks["versions"].status == "warn"
     assert checks["plugin_artifacts"].status == "warn"
     assert checks["roles"].status == "fail" and "runner" in checks["roles"].message
@@ -107,6 +109,98 @@ def test_cluster_preflight_healthy_pair(monkeypatch):
     assert checks["trusted_proxies"].status == "ok" and checks["drain"].status == "ok"
     assert checks["database"].status == "ok"
     assert checks["storage"].status == "ok" and "shared mount" in checks["storage"].message
+
+
+def _secret_check(instances):
+    return _by_id(asyncio.run(run_checks(_FakeClusterService(instances))))["storage_secret"]
+
+
+def test_secret_mismatch_fails_only_on_the_odd_instance():
+    """CL-01: one joiner with a different STORAGE_SECRET must not take every
+    healthy instance out of the load balancer."""
+    def view(me):
+        pods = [_instance(f"pod-{n}", ["api", "leader"], "fp-good", me=me) for n in (1, 2, 3, 4)]
+        return pods + [_instance("docker-auto", ["api"], "fp-typo", me=me)]
+
+    healthy = _secret_check(view("pod-2"))
+    assert healthy.status == "warn" and "docker-auto" in healthy.message
+    assert "pod-" not in healthy.message                       # only the odd one is named
+    odd = _secret_check(view("docker-auto"))
+    assert odd.status == "fail" and "4 of 5" in odd.message
+
+
+def test_secret_tie_fails_only_the_younger_instance():
+    old, young = datetime(2026, 1, 1, 8, 0), datetime(2026, 1, 1, 9, 0)
+
+    def view(me):
+        # ids chosen so the id order contradicts the age order
+        return [_instance("zz-old", ["api", "leader"], "fp-1", me=me, started_at=old),
+                _instance("aa-young", ["api", "leader"], "fp-2", me=me, started_at=young)]
+
+    assert _secret_check(view("zz-old")).status == "warn"
+    assert _secret_check(view("aa-young")).status == "fail"
+
+
+def test_secret_check_trusts_the_own_fingerprint_over_a_stale_row():
+    """The self row may still carry the fingerprint of the previous process."""
+    svc = _FakeClusterService([
+        _instance("a", ["api"], "fp-stale"), _instance("b", ["api"], "fp-good"), _instance("c", ["api"], "fp-good"),
+    ])
+    svc.secret_fingerprint = "fp-good"
+    assert _by_id(asyncio.run(run_checks(svc)))["storage_secret"].status == "ok"
+
+
+def test_secret_mismatch_keeps_healthy_instances_ready(monkeypatch):
+    """p9 as a test: 4 healthy pods + 1 joiner with a typo'd secret → the healthy
+    pod's /api/ready stays 200 (it used to flip to 503 on every instance)."""
+    from core.components.boot.logic.boot_service import BootPhase
+
+    good = cluster_service.secret_fingerprint
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def inst(iid, fp, me=False):
+        return InstanceInfo(iid, "h", ["api", "leader"], "1.11.1", "1.13.0", now, now, 0.5, True, me,
+                            {"secret_fp": fp})
+
+    class Coord(_FakeCoordinator):
+        driver, instance_id = "db", cluster_service.instance_id
+        view: list = []
+
+        async def heartbeat(self, meta):
+            return None
+
+        async def instances(self):
+            return list(Coord.view)
+
+        async def holder(self, name):
+            return None
+
+    monkeypatch.setattr(boot_service, "phase", BootPhase.READY)
+    monkeypatch.setattr(boot_service, "is_booting", False)
+    monkeypatch.setattr(db_instance, "is_connected", True)
+    monkeypatch.setattr(vault_instance, "is_connected", True)
+    monkeypatch.setattr(cluster_service, "coordinator", Coord())
+    monkeypatch.setattr(cluster_service, "mode", "cluster")
+    monkeypatch.setattr(cluster_service, "started", True)
+    monkeypatch.setattr(cluster_service, "draining", False)
+    monkeypatch.setattr(cluster_service, "preflight_results", [])
+    monkeypatch.setattr(cluster_service, "preflight_at", None)
+    monkeypatch.setattr(cluster_service, "_instances", [])
+    monkeypatch.setattr(cluster_service, "_write_storage_marker", lambda: None)
+
+    healthy = [inst(cluster_service.instance_id, good, True)] + [inst(f"pod-{n}", good) for n in (2, 3, 4)]
+
+    async def run():
+        Coord.view = healthy
+        await cluster_service.run_preflight()
+        assert cluster_service.readiness() == (True, [])
+        Coord.view = healthy + [inst("docker-auto", "deadbeefdeadbeef")]
+        await cluster_service.run_preflight()
+        return cluster_service.readiness()
+
+    assert asyncio.run(run()) == (True, [])
+    check = {c["id"]: c for c in cluster_service.preflight_results}["storage_secret"]
+    assert check["status"] == "warn" and "docker-auto" in check["message"]
 
 
 def test_storage_check_needs_fresh_peer_markers():

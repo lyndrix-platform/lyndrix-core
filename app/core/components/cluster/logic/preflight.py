@@ -75,6 +75,40 @@ def _pinned_roles() -> dict[str, list[str]]:
     return out
 
 
+def _secret_reference(alive: list, own_fp: Optional[str]) -> tuple[Optional[str], list[str], int]:
+    """The STORAGE_SECRET fingerprint the cluster agrees on, and who deviates.
+
+    Reference = the fingerprint most live instances carry; a tie goes to the
+    group holding the instance that has been running longest (then the lowest
+    id, so every instance computes the same answer from the same rows). The
+    leader is deliberately *not* the reference: a joiner with a wrong secret can
+    win the leader lease. Returns ``(reference, [instance ids that differ],
+    number of instances carrying the reference)``.
+    """
+    fingerprints: dict[str, Optional[str]] = {}
+    for inst in alive:
+        # This instance's own value is authoritative even when its row is stale.
+        fp = own_fp if (inst.is_self and own_fp) else inst.meta.get("secret_fp")
+        if fp:
+            fingerprints[inst.instance_id] = fp
+    if not fingerprints:
+        return None, [], 0
+
+    def _age_rank(inst) -> tuple:
+        started = inst.started_at
+        # Unknown start time sorts last (youngest); the id breaks remaining ties.
+        return (started is None, started or 0, inst.instance_id)
+
+    groups: dict[str, list] = {}
+    for inst in alive:
+        fp = fingerprints.get(inst.instance_id)
+        if fp:
+            groups.setdefault(fp, []).append(inst)
+    reference = min(groups, key=lambda fp: (-len(groups[fp]), min(_age_rank(i) for i in groups[fp])))
+    odd = [iid for iid, fp in fingerprints.items() if fp != reference]
+    return reference, odd, len(groups[reference])
+
+
 async def run_checks(service: "ClusterService") -> list[Check]:
     checks: list[Check] = []
     cluster = service.is_cluster
@@ -110,16 +144,29 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     else:
         add("redundancy", "skip", "single-instance mode")
 
-    # 3. STORAGE_SECRET identical
-    fingerprints = {i.meta.get("secret_fp") for i in alive if i.meta.get("secret_fp")}
-    if cluster and len(fingerprints) > 1:
-        add("storage_secret", "fail", "STORAGE_SECRET differs between live instances",
-            "Sessions and SSE tickets minted on one instance are rejected by the others — "
-            "set the same STORAGE_SECRET on every instance.")
-    elif cluster:
-        add("storage_secret", "ok", "STORAGE_SECRET fingerprint identical on all live instances")
-    else:
+    # 3. STORAGE_SECRET identical. Only the instance(s) whose secret differs from
+    #    the cluster's are unfit for traffic: a single odd joiner must not turn
+    #    every healthy instance unready (that was a cluster-wide outage).
+    if not cluster:
         add("storage_secret", "skip", "single-instance mode")
+    else:
+        own_fp = getattr(service, "secret_fingerprint", None) or next(
+            (i.meta.get("secret_fp") for i in alive if i.is_self), None)
+        reference, odd, agreeing = _secret_reference(alive, own_fp)
+        if reference is None or not odd:
+            add("storage_secret", "ok", "STORAGE_SECRET fingerprint identical on all live instances")
+        elif own_fp and own_fp != reference:
+            add("storage_secret", "fail",
+                f"this instance's STORAGE_SECRET differs from the one {agreeing} of "
+                f"{len(alive)} live instance(s) share",
+                "Sessions and SSE tickets minted here are rejected by the other instances, so this instance "
+                "stays out of rotation. Set the cluster's STORAGE_SECRET here; rotating the secret needs a "
+                "restart of ALL instances with the new value (a rolling update keeps the new ones unready).")
+        else:
+            add("storage_secret", "warn",
+                f"STORAGE_SECRET of {', '.join(sorted(odd))} differs from the cluster's",
+                "Those instances keep themselves out of rotation (their /api/ready is 503); sessions and SSE "
+                "tickets they mint are rejected here. Set the same STORAGE_SECRET on them.")
 
     # 4. versions
     versions = {f"{i.core_version}/{i.api_version}" for i in alive if i.core_version}

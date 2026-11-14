@@ -26,7 +26,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `VAULT_URL` | `http://vault:8200` | 0 | load-balanced or active Vault endpoint |
 | `VAULT_NODES` | — | 2 | comma-separated list of every Vault node; today only health-checked by the preflight |
 | `LYNDRIX_MASTER_KEY` + `SECURITY_DIR/vault_keys.enc` | — | 0 | unchanged; in HA the key file is a shared secret on every instance |
-| `STORAGE_SECRET` | — | 0 | unchanged; **must be identical on every instance** (preflight compares fingerprints; a mismatch keeps the instance out of rotation) |
+| `STORAGE_SECRET` | — | 0 | unchanged; **must be identical on every instance** (preflight compares fingerprints; the instance(s) whose value differs from the majority stay out of rotation). Rotating it needs a restart of **all** instances with the new value — in a rolling update the first new instance is the odd one and stays unready |
 
 Planned but not shipped (documented so the names are reserved): `LYNDRIX_MIGRATE_MODE`,
 `LYNDRIX_PLUGIN_ARTIFACTS`, `LYNDRIX_STORAGE_DRIVER` / `LYNDRIX_STORAGE_S3_*`, `VAULT_UNSEAL_MODE`,
@@ -42,7 +42,7 @@ and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run ch
 |---|---|---|
 | `coordinator` | cluster mode and the coordinator is not connected | — |
 | `redundancy` | — | only one live instance |
-| `storage_secret` | `STORAGE_SECRET` fingerprints differ between live instances | — |
+| `storage_secret` | **this** instance's `STORAGE_SECRET` fingerprint differs from the one most live instances share (tie: the longest-running instance's value wins) | another instance's fingerprint differs (named in the message; that instance fails its own check) |
 | `versions` | — | mixed core versions (expected during a rolling update) |
 | `plugin_artifacts` | — | the loaded plugin set differs between instances |
 | `roles` | a `pinned:<role>` plugin has no live instance with that role; no leader-capable instance | — |

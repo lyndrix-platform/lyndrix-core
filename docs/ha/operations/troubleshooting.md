@@ -3,7 +3,7 @@
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/ready` → 503 with `reasons: ["coordinator"]` on one instance | the coordinator could not start (first-boot DDL race, DB unreachable); it retries with back-off | check `CLUSTER: coordinator start failed` in the logs; it recovers by itself once the DB answers |
-| `reasons: ["preflight:storage_secret"]` | `STORAGE_SECRET` differs between instances | set the same value everywhere; sessions and SSE tickets of one instance are rejected by the others until then |
+| `reasons: ["preflight:storage_secret"]` on one instance | its `STORAGE_SECRET` differs from the value most instances share | set the cluster's value on that instance; the others stay ready and only show `storage_secret: WARN` naming it. To rotate the secret restart all instances together |
 | Preflight `roles: FAIL — no live instance has role 'runner'` | the IaC Orchestrator is pinned to `runner` and no live instance has it | start the runner instance / add `runner` to one instance's `LYNDRIX_INSTANCE_ROLES` |
 | Plugin page shows a plugin as **Remote** | it is `pinned:<role>` and this instance lacks the role | expected; route its paths to the pinned instance at the balancer |
 | `LEASE: '…' could not be renewed for 30s — treating it as lost` | the instance lost the database for a full TTL | fencing worked as designed; the work moved to a peer; check DB connectivity of that host |
