@@ -241,3 +241,31 @@ def test_running_plugin_is_stopped_when_its_row_says_inactive(mgr):
     assert log == ["teardown", "worker cancelled"]
     assert mgr.registry["p.live"]["status"] == "disabled"
     assert mgr.registry["p.fresh"]["status"] == "disabled"
+
+
+def test_enabling_a_plugin_activates_the_plugins_blocked_on_it(mgr):
+    """Follow-up to BG-06: dependents used to stay "blocked" until some later
+    activation pass (the next install event or DB reconnect)."""
+    order = []
+    mgr.registry["p.base"] = _entry("p.base", "disabled", lambda ctx: order.append("base"))
+    mgr.registry["p.child"] = _entry("p.child", "blocked", lambda ctx: order.append("child"),
+                                     dependencies=[{"id": "p.base"}])
+    mgr.registry["p.grandchild"] = _entry("p.grandchild", "blocked", lambda ctx: order.append("grandchild"),
+                                          dependencies=[{"id": "p.child"}])
+    mgr.registry["p.other"] = _entry("p.other", "disabled", lambda ctx: order.append("other"))
+
+    async def run():
+        assert await mgr.set_module_active("p.base", True, persist=False) is True
+
+    asyncio.run(run())
+    assert order == ["base", "child", "grandchild"]            # disabled plugins stay off
+    assert [mgr.registry[m]["status"] for m in ("p.child", "p.grandchild", "p.other")] == \
+        ["active", "active", "disabled"]
+
+    # the sync toggle does the same
+    for mid in ("p.child", "p.grandchild"):
+        mgr.registry[mid]["status"] = "blocked"
+    mgr.registry["p.base"]["status"] = "disabled"
+    order.clear()
+    assert mgr.toggle_module("p.base", True, persist=False) is True
+    assert order == ["base", "child", "grandchild"]

@@ -1185,6 +1185,10 @@ class ModuleManager:
             entry["status"] = "initializing"
             self._execute_setup(module_id)
             log.info(f"MODULE: 🟢 '{module_id}' is now ACTIVE")
+            # Plugins parked as "blocked" because they depend on this one start
+            # now, not at some later activation pass. (An async setup() does
+            # the same when it completes.)
+            self._activate_unblocked()
         bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
 
     def _disable_begin(self, module_id: str) -> tuple:
