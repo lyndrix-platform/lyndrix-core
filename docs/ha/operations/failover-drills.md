@@ -56,8 +56,10 @@ with back-off forever, reconnects without re-running the IAM bootstrap or loadin
 
 ## 7. Rolling restart from the UI
 
-Settings → System Info → *Restart* in cluster mode: instances exit staggered (5 s apart, leader
-last) and come back; the balancer never runs out of ready instances with ≥ 2 instances.
+Settings → System Info → *Restart* in cluster mode: the leader restarts one instance after the
+other and waits for each to be ready again (leader last, runners untouched); poll `/api/ready` on
+every instance — at most one answers 503 at any time. `GET /api/cluster` → `restart` on the leader
+shows the progress.
 
 ## 8. Load balancer failover (production)
 

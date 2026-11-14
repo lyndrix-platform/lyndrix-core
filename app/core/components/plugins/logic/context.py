@@ -60,12 +60,16 @@ class _MaintenanceWindow:
 
 
 class _LeaseScope:
-    """``async with ctx.lease("name") as held:`` — one-shot, non-renewed lease.
+    """``async with ctx.lease("name") as held:`` — a lease for one piece of work.
 
     If the module already holds the lease through ``ctx.on_lease`` the scope
-    reports ``held=True`` without touching the coordinator (and does not
-    release it on exit). Otherwise it tries to acquire the lease once for
-    ``ttl`` seconds and releases it when the block ends.
+    reports ``held=True`` without touching it (and does not release it on
+    exit). Otherwise it tries to acquire the lease once; while the block runs
+    the lease is renewed like any other (the work may take longer than the
+    TTL) and released when the block ends. A second scope for the same name on
+    the same instance gets ``held=False`` — the lease is exclusive within the
+    instance, too. Long-running bodies should check ``ctx.holds_lease(name)``
+    now and then: it turns ``False`` if the lease could not be renewed.
     """
 
     def __init__(self, ctx: "ModuleContext", name: str, ttl: int | None):
@@ -76,22 +80,17 @@ class _LeaseScope:
         self.held = False
 
     async def __aenter__(self) -> bool:
-        cluster = self._ctx._cluster()
-        if cluster.leases.holds(self._name):
+        keeper = self._ctx._cluster().leases
+        if self._name in keeper.wanted and keeper.holds(self._name):
             self.held = True
             return True
-        try:
-            self.held = bool(await cluster.coordinator.try_acquire(self._name, self._ttl))
-        except Exception as exc:
-            self._ctx.log.debug("LEASE: try_acquire('%s') failed: %s", self._name, exc)
-            self.held = False
-        self._acquired_here = self.held
+        self.held = self._acquired_here = await keeper.acquire_scoped(self._name, self._ttl)
         return self.held
 
     async def __aexit__(self, exc_type, exc, tb):
         if self._acquired_here:
             try:
-                await self._ctx._cluster().coordinator.release(self._name)
+                await self._ctx._cluster().leases.release_scoped(self._name)
             except Exception as rel_exc:
                 self._ctx.log.debug("LEASE: release('%s') failed: %s", self._name, rel_exc)
         return False
@@ -272,29 +271,77 @@ class ModuleContext:
     @property
     def cluster_instances(self) -> list[dict]:
         """Every known core instance as ``{"instance_id", "hostname", "roles",
-        "alive", "is_self"}`` (core API ≥ 1.7.1). Lets a plugin whose work is
-        split by role (API everywhere, execution on ``runner`` instances) tell
-        the operator that no executor is online instead of queueing silently.
-        In single mode: a one-element list describing this instance."""
+        "alive", "is_self"}`` (core API ≥ 1.7.1) plus, since API 1.14,
+        ``state`` (alive | draining | restarting | dead), ``incarnation``,
+        ``heartbeat_at`` (ISO, database clock) and ``age_s``. Lets a plugin
+        whose work is split by role (API everywhere, execution on ``runner``
+        instances) tell the operator that no executor is online instead of
+        queueing silently. In single mode: a one-element list describing this
+        instance. In cluster mode the list is **empty** while this instance has
+        no usable view of the registry (just started, database unreachable) —
+        an empty list means "unknown", never "everybody else is dead"."""
         svc = self._cluster()
-        out = [
-            {
+        if getattr(svc, "is_cluster", False) and not getattr(svc, "view_ready", True):
+            return []
+        out = []
+        for i in (getattr(svc, "_instances", None) or []):
+            beat = getattr(i, "heartbeat_at", None)
+            alive = bool(getattr(i, "alive", False))
+            out.append({
                 "instance_id": i.instance_id,
                 "hostname": getattr(i, "hostname", None),
                 "roles": list(getattr(i, "roles", None) or []),
-                "alive": bool(getattr(i, "alive", False)),
+                "alive": alive,
                 "is_self": bool(getattr(i, "is_self", False)),
-            }
-            for i in (getattr(svc, "_instances", None) or [])
-        ]
+                "state": getattr(i, "state", None) or ("alive" if alive else "dead"),
+                "incarnation": getattr(i, "incarnation", None),
+                "heartbeat_at": beat.isoformat() if hasattr(beat, "isoformat") else None,
+                "age_s": getattr(i, "age_s", None),
+            })
         if not out:
             out.append({"instance_id": svc.instance_id, "hostname": None,
-                        "roles": list(svc.roles), "alive": True, "is_self": True})
+                        "roles": list(svc.roles), "alive": True, "is_self": True,
+                        "state": "alive", "incarnation": getattr(svc, "incarnation", None),
+                        "heartbeat_at": None, "age_s": 0.0})
         return out
 
     def has_live_role(self, role: str) -> bool:
-        """``True`` when at least one live instance (this one included) has ``role``."""
-        return any(role in i["roles"] for i in self.cluster_instances if i["alive"])
+        """``True`` when an instance with ``role`` is live (this one included)
+        **or expected back any moment**: it is draining/restarting gracefully
+        within ``LYNDRIX_RESTART_GRACE_SECONDS``, or this instance cannot tell
+        yet (no usable view). ``False`` only when the role is known to be gone
+        — so "no runner online" is not reported during a planned restart. Use
+        :meth:`role_state` for the precise state."""
+        return self.role_state(role)["state"] != "dead"
+
+    def role_state(self, role: str) -> dict:
+        """State of a role across the cluster (API ≥ 1.14): ``{"role", "state",
+        "instances": {instance_id: state}}`` with ``state`` = the best of the
+        instances carrying it — ``alive`` | ``draining`` | ``restarting``
+        (stopped on purpose, expected back within the grace) | ``dead`` |
+        ``unknown`` (this instance has no usable view yet; ask again)."""
+        return self._cluster().role_state(role)
+
+    def instance_state(self, instance_id: str) -> dict:
+        """What the cluster knows about one instance (API ≥ 1.14): ``{"instance_id",
+        "state", "known", "roles", "incarnation", "last_heartbeat", "age_s"}``.
+
+        ``state``: ``alive`` | ``draining`` | ``restarting`` | ``dead`` |
+        ``unknown``. Built for "is the instance that claimed this job still
+        there?" checks: act on ``dead`` only — ``restarting`` is expected back,
+        ``unknown`` means *this* instance cannot tell right now. Compare
+        ``incarnation`` with the one stored at claim time (:attr:`incarnation`)
+        to notice a restart under a fixed instance id. React promptly with
+        ``@ctx.subscribe("cluster:instance_lost")`` (local event, payload
+        ``{instance_id, roles, last_heartbeat, incarnation, graceful}``)."""
+        return self._cluster().instance_state(instance_id)
+
+    @property
+    def incarnation(self) -> str:
+        """Boot nonce of this core process (API ≥ 1.14) — new on every start,
+        also under a fixed ``LYNDRIX_INSTANCE_ID``. Stamp claimed work with it
+        next to :attr:`instance_id`."""
+        return self._cluster().incarnation
 
     def _lease_name(self, name: str) -> str:
         # A singleton plugin is one unit of background work: every on_lease()
@@ -318,6 +365,12 @@ class ModuleContext:
 
         Guard with ``getattr(ctx, "on_lease", None)`` to stay loadable on older
         cores (fall back to starting the work directly).
+
+        API ≥ 1.14: ``acquired`` receives the lease's fencing token when it
+        declares a ``token`` parameter (``def start(token): …``); callbacks
+        without parameters are called as before. ``lost`` fires *before* a peer
+        can hold the lease (the holder fences itself ahead of the TTL), and a
+        ``ttl`` below two heartbeat intervals is raised to that minimum.
         """
         full = self._lease_name(name)
         self._cluster().leases.want(full, acquired=acquired, lost=lost, ttl=ttl)
@@ -327,8 +380,28 @@ class ModuleContext:
     def holds_lease(self, name: str) -> bool:
         return self._cluster().leases.holds(self._lease_name(name))
 
+    def lease_token(self, name: str) -> int | None:
+        """Fencing token of lease ``name`` while this instance holds it, else
+        ``None`` (API ≥ 1.14).
+
+        The token grows with every acquisition of the lease, cluster-wide. A
+        holder that was paused (stalled event loop, frozen container) cannot
+        know that a peer took over — but its late writes can be made to fail:
+        store the token with the data and write conditionally::
+
+            token = ctx.lease_token("monitoring:prober")
+            UPDATE probe_state SET …, lease_token = :token
+             WHERE id = :id AND lease_token <= :token      -- 0 rows → I am stale, stop
+
+        Thread-safe; ``None`` as soon as the self-fencing deadline has passed.
+        """
+        return self._cluster().leases.token(self._lease_name(name))
+
     def lease(self, name: str, *, ttl: int | None = None) -> _LeaseScope:
-        """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""
+        """Lease for one piece of work (``async with ctx.lease("x") as held``):
+        acquired once, renewed while the block runs, released at its end;
+        ``held`` is ``False`` when a peer — or another scope on this instance —
+        has it. ``ctx.lease_token(name)`` gives its fencing token."""
         return _LeaseScope(self, self._lease_name(name), ttl)
 
     def release_lease(self, name: str) -> bool:
@@ -473,7 +546,13 @@ class ModuleContext:
     def create_task(self, coro, *, name: str = None):
         """Create an observed background task owned by this module."""
         task_name = name or f"module:{self.manifest.id}"
-        task = global_bus.create_tracked_task(coro, name=task_name)
+        # A module's background work outlives whatever triggered it — also when
+        # that was an event relayed from a peer (a peer-triggered reconcile
+        # activating this plugin). Start it outside the relay context, or every
+        # cluster event it ever emits would count as "derived from a relayed
+        # event" and never be published.
+        from core.components.cluster.logic.origin import clean_context
+        task = global_bus.create_tracked_task(coro, name=task_name, context=clean_context())
         self._tasks.append(task)
         # Forget the task once it is done: a plugin that spawns one task per
         # event otherwise grows this list (each finished Task keeps its

@@ -37,8 +37,23 @@ notifications, plugin state changes), so polling is cheap.
   is exactly the race that produces 1020 under MariaDB ≥ 11.6 defaults.
 - A fresh instance starts reading events at `MAX(id)`; the leader prunes events older than an
   hour, dead instance rows and expired keys every five minutes.
-- An instance that stops gracefully deletes its row and its leases and broadcasts
-  `cluster:lease_released`, so peers acquire immediately.
+- Event ids do not become visible in order (InnoDB assigns the id at INSERT, the row appears at
+  COMMIT; Galera adds certification): every poll re-reads the last 500 ids and delivers the ones
+  it has not seen (`coordinator.server.events_late` counts them). Publishing goes through a
+  per-instance outbox: ordered, retried while the database is away, bounded.
+- An instance that stops gracefully releases its leases, broadcasts `cluster:lease_released` (peers
+  acquire immediately) and turns its row into a tombstone (`stopped_at`); peers show it as
+  `restarting` for `LYNDRIX_RESTART_GRACE_SECONDS`, the leader prunes silent rows after
+  max(3 × TTL, 120 s, grace + TTL). `cluster_instances.incarnation` and `.stopped_at` are additive,
+  nullable columns; instances of core ≤ 1.11 ignore them (their graceful stop still deletes the
+  row — newer peers treat a row that vanishes while alive as `restarting`, too).
+- A released lease keeps its row (`holder = NULL`): the row carries the lease's fencing token,
+  which must keep growing across releases. The leader drops released rows nobody asked for in
+  24 hours. `cluster_leases.token` is an additive, nullable column the first instance of core
+  ≥ 1.12 adds under the bootstrap lock; older instances ignore it.
+- The driver runs its SQL on a thread pool of its own (16 threads), separate from the one request
+  handlers, Vault and login hashing share — coordinator calls stuck on a dead database socket
+  cannot starve the rest of the process, and the other way round.
 
 ## Verify
 
@@ -55,3 +70,11 @@ Core unit tests: `tests/cluster/test_db_coordinator.py` (two coordinators on one
 - `redis` driver not shipped.
 - Fan-out latency equals the poll interval (500 ms default) — fine for UI refreshes and plugin
   state, not meant for high-frequency data.
+- An event committed more than 500 ids "late", or emitted during a database outage longer than
+  five minutes (or beyond 1000 queued events), is lost; state that must converge anyway needs a
+  periodic re-read (plugins: the reconcile every five minutes; settings: not yet).
+- Events carry no sequence number: a receiver cannot detect a gap by itself.
+- Lease expiry lives on the clock of the database node that answers. In a Galera cluster the
+  nodes' clocks must agree (NTP/chrony): when the writer moves to a node whose clock is *ahead* by
+  more than the fencing margin (7.5 s by default), leases expire for the peers before the holder
+  has fenced itself. The preflight only compares each instance's clock with the database's.

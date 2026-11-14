@@ -95,18 +95,28 @@ class OperationTracker:
         except Exception:
             return "local"
 
-    def live_instances(self) -> list[str]:
-        """Instance ids that must report (live ones; at least this instance)."""
-        ids: list[str] = []
+    def live_instances(self) -> Optional[list[str]]:
+        """Instance ids that must report (live ones; at least this instance) —
+        or ``None`` when this instance has no usable view of the cluster right
+        now (just started, registry unreachable). ``None`` is "unknown", not
+        "nobody": callers must not conclude that the others left."""
         try:
             svc = self._cluster()
+            if getattr(svc, "is_cluster", False) and not getattr(svc, "view_ready", True):
+                return None
             ids = sorted(i.instance_id for i in (getattr(svc, "_instances", None) or []) if getattr(i, "alive", False))
         except Exception:
-            ids = []
+            return None
         me = self.instance_id()
         if me not in ids:
             ids.append(me)
         return ids
+
+    def _lease_ttl_s(self) -> float:
+        try:
+            return float(self._cluster().ttl)
+        except Exception:
+            return 30.0
 
     # ------------------------------------------------------------------ writes
 
@@ -115,7 +125,9 @@ class OperationTracker:
         """Open an operation with every live instance as participant. Returns its id."""
         if not self.available():
             return None
-        participants = self.live_instances()
+        # Unknown view: open with this instance only — every other instance is
+        # added as a participant when it reports.
+        participants = self.live_instances() or [self.instance_id()]
         now = _utcnow()
 
         def _tx() -> int:
@@ -151,7 +163,8 @@ class OperationTracker:
         me = instance_id or self.instance_id()
         now = _utcnow()
         cutoff = now - timedelta(seconds=MATCH_WINDOW_S)
-        live = set(self.live_instances())
+        live = self._live_set()
+        ttl = self._lease_ttl_s()
 
         def _tx():
             with self._session() as s:
@@ -179,7 +192,7 @@ class OperationTracker:
                 row.updated_at = now
                 s.flush()
                 rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
-                self._mark_gone(rows, live, now)
+                self._mark_gone(rows, live, now, ttl)
                 finished = self._maybe_close(op, rows, now)
                 s.commit()
                 return op.id, op.plugin_id, op.status, finished, self._counts(rows)
@@ -242,7 +255,8 @@ class OperationTracker:
             return 0
         now = _utcnow()
         finished_payloads: list[dict] = []
-        live = set(self.live_instances())
+        live = self._live_set()
+        ttl = self._lease_ttl_s()
 
         def _tx() -> int:
             closed = 0
@@ -252,7 +266,7 @@ class OperationTracker:
                     rows = s.query(PluginOperationInstance).filter(PluginOperationInstance.operation_id == op.id).all()
                     # Instances that left (a rollout replaced the pods) never report:
                     # mark them gone, which may close the operation on the live ones.
-                    if self._mark_gone(rows, live, now):
+                    if self._mark_gone(rows, live, now, ttl):
                         payload = self._maybe_close(op, rows, now)
                         if payload is not None:
                             finished_payloads.append(payload)
@@ -326,16 +340,34 @@ class OperationTracker:
         active = [r for r in rows if r.status != "gone"]
         return sum(1 for r in active if r.status == "done"), len(active)
 
+    def _live_set(self) -> Optional[set]:
+        live = self.live_instances()
+        return set(live) if live is not None else None
+
     @staticmethod
-    def _mark_gone(rows, live: set, now: datetime) -> bool:
-        """Pending participants that are not alive any more → ``gone``. Returns True when any changed."""
+    def _mark_gone(rows, live: Optional[set], now: datetime, ttl_s: float = 30.0) -> bool:
+        """Participants that will never report because their instance is not
+        alive any more → ``gone``. Returns True when any changed.
+
+        ``pending`` ones at once. ``installing`` ones (the lead that died after
+        its progress report) once that report is older than the lease TTL —
+        until then the instance may simply be between two heartbeats. With an
+        unknown view (``live is None``) nobody is marked: an instance that
+        cannot see the cluster must not close the operation as "done 1/1".
+        """
+        if not live:
+            return False
         changed = False
         for r in rows:
-            if r.status == "pending" and live and r.instance_id not in live:
-                r.status = "gone"
-                r.message = "instance left the cluster"
-                r.updated_at = now
-                changed = True
+            if r.instance_id in live or r.status not in ("pending",) + PROGRESS_STATES:
+                continue
+            if r.status != "pending" and r.updated_at and (now - r.updated_at).total_seconds() <= ttl_s:
+                continue
+            was = r.status
+            r.status = "gone"
+            r.message = "instance left the cluster" + (f" while {was}" if was != "pending" else "")
+            r.updated_at = now
+            changed = True
         return changed
 
     def _maybe_close(self, op: PluginOperation, rows, now: datetime) -> Optional[dict]:

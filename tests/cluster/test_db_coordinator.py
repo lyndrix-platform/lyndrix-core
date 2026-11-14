@@ -1,4 +1,4 @@
-"""``db`` coordinator driver against an in-memory SQLite engine shared by two
+"""``db`` coordinator driver against one SQLite database shared by two
 "instances" (same tables, different instance ids).
 
 Run inside the lyndrix-core runtime:
@@ -8,16 +8,18 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, insert, select, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import insert, select, text
 
+from cluster_harness import make_engine
 from core.components.cluster.logic.drivers.db import DbCoordinator
 from core.components.cluster.logic.models import ClusterEvent, ClusterInstance
 
 
 @pytest.fixture()
-def engine():
-    eng = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+def engine(tmp_path):
+    # File database, one connection per thread — see cluster_harness for why an
+    # in-memory StaticPool engine made these tests flaky.
+    eng = make_engine(tmp_path)
     yield eng
     eng.dispose()
 
@@ -62,7 +64,7 @@ def test_expired_lease_is_taken_over_and_force_release_works(engine):
     asyncio.run(run())
 
 
-def test_heartbeat_registers_instances_and_stop_deregisters(engine):
+def test_heartbeat_registers_instances_and_stop_leaves_tombstones(engine):
     a, b = _coord(engine, "a"), _coord(engine, "b")
 
     async def run():
@@ -80,7 +82,10 @@ def test_heartbeat_registers_instances_and_stop_deregisters(engine):
         assert len(await b.instances()) == 2
         await a.stop()
         await b.stop()
-        assert await _coord(engine, "c").instances() == []
+        # A graceful stop leaves a tombstone (core ≥ 1.12): not alive, "restarting".
+        gone = await _coord(engine, "c").instances()
+        assert [(i.instance_id, i.alive, i.state) for i in gone] == [("a", False, "restarting"),
+                                                                     ("b", False, "restarting")]
 
     asyncio.run(run())
 

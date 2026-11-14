@@ -5,12 +5,15 @@ once: the load balancer still sends requests for one or two health-check
 intervals and users see 502s. With ``LYNDRIX_DRAIN_SECONDS > 0`` the sequence
 becomes:
 
-1. SIGTERM → ``/api/ready`` answers 503 (``cluster_service.draining``), the LB
-   takes the instance out after its next check;
-2. wait ``LYNDRIX_DRAIN_SECONDS``;
+1. SIGTERM → at once: ``/api/ready`` answers 503 (``cluster_service.draining``)
+   so the LB takes the instance out after its next check, one heartbeat
+   publishes ``draining`` to the peers (no new shards for this instance), and
+   the leases are handed over — ``lost`` callbacks first, then the release, so
+   a peer takes the leader and worker leases within about a second;
+2. wait ``LYNDRIX_DRAIN_SECONDS`` (in-flight requests finish, the LB notices);
 3. close every SSE stream with ``event: reconnect`` (clients reconnect through
    the LB and land on a live instance);
-4. release held leases (the leader hands over now, not after the TTL);
+4. leave a tombstone in the instance registry (peers show "restarting");
 5. forward the signal to uvicorn's own handler → normal shutdown.
 
 A second SIGTERM during the drain is forwarded immediately (force).
@@ -29,9 +32,12 @@ log = get_logger("Core:Cluster:Drain")
 
 
 class DrainController:
-    def __init__(self, *, seconds: int, on_drain: Callable[[], "asyncio.Future | None"]) -> None:
+    def __init__(self, *, seconds: int, on_drain: Callable[[], "asyncio.Future | None"],
+                 on_drain_start: Optional[Callable[[], None]] = None) -> None:
         self.seconds = int(seconds)
         self._on_drain = on_drain
+        # Sync hook run the moment SIGTERM arrives (readiness, peers, leases).
+        self._on_drain_start = on_drain_start
         self._previous = None
         self.installed = False
         self.draining = False
@@ -55,6 +61,11 @@ class DrainController:
             return
         self.draining = True
         log.warning("DRAIN: SIGTERM received — /api/ready → 503, draining for %ss", self.seconds)
+        if self._on_drain_start is not None:
+            try:
+                self._on_drain_start()
+            except Exception:
+                log.error("DRAIN: drain-start hook failed", exc_info=True)
         bus.emit("system:draining", {"seconds": self.seconds})
         bus.create_tracked_task(self._drain(), name="cluster:drain")
 

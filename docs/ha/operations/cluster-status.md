@@ -7,14 +7,17 @@ Settings → **Cluster** (needs `admin:read`) shows, for the instance that answe
 - **This instance**: id, host, roles, leader marker, ready/not ready with reasons, draining,
   uptime, coordinator driver. In single mode a hint explains how to enable cluster mode.
 - **Instances**: every row of `cluster_instances` with roles, core/API version, last heartbeat,
-  alive/stale, ready/draining; the leader carries a crown.
+  alive/stale, ready/draining; the leader carries a crown. The API additionally reports `state`
+  (`alive`, `draining`, `restarting`, `dead`), `incarnation` and `stopped_at` per instance and the
+  totals in `states`.
 - **Leases**: name, holder, time to expiry; *Release* (`admin:write`) hands a lease over — the
   peers acquire it within a second. Use it to move the leader or a plugin's background work.
 - **Plugin placement**: placement and status per plugin, where its lease is held, `remote`
   markers for pinned plugins.
 - **Preflight**: every check with status, message and hint; *Re-run checks* evaluates them now.
-- **Coordinator**: TTL, heartbeat, poll interval, bridge counters (published/relayed), drain,
-  trusted proxies, database version.
+- **Coordinator**: TTL, heartbeat, poll interval, bridge counters (published/relayed; the API
+  also has `outbox`, `failures`, `dropped`, `expired`, `oversized`), drain, trusted proxies,
+  database version.
 
 The page refreshes on `cluster:changed` / `cluster:leader_changed` over SSE and every 15 s.
 
@@ -42,7 +45,11 @@ many others are alive) and shared storage (not available in this version).
 | `CLUSTER: mode=cluster driver=db instance=… roles=…` | startup summary |
 | `COORDINATOR: db driver started …` | tables ready, event polling from id N |
 | `LEASE: acquired 'core:leader'` / `LEASE: lost '…' to a peer` | lease transitions |
-| `LEASE: '…' could not be renewed for 30s — treating it as lost` | coordinator unreachable → fenced |
+| `LEASE: '…' was not renewed for 22.5s (ttl 30s) — treating it as lost before a peer can take it` | coordinator unreachable → the holder fenced itself ahead of the TTL |
+| `LEASE: '…' came back under a new token — the holding was interrupted` | the row was force-released or expired while this instance believed it held it; `lost` fired, the next tick re-acquires |
 | `PREFLIGHT [storage_secret] FAIL: …` | contract violation; instance stays out of rotation |
+| `CLUSTER: heartbeat failed (N×, …)` / `heartbeat recovered after …` | the registry row could not be written; after a full TTL `/api/ready` answers 503 `heartbeat` |
+| `COORDINATOR: database connection pool refreshed (heartbeat timed out)` | a call hung on a dead database socket; the next call opens new connections |
+| `CLUSTER: storage job 'marker' has not returned for 120s …` | the `STORAGE_DIR` mount hangs; marker writes are skipped until it answers |
 | `DRAIN: SIGTERM received — /api/ready → 503, draining for 10s` | graceful stop in progress |
 | `RECONCILE (peer dev-a: installed): {'loaded': […]}` | plugin artifacts converged after a peer's install |

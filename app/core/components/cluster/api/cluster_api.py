@@ -57,13 +57,17 @@ async def cluster_preflight(identity: ApiIdentity = Depends(require_permission("
 
 
 @cluster_router.post("/api/cluster/leases/{name:path}/release", summary="Force-release a lease")
-async def release_lease(name: str, identity: ApiIdentity = Depends(require_permission("admin:write"))):
-    """Give ``name`` up so another instance can take it on its next heartbeat.
+async def release_lease(name: str, force: bool = False,
+                        identity: ApiIdentity = Depends(require_permission("admin:write"))):
+    """Give ``name`` up so another instance can take it.
 
-    Works for leases held here (``lost`` callbacks fire) and for stale rows of a
-    dead instance. The leader lease moves within one heartbeat interval.
+    A lease held by a live instance is handed over by that instance (its
+    ``lost`` callbacks run first; when it is another instance than the one
+    answering, it is asked over the cluster bus and releases within about a
+    second). Stale rows of a dead instance are freed directly, as is any lease
+    with ``force=true`` (the holder then only notices at its next renewal).
     """
     if not name or len(name) > 150:
         raise HTTPException(status_code=400, detail="invalid lease name")
-    released = await cluster_service.force_release(name)
+    released = await cluster_service.force_release(name, force=force)
     return {"status": "released" if released else "not_held", "lease": name, "by": identity.username}

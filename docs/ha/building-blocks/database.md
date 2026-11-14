@@ -36,7 +36,10 @@ NAT/conntrack entry expired, a half-open TCP session) does not fail — the kern
 `read_timeout`/`write_timeout` (`DB_SOCKET_TIMEOUT_SECONDS`, auto = statement cap + 30 s): the query
 fails with error 2013, SQLAlchemy drops the connection and the next call opens a fresh one. On top of
 that the heartbeat and each lease renewal are abandoned after the lease TTL, so an instance logs the
-outage within seconds and resumes as soon as the database answers again. Setting
+outage within seconds and resumes as soon as the database answers again. When a heartbeat times out
+the coordinator additionally swaps the connection pool (at most once per lease TTL, log line
+`COORDINATOR: database connection pool refreshed`): after a VIP move every pooled connection has the
+same dead peer, and without the swap each of them would be tried — and waited for — in turn. Setting
 `net.ipv4.tcp_retries2=8` (~100 s) on the container/pod shortens the kernel side as well — this is a
 namespaced `net.*` sysctl, so Compose `sysctls:` / Kubernetes `securityContext.sysctls` need no
 extra privileges.

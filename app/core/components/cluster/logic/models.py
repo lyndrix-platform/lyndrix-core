@@ -25,6 +25,12 @@ class ClusterInstance(Base):
     heartbeat_at = Column(DateTime, nullable=False)
     # ready/draining flags, secret fingerprint, plugin fingerprint, pid, …
     meta = Column(JSON, nullable=True)
+    # Core ≥ 1.12, both nullable (older instances never write them):
+    # boot nonce of the process that owns the row — a restart under a fixed
+    # instance id is a new incarnation —, and the time of its graceful stop
+    # (tombstone: the row stays for the restart grace instead of vanishing).
+    incarnation = Column(String(32), nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
 
 
 class ClusterLease(Base):
@@ -37,6 +43,10 @@ class ClusterLease(Base):
     acquired_at = Column(DateTime, nullable=True)
     renewed_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=False)
+    # Fencing token (core ≥ 1.12): grows with every acquisition of this lease
+    # name, kept across releases (a released lease keeps its row with
+    # holder = NULL). Nullable: rows written by older instances have none.
+    token = Column(BigInteger, nullable=True)
 
 
 class ClusterKV(Base):

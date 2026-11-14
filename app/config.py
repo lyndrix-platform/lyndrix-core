@@ -268,6 +268,28 @@ class Settings(BaseSettings):
     # hint, leases are released and the process exits. Default: 0 in single
     # mode (today's behaviour), 10 in cluster mode.
     LYNDRIX_DRAIN_SECONDS: Optional[int] = None
+    # How long an instance that stopped gracefully (tombstone) or went silent
+    # while draining counts as "restarting" for its peers before it is "dead":
+    # ctx.has_live_role() stays true and pinned plugins answer a short
+    # Retry-After meanwhile. Should cover a container restart (image pull
+    # excluded); rows are pruned after grace + TTL at the earliest.
+    LYNDRIX_RESTART_GRACE_SECONDS: int = 90
+    # Rolling restart (POST /api/system/restart in cluster mode): how long the
+    # leader waits for ONE restarted instance to be back and ready before it
+    # aborts the run instead of restarting the next one.
+    LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS: int = 300
+    # Roles whose instances must see ONE shared STORAGE_DIR (comma list): they
+    # serve user files (uploads, attachments, themes). The preflight "storage"
+    # check compares only these instances; a runner-only instance on another
+    # host is reported for information, not as a problem. Empty = nobody.
+    LYNDRIX_STORAGE_SHARED_ROLES: str = "api"
+    # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
+    # the plugins recorded in plugin_states are installed and activated on this
+    # instance — a fresh pod with an empty plugin directory would otherwise take
+    # traffic and answer 404 for every plugin route while it still downloads
+    # them. After this many seconds the instance turns ready anyway (a broken
+    # plugin repo must not keep it out forever); 0 = do not wait.
+    LYNDRIX_READY_PLUGIN_WAIT_SECONDS: int = 600
     # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
     # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
     # UI shows any instance's log from any instance; the leader keeps
@@ -442,6 +464,10 @@ class Settings(BaseSettings):
             self.LYNDRIX_DRAIN_SECONDS = 10 if mode == "cluster" else 0
         elif self.LYNDRIX_DRAIN_SECONDS < 0:
             raise ValueError("LYNDRIX_DRAIN_SECONDS must be >= 0")
+        if self.LYNDRIX_RESTART_GRACE_SECONDS < 0:
+            raise ValueError("LYNDRIX_RESTART_GRACE_SECONDS must be >= 0")
+        if self.LYNDRIX_READY_PLUGIN_WAIT_SECONDS < 0:
+            raise ValueError("LYNDRIX_READY_PLUGIN_WAIT_SECONDS must be >= 0")
         return self
 
     # ------------------------------------------------------------------

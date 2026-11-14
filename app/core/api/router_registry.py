@@ -111,6 +111,31 @@ def runtime_gate(module_id: str):
     return _gate
 
 
+def _remote_role_state(role: str) -> tuple[str, int, str]:
+    """(role state, Retry-After seconds, detail) for the 503 of a pinned plugin.
+
+    ``alive``: the request reached the wrong instance — a load-balancer route
+    is missing, retrying soon will not help (30 s as before). ``draining`` /
+    ``restarting``: the role is on its way back (planned restart) — retry in a
+    few seconds. ``dead``: nobody carries the role.
+    """
+    state = "unknown"
+    try:
+        from core.components.cluster.logic.cluster_service import cluster_service
+
+        state = cluster_service.role_state(role)["state"]
+    except Exception:  # pragma: no cover - never let diagnostics break the stub
+        log.debug("RouterRegistry: role state lookup failed", exc_info=True)
+    where = f"an instance with role '{role}'"
+    if state in ("draining", "restarting"):
+        return state, 5, f"this plugin runs on {where}, which is restarting — retry shortly"
+    if state == "dead":
+        return state, 30, f"this plugin runs on {where} — no such instance is online"
+    if state == "unknown":
+        return state, 10, f"this plugin runs on {where} — not available on this instance"
+    return state, 30, f"this plugin runs on {where} — not available on this instance"
+
+
 def _remote_router(module_id: str, role: str) -> APIRouter:
     """Catch-all router for a plugin pinned to a role this instance lacks.
 
@@ -119,11 +144,17 @@ def _remote_router(module_id: str, role: str) -> APIRouter:
     of "not found". The plugin's real routes live on the pinned instance.
     """
     router = APIRouter()
-    detail = f"this plugin runs on an instance with role '{role}' — not available on this instance"
-    header = json.dumps({"plugin_id": module_id, "phase": "remote", "role": role, "blocking": True})
 
     async def _remote(path: str = "") -> None:
-        raise HTTPException(status_code=503, detail=detail, headers={"Retry-After": "30", RUNTIME_GATE_HEADER: header})
+        state, retry_after, detail = _remote_role_state(role)
+        # Same keys as before plus role_state / retry_after / message — clients
+        # that only look at "phase": "remote" keep working.
+        header = json.dumps({
+            "plugin_id": module_id, "phase": "remote", "role": role, "blocking": True,
+            "role_state": state, "retry_after": retry_after, "message": detail,
+        })
+        raise HTTPException(status_code=503, detail=detail,
+                            headers={"Retry-After": str(retry_after), RUNTIME_GATE_HEADER: header})
 
     _remote.__qualname__ = f"remote_stub<{module_id}>"
     methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]

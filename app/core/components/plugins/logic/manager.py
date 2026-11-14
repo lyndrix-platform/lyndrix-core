@@ -769,7 +769,9 @@ class ModuleManager:
                 entry["setup_task"] = create_task(coro, name=f"module_setup:{module_id}")
             else:
                 try:
-                    module.setup(ctx)
+                    # Outside a peer's relay context (see ModuleContext.create_task).
+                    from core.components.cluster.logic.origin import clean_context
+                    clean_context().run(module.setup, ctx)
                     entry["status"] = "active"
                     self._mount_plugin_statics(module_id)
                 except Exception as e:
@@ -1414,7 +1416,14 @@ class ModuleManager:
         """A peer changed plugin_states (install/enable/disable/uninstall)."""
         if not (payload or {}).get("_origin"):
             return  # our own change — already applied locally
-        await self.reconcile_cluster_state(trigger=f"peer {payload.get('_origin')}: {payload.get('action')}")
+        # The reconcile is local work about THIS instance, not a reaction to be
+        # kept off the bridge: run it outside the relay context, or the plugins
+        # it (re)activates and its progress reports could never publish again.
+        from core.components.cluster.logic.origin import clean_context
+        await bus.create_tracked_task(
+            self.reconcile_cluster_state(trigger=f"peer {payload.get('_origin')}: {payload.get('action')}"),
+            name="module_manager:peer_reconcile", context=clean_context(),
+        )
 
     async def _start_cluster_reconciler(self, payload: dict | None = None):
         if settings.LYNDRIX_CLUSTER_MODE != "cluster" or self._reconcile_task is not None:

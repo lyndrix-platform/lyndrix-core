@@ -13,11 +13,18 @@ With two or more instances behind a load balancer a core update needs no downtim
 
 What happens on each `docker stop`:
 
-- SIGTERM → `/api/ready` answers 503 → the balancer removes the instance after its next check
-  (3–5 s) → after `LYNDRIX_DRAIN_SECONDS` the instance closes SSE streams with `event: reconnect`
-  (browsers reconnect through the balancer), releases its leases (a peer takes the leader lease
-  and plugin leases within about a second) → uvicorn shuts down.
-- `stop_grace_period` must be larger than drain + graceful shutdown or Docker kills the process.
+- SIGTERM → at once `/api/ready` answers 503, the peers see the instance as `draining` and its
+  leases are handed over (a peer takes the leader lease and plugin leases within about a second)
+  → the balancer removes the instance after its next check (3–5 s) → after `LYNDRIX_DRAIN_SECONDS`
+  the instance closes SSE streams with `event: reconnect` (browsers reconnect through the
+  balancer), leaves its tombstone → uvicorn shuts down.
+- While the container restarts, peers show it as `restarting` (not gone) for
+  `LYNDRIX_RESTART_GRACE_SECONDS` (90 s); pinned plugins answer 503 with `Retry-After: 5`.
+- `stop_grace_period` must be larger than drain + lease hand-over + graceful shutdown or Docker
+  kills the process: **30 s** for the default 10 s drain (10 s drain + up to 5 s for `lost`
+  callbacks + uvicorn's 5 s + margin). Docker's default is 10 s — exactly the drain — so without
+  it the process is killed before it can leave its tombstone (the peers then still treat it as
+  `restarting`, because it had announced the drain).
 
 ## Schema changes
 
@@ -27,10 +34,18 @@ columns) are safe for a rolling update — that is what the core and the shipped
 
 ## Rolling restart without an update
 
-`POST /api/system/restart` (Settings → System Info → *Restart*) in cluster mode broadcasts
-`system:restart_requested`: every instance drains and exits in a staggered order (5 s apart,
-leader last) and the restart policy brings it back. No Docker socket is needed on the API
-instances.
+`POST /api/system/restart` (Settings → System Info → *Restart*) in cluster mode starts a
+**sequential** restart driven by the leader: it tells one instance to drain and exit (the restart
+policy brings it back), waits until that instance is ready again as a new incarnation, then
+continues with the next; the leader restarts itself last. At most one instance is away at any
+time. If an instance is not back within `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS` (300 s) the run
+is aborted and the remaining instances are left alone. Instances with the `runner` role are
+skipped (a restart orphans their running jobs) unless the request says
+`?include_runners=true`; instances still on core ≤ 1.11 are skipped as well. The request is
+answered with 409 when no leader can coordinate it (none elected, a run already active, or the
+leader itself still on an old core). Progress: `GET /api/cluster` → `restart` on the leader. No
+Docker socket is needed on the API instances. (Up to core 1.11 this endpoint made every instance
+exit 5 s apart — effectively all at once.)
 
 ## Rollback
 

@@ -145,3 +145,23 @@ def test_release_lease_fires_lost_and_frees_the_lease():
         assert events == ["acq", "lost", "acq2"]
     finally:
         ctx.dispose()
+
+
+def test_lease_token_is_exposed_and_changes_with_every_acquisition():
+    """API 1.14: plugins fence their writes with ``ctx.lease_token``."""
+    ctx = _ctx()
+    tokens = []
+    ctx.on_lease("test:fenced", acquired=lambda token: tokens.append(token))
+    try:
+        assert ctx.lease_token("test:fenced") is None            # not held yet
+        asyncio.run(cluster_service.leases.tick())
+        first = ctx.lease_token("test:fenced")
+        assert isinstance(first, int) and tokens == [first]
+        asyncio.run(cluster_service.leases.tick())                 # renewal: same token
+        assert ctx.lease_token("test:fenced") == first
+        asyncio.run(cluster_service.leases.release_now("test:fenced"))
+        assert ctx.lease_token("test:fenced") is None
+        asyncio.run(cluster_service.leases.tick())                 # a new acquisition
+        assert ctx.lease_token("test:fenced") > first and len(tokens) == 2
+    finally:
+        ctx.dispose()

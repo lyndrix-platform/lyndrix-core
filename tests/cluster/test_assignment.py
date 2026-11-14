@@ -62,3 +62,14 @@ def test_roles_and_draining_filter_candidates_and_count_caps():
     assert a.my_shard("probe", ["h1", "h2"], roles=["runner"]) == []  # api1 is not a runner
     rep = {r["name"]: r for r in a.report()}
     assert rep["probe"]["workers"] == ["run1"] and rep["probe"]["is_worker"] is False
+
+
+def test_cluster_instance_without_a_registry_view_claims_nothing():
+    """Before its first refresh a new cluster instance answered "only me" and
+    took every key of every workload."""
+    blind = types.SimpleNamespace(instance_id="new-pod", roles=["api", "leader"], _instances=[],
+                                  is_cluster=True, view_ready=False)
+    a = WorkAssigner(blind)
+    assert a.workers("probe") == [] and a.my_shard("probe", ["h1", "h2"]) == [] and not a.is_worker("probe")
+    blind.view_ready, blind._instances = True, [_inst("new-pod"), _inst("old-pod")]
+    assert sorted(a.workers("probe", count=2)) == ["new-pod", "old-pod"]
