@@ -996,11 +996,16 @@ class ModuleManager:
             log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
             # "Soft" unload: remove UI and call teardown, but keep module in memory.
             self._teardown_ui(module_id)
-            if was_remote:
-                # setup() never ran here — only the 503 stub has to go.
+            # The plugin's REST API goes with it (for a "remote" plugin that is
+            # the 503 stub). Without this the routes kept answering 200 against
+            # a service whose tasks and subscriptions were already torn down;
+            # re-enabling re-registers them through setup() → register_routes.
+            try:
                 from core.api.router_registry import router_registry
 
                 router_registry.unmount(module_id)
+            except Exception as e:
+                log.warning(f"DISABLE: could not unmount routes for '{module_id}': {e}")
             entry = self.registry.get(module_id)
             if entry and not was_remote and hasattr(entry["module"], 'teardown'):
                 log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")

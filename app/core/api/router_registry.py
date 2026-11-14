@@ -24,6 +24,9 @@ dependency that answers ``503`` with ``Retry-After`` while the plugin reports a
 *blocking* ``starting``/``maintenance`` status via ``ctx.set_status`` — so a
 plugin in its warm-up window never has to defend its own endpoints and the
 shell gets a clean, retryable signal instead of timeouts.
+The same gate answers ``503`` for a plugin whose registry status is
+``disabled``/``failed``/``degraded``/``blocked`` (its routes are unmounted on
+disable; the gate is the second line of defence).
 
 Usage (from a plugin entrypoint)::
 
@@ -53,6 +56,8 @@ from core.logger import get_logger
 log = get_logger("Core:RouterRegistry")
 
 RUNTIME_GATE_HEADER = "X-Plugin-Runtime"
+# Registry statuses in which a plugin's own handlers must never run.
+INACTIVE_STATUSES = ("disabled", "failed", "degraded", "blocked")
 
 
 def runtime_gate(module_id: str):
@@ -66,6 +71,22 @@ def runtime_gate(module_id: str):
     async def _gate() -> None:
         # Lazy import: the registry is imported by the manager at boot.
         from core.components.plugins.logic.manager import module_manager
+
+        # Defence in depth: a plugin that is not running must not serve its API,
+        # even if a router survived (setup() failed half-way, or a future code
+        # path forgets to unmount). Disabling unmounts the routes; this gate
+        # catches whatever is still mounted. "remote" passes — its stub router
+        # answers 503 phase=remote itself.
+        entry = module_manager.registry.get(module_id)
+        status = entry.get("status") if entry else None
+        if status in INACTIVE_STATUSES:
+            name = module_manager.display_name(module_id)
+            # No X-Plugin-Runtime header: that one announces a transient phase
+            # clients retry on; an inactive plugin is not coming back by itself.
+            raise HTTPException(
+                status_code=503,
+                detail=f"{name} is not active on this instance (status: {status}).",
+            )
 
         runtime = module_manager.get_runtime(module_id)
         if not runtime or not runtime.get("blocking"):
