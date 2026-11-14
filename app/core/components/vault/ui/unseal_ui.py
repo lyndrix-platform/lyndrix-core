@@ -88,3 +88,9 @@ def render_unseal_page():
             add=UIStyles.AUTH_STATUS_ERROR,
             remove=UIStyles.AUTH_STATUS_PENDING,
         )
+
+    # One subscriber per page render: remove it when the client goes away, or
+    # every closed tab leaves a handler behind that updates a dead label.
+    client = context.client
+    register = getattr(client, "on_delete", None) or client.on_disconnect
+    register(lambda: bus.unsubscribe("vault:unseal_failed", on_vault_failed))
