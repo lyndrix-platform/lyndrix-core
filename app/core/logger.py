@@ -144,6 +144,17 @@ class RingBufferHandler(logging.Handler):
         log_entry = self.format(record)
         log_ring.append(record.name, record.levelname, log_entry)
 
+def apply_log_level(level_name) -> None:
+    """Set the root log level from the ``LOG_LEVEL`` setting.
+
+    ``LYNDRIX_DEBUG=true`` keeps everything at DEBUG. An unknown name falls back
+    to INFO. Used at startup, after Vault hydration and on a settings change —
+    the level used to be applied only when the setting was CHANGED at runtime.
+    """
+    level = logging.DEBUG if IS_DEBUG else getattr(logging, str(level_name).upper(), None)
+    logging.getLogger().setLevel(level if isinstance(level, int) else logging.INFO)
+
+
 def setup_logging():
     # Resolve the log directory from settings (config hierarchy) and create it
     # here rather than as an import-time side effect.
@@ -204,7 +215,16 @@ def setup_logging():
         lg.propagate = False
         lg.handlers = root_logger.handlers
 
-    logging.info(f"LOGGING: Initialized with level {'DEBUG' if IS_DEBUG else 'INFO'}")
+    # Honour the configured LOG_LEVEL from the first record on (env / .env here;
+    # a Vault-stored level follows once Vault is open).
+    configured = "INFO"
+    try:
+        from config import settings
+        configured = settings.LOG_LEVEL
+    except Exception:
+        pass
+    apply_log_level(configured)
+    logging.info(f"LOGGING: Initialized with level {logging.getLevelName(root_logger.level)}")
 
 def get_logger(name: str):
     """Factory method for consistent logger names."""

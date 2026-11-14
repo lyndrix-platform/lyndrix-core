@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from config import settings, EDITABLE_SETTINGS
 from core.bus import bus
-from core.logger import setup_logging, get_logger
+from core.logger import setup_logging, get_logger, apply_log_level
 from core.services import vault_instance, boot_service
 
 # --- UI engine flags (computed once at import time) ---
@@ -202,7 +202,7 @@ def _public_config_snapshot() -> dict:
     sanitized["ldap_default_roles"] = settings.ldap_default_roles
     sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
     sanitized["env_locked"] = [
-        s.field for s in EDITABLE_SETTINGS if os.getenv(s.field) is not None
+        s.field for s in EDITABLE_SETTINGS if settings.is_env_locked(s.field)
     ]
     sanitized["editable_settings"] = [
         {
@@ -639,7 +639,7 @@ async def set_runtime_config(
 
     # Reject env-locked keys up-front: an OS env var always wins on the next boot,
     # so persisting it to Vault would silently no-op and confuse the operator.
-    locked = [key for key in updates if os.getenv(key) is not None]
+    locked = [key for key in updates if settings.is_env_locked(key)]
     if locked:
         raise HTTPException(
             status_code=409,
@@ -768,6 +768,7 @@ async def _hydrate_settings_from_vault(payload=None):
     try:
         # hydrate_from_vault performs a blocking hvac round-trip — keep it off the loop.
         await asyncio.to_thread(settings.hydrate_from_vault)
+        apply_log_level(settings.LOG_LEVEL)  # a UI-saved level must survive a restart
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"CONFIG: Vault settings hydration failed: {exc}")
 
@@ -780,9 +781,6 @@ async def _on_settings_changed_remote(payload=None):
     if not (payload or {}).get("_origin"):
         return  # our own save already applied the values in-process
     await _hydrate_settings_from_vault()
-    import logging as _logging
-
-    _logging.getLogger().setLevel(getattr(_logging, str(settings.LOG_LEVEL).upper(), _logging.INFO))
     log.info(f"CONFIG: settings re-hydrated after a change on instance {payload.get('_origin')}.")
 
 

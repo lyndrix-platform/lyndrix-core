@@ -68,7 +68,7 @@ def _render_editable_settings_card() -> None:
                     UIStyles.LABEL_MINI + ' mt-3'
                 )
                 for spec in specs:
-                    is_locked = os.getenv(spec.field) is not None
+                    is_locked = settings.is_env_locked(spec.field)  # OS env or .env
                     locked[spec.field] = is_locked
                     current = getattr(settings, spec.field, '')
 
