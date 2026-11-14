@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import platform
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -247,8 +248,17 @@ def _render_theme_management_card() -> None:
                                 )
                                 return
                             theme_id = Path(e.name).stem
-                            if not theme_id or '/' in theme_id or '.' in theme_id:
+                            if not re.fullmatch(r'[A-Za-z0-9_-]+', theme_id or ''):
                                 ui.notify('Invalid theme ID derived from filename.', type='negative')
+                                return
+                            # Same gate as the REST upload: unsafe values are
+                            # refused before anything is written (SC-02).
+                            from core.components.settings.logic import themes_service
+                            try:
+                                themes_service.check_uploaded_pack(
+                                    theme_id, zf.read('tokens.json'), zf.read('components.json'))
+                            except themes_service.ThemeRejected as rejected:
+                                ui.notify(str(rejected), type='negative')
                                 return
                             dest = THEMES_BASE_DIR / theme_id
                             dest.mkdir(parents=True, exist_ok=True)

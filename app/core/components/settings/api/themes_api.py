@@ -152,6 +152,16 @@ async def get_theme_detail(
     return {"status": "ok", "theme_id": theme_id, "tokens": tokens, "components": components}
 
 
+def _validate_uploaded_pack(theme_id: str, tokens_raw: bytes, components_raw: bytes) -> None:
+    """Reject (422) a theme whose JSON is malformed or carries unsafe values."""
+    from core.components.settings.logic import themes_service
+
+    try:
+        themes_service.check_uploaded_pack(theme_id, tokens_raw, components_raw)
+    except themes_service.ThemeRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 @themes_router.post("", summary="Upload a theme ZIP", status_code=201)
 async def upload_theme(
     file: UploadFile = File(...),
@@ -175,6 +185,11 @@ async def upload_theme(
                     status_code=422,
                     detail="ZIP must contain tokens.json and components.json at root level",
                 )
+            # Validate BEFORE anything is written: a rejected upload must not
+            # replace (or half-replace) an existing theme of the same id, and an
+            # unsafe pack must never sit on the shared storage (SC-02).
+            _validate_uploaded_pack(theme_id, zf.read("tokens.json"), zf.read("components.json"))
+
             # Uploads go to the shared storage (every cluster instance sees them,
             # an image update keeps them); built-ins stay read-only in the image.
             user_dir = _engine().user_dir

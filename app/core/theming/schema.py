@@ -64,7 +64,26 @@ _CSS_LENGTH_RE = re.compile(
 )
 _CSS_DURATION_RE = re.compile(r"^-?\d+(\.\d+)?(ms|s)$")
 _CSS_NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
-_UNSAFE_CSS_CHARS_RE = re.compile(r"[<>{}]")
+# Characters / constructs that could break out of the ``<style>`` block or the
+# declaration these values are interpolated into, or make the browser fetch an
+# attacker-chosen URL: markup and block delimiters, the declaration terminator,
+# escapes (which can spell any of the others), comments and resource functions.
+_UNSAFE_CSS_CHARS_RE = re.compile(r"[<>{};\\\x00-\x1f\x7f]")
+_UNSAFE_CSS_CONSTRUCTS = ("url(", "expression(", "@import", "/*", "*/", "javascript:")
+_MAX_CSS_VALUE_LENGTH = 1000
+
+# Strict colour grammar (SC-02): colours are also written into an HTML attribute
+# (``<meta name="theme-color">``), so only literal colour notations are accepted.
+_CSS_COLOR_RE = re.compile(
+    r"^(?:"
+    r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+    r"|(?:rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch)\([0-9a-zA-Z.,%/ +-]{1,80}\)"
+    r"|[a-zA-Z]{3,24}"  # named colours, ``transparent``, ``currentColor``
+    r")$"
+)
+_CSS_VAR_NAME_RE = re.compile(r"^--[A-Za-z0-9_-]{1,64}$")
+_ASSET_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+THEME_IMAGE_SUFFIXES: frozenset[str] = frozenset({".webp", ".png", ".jpg", ".jpeg"})
 
 
 def is_valid_css_length(value: str) -> bool:
@@ -91,12 +110,38 @@ def is_safe_css_value(value: str) -> bool:
     Used for values too varied to shape-check precisely (font stacks,
     box-shadow lists, gradients, easing functions) — themes may be uploaded
     as a ZIP, and these strings are interpolated directly into a ``<style>``
-    block, so reject characters that could break out of it.
+    block, so reject everything that could end the declaration, leave the
+    block, or load a remote resource. Quotes are fine (font names) as long as
+    they are balanced.
     """
-    v = value.strip()
-    if not v:
+    if not isinstance(value, str):
         return False
-    return not _UNSAFE_CSS_CHARS_RE.search(v)
+    v = value.strip()
+    if not v or len(v) > _MAX_CSS_VALUE_LENGTH:
+        return False
+    if _UNSAFE_CSS_CHARS_RE.search(v):
+        return False
+    lowered = v.lower().replace(" ", "")
+    if any(marker in lowered for marker in _UNSAFE_CSS_CONSTRUCTS):
+        return False
+    return v.count('"') % 2 == 0 and v.count("'") % 2 == 0
+
+
+def is_valid_css_color(value: str) -> bool:
+    """True for a literal colour: hex, ``rgb()/hsl()/oklch()``-style or a name."""
+    return isinstance(value, str) and bool(_CSS_COLOR_RE.match(value.strip()))
+
+
+def is_valid_css_var_name(name: str) -> bool:
+    """True for a custom-property name such as ``--lx-accent``."""
+    return isinstance(name, str) and bool(_CSS_VAR_NAME_RE.match(name))
+
+
+def is_safe_asset_filename(name: str) -> bool:
+    """True for a plain image filename inside a theme's ``assets/`` directory."""
+    if not isinstance(name, str) or not _ASSET_FILENAME_RE.match(name) or ".." in name:
+        return False
+    return any(name.lower().endswith(suffix) for suffix in THEME_IMAGE_SUFFIXES)
 
 
 # Per-category, per-key validator for the Phase-1 token categories. Shared by
@@ -150,6 +195,56 @@ def _required_component_keys() -> frozenset[str]:
     )
 
 
+def theme_pack_errors(pack: "ThemePack") -> list[str]:
+    """Values that must never reach a page: the hard-error half of validation.
+
+    A theme is data, but its colours, ``css_variables`` and background image
+    names are written into ``<style>`` / HTML attributes on every page (SC-02).
+    The upload API rejects a pack with any of these (422); for a pack already
+    on disk the engine ignores the offending value and uses the default.
+    """
+    errors: list[str] = []
+    prefix = f"Theme '{pack.theme_id}'"
+
+    for key, modes in pack.tokens.colors.items():
+        for mode in ("light", "dark"):
+            value = getattr(modes, mode)
+            if not is_valid_css_color(value):
+                errors.append(
+                    f"{prefix}: colors.{key}.{mode} is not a valid colour "
+                    f"(use #hex, rgb()/hsl()/oklch() or a colour name)"
+                )
+
+    css_vars = pack.tokens.css_variables
+    if css_vars is not None:
+        for mode in ("light", "dark"):
+            for key, value in (getattr(css_vars, mode) or {}).items():
+                if not is_valid_css_var_name(key):
+                    # The key itself is not echoed: it is attacker-controlled
+                    # text that would land in logs and API responses.
+                    errors.append(
+                        f"{prefix}: css_variables.{mode} key is not a custom "
+                        f"property name (expected --name)"
+                    )
+                elif not is_safe_css_value(value):
+                    errors.append(
+                        f"{prefix}: css_variables.{mode}.{key} has an unsafe value "
+                        f"(no ; {{ }} < > \\ url() @import or comments)"
+                    )
+
+    bg_images = pack.tokens.background_images
+    if bg_images is not None:
+        for mode in ("light", "dark"):
+            filename = getattr(bg_images, mode)
+            if filename and not is_safe_asset_filename(filename):
+                errors.append(
+                    f"{prefix}: background_images.{mode} must be a plain image file "
+                    f"name from assets/ (.webp, .png, .jpg, .jpeg)"
+                )
+
+    return errors
+
+
 def validate_theme_pack(pack: "ThemePack") -> list[str]:
     """Validate *pack* and backfill missing keys with UIStyles defaults.
 
@@ -159,7 +254,8 @@ def validate_theme_pack(pack: "ThemePack") -> list[str]:
     """
     from ui.theme import UIStyles
 
-    warnings: list[str] = []
+    # Unsafe values are reported first; the engine drops them at resolve time.
+    warnings: list[str] = [f"{error} — ignored" for error in theme_pack_errors(pack)]
 
     # --- token colours ---
     for key in REQUIRED_TOKEN_KEYS:
@@ -171,7 +267,7 @@ def validate_theme_pack(pack: "ThemePack") -> list[str]:
     if css_vars is not None:
         for mode in ("light", "dark"):
             for key in getattr(css_vars, mode, {}) or {}:
-                if key not in KNOWN_CSS_VAR_KEYS:
+                if key not in KNOWN_CSS_VAR_KEYS and is_valid_css_var_name(key):
                     warnings.append(
                         f"Theme '{pack.theme_id}': unknown css_variables.{mode} "
                         f"key '{key}' (not a recognised --lx-* property)"

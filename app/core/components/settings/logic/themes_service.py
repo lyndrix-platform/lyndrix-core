@@ -11,6 +11,44 @@ from core.logger import get_logger
 log = get_logger("Core:ThemesService")
 
 
+class ThemeRejected(ValueError):
+    """An uploaded theme pack is malformed or carries unsafe values."""
+
+
+def check_uploaded_pack(theme_id: str, tokens_raw: bytes, components_raw: bytes) -> None:
+    """Validate an uploaded pack before a single byte is written (SC-02).
+
+    Theme values are rendered into ``<style>`` and HTML attributes of every
+    page, so an unsafe pack is refused outright instead of being stored with
+    warnings. Shared by the REST upload and the NiceGUI settings page. Raises
+    ``ThemeRejected`` with a message that names the offending keys.
+    """
+    import json
+
+    from pydantic import ValidationError
+
+    from core.theming.models import ThemeComponents, ThemePack, ThemeTokens
+    from core.theming.schema import theme_pack_errors
+
+    try:
+        pack = ThemePack(
+            theme_id=theme_id,
+            tokens=ThemeTokens(**json.loads(tokens_raw)),
+            components=ThemeComponents(**json.loads(components_raw)),
+        )
+    except (ValueError, TypeError, ValidationError) as exc:
+        raise ThemeRejected(
+            "Theme validation failed: tokens.json/components.json are not valid "
+            f"theme files ({type(exc).__name__})"
+        ) from exc
+
+    errors = theme_pack_errors(pack)
+    if errors:
+        shown = "; ".join(errors[:5])
+        more = f" (+{len(errors) - 5} more)" if len(errors) > 5 else ""
+        raise ThemeRejected(f"Theme rejected: {shown}{more}")
+
+
 def set_active(theme_id: str) -> None:
     """Persist + apply the active theme, then signal the UI to refresh.
 
