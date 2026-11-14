@@ -426,6 +426,13 @@ class NotificationService:
                     "type": notif["type"],
                     "timestamp": notif["timestamp"],
                     "user_id": notif["user_id"],
+                    # Delivery metadata for the SSE audience gate (and peers, the
+                    # topic is bridged). Without ``required_permission`` the gate
+                    # never fired and gated notifications reached every stream
+                    # (AZ-06). events_api strips these keys before sending.
+                    "required_permission": notif.get("required_permission"),
+                    "source_plugin_id": notif.get("source_plugin_id"),
+                    "endpoint_name": notif.get("endpoint_name"),
                 },
             )
 
