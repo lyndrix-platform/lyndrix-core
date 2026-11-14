@@ -60,12 +60,16 @@ class _MaintenanceWindow:
 
 
 class _LeaseScope:
-    """``async with ctx.lease("name") as held:`` — one-shot, non-renewed lease.
+    """``async with ctx.lease("name") as held:`` — a lease for one piece of work.
 
     If the module already holds the lease through ``ctx.on_lease`` the scope
-    reports ``held=True`` without touching the coordinator (and does not
-    release it on exit). Otherwise it tries to acquire the lease once for
-    ``ttl`` seconds and releases it when the block ends.
+    reports ``held=True`` without touching it (and does not release it on
+    exit). Otherwise it tries to acquire the lease once; while the block runs
+    the lease is renewed like any other (the work may take longer than the
+    TTL) and released when the block ends. A second scope for the same name on
+    the same instance gets ``held=False`` — the lease is exclusive within the
+    instance, too. Long-running bodies should check ``ctx.holds_lease(name)``
+    now and then: it turns ``False`` if the lease could not be renewed.
     """
 
     def __init__(self, ctx: "ModuleContext", name: str, ttl: int | None):
@@ -76,22 +80,17 @@ class _LeaseScope:
         self.held = False
 
     async def __aenter__(self) -> bool:
-        cluster = self._ctx._cluster()
-        if cluster.leases.holds(self._name):
+        keeper = self._ctx._cluster().leases
+        if self._name in keeper.wanted and keeper.holds(self._name):
             self.held = True
             return True
-        try:
-            self.held = bool(await cluster.coordinator.try_acquire(self._name, self._ttl))
-        except Exception as exc:
-            self._ctx.log.debug("LEASE: try_acquire('%s') failed: %s", self._name, exc)
-            self.held = False
-        self._acquired_here = self.held
+        self.held = self._acquired_here = await keeper.acquire_scoped(self._name, self._ttl)
         return self.held
 
     async def __aexit__(self, exc_type, exc, tb):
         if self._acquired_here:
             try:
-                await self._ctx._cluster().coordinator.release(self._name)
+                await self._ctx._cluster().leases.release_scoped(self._name)
             except Exception as rel_exc:
                 self._ctx.log.debug("LEASE: release('%s') failed: %s", self._name, rel_exc)
         return False
@@ -395,7 +394,10 @@ class ModuleContext:
         return self._cluster().leases.token(self._lease_name(name))
 
     def lease(self, name: str, *, ttl: int | None = None) -> _LeaseScope:
-        """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""
+        """Lease for one piece of work (``async with ctx.lease("x") as held``):
+        acquired once, renewed while the block runs, released at its end;
+        ``held`` is ``False`` when a peer — or another scope on this instance —
+        has it. ``ctx.lease_token(name)`` gives its fencing token."""
         return _LeaseScope(self, self._lease_name(name), ttl)
 
     def release_lease(self, name: str) -> bool:

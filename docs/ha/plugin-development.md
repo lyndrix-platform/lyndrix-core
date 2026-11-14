@@ -34,7 +34,7 @@ def setup(ctx):
             svc.reload()
 
 async def nightly(ctx):
-    async with ctx.lease("myplugin:nightly") as held:  # one-shot lease, not renewed
+    async with ctx.lease("myplugin:nightly") as held:  # one piece of work; renewed while it runs
         if held:
             await run_report()
 
@@ -99,8 +99,12 @@ ctx.cluster_shard("probe", monitor_ids)                              # {instance
   over at once.
 - `placement="singleton"` binds every `on_lease` call of the plugin to one lease
   `plugin:<id>:singleton` — use it when the plugin's background work is one unit.
-- `ctx.lease(name)` is a one-shot: it tries once for the TTL and releases on exit; if the keeper
-  already holds the lease it reports `held=True` without touching it.
+- `ctx.lease(name)` is a lease for one piece of work: it tries once, is **renewed while the block
+  runs** (core ≥ 1.12 — before, work longer than the TTL lost the lease without noticing) and is
+  released on exit. It is exclusive within one instance too: a second concurrent scope for the
+  same name gets `held=False`. If `ctx.on_lease` already holds the lease the scope reports
+  `held=True` without touching it. In a long body check `ctx.holds_lease(name)` now and then and
+  fence writes with `ctx.lease_token(name)`.
 - `ctx.release_lease(name)` (API ≥ 1.9) withdraws an `on_lease` interest at runtime. A held lease
   is released at once, the plugin's `lost` callback fires (one "stop the work" path) and the
   release is broadcast so a peer acquires it within about a second. Use it when a setting such as

@@ -114,6 +114,9 @@ class LeaseKeeper:
         self._min_margin_s = float(min_margin_s)
         self._wanted: dict[str, _Wanted] = {}
         self._held: dict[str, _Holding] = {}
+        # One-shot holdings of ``ctx.lease()`` scopes: name → ttl. Renewed and
+        # fenced like wanted leases, but never re-acquired once lost or released.
+        self._scoped: dict[str, float] = {}
         # name → counter bumped on every local transition (acquired, lost,
         # forgotten, released). An attempt only counts if it is unchanged.
         self._generation: dict[str, int] = {}
@@ -292,6 +295,40 @@ class LeaseKeeper:
                 len(late), self.LOST_CALLBACK_TIMEOUT_S,
             )
 
+    async def acquire_scoped(self, name: str, ttl: Optional[float] = None) -> bool:
+        """Take ``name`` for one piece of work (``async with ctx.lease(name)``).
+
+        One attempt, no waiting. While the scope is open the lease is renewed
+        with every tick and fenced like any other, so the work may run longer
+        than the TTL. Exclusive within this instance as well: a second scope
+        (or an ``on_lease`` holding) for the same name gets ``False``.
+        """
+        if self._stopped or name in self._scoped or name in self._held:
+            return False
+        ttl = self._effective_ttl(name, ttl)
+        self._scoped[name] = ttl          # reserved before the await: concurrent scopes see it
+        started = self._clock()
+        try:
+            granted, token = await asyncio.wait_for(
+                self._call_acquire(name, ttl, True), timeout=max(1.0, float(self.heartbeat_s)))
+        except Exception as exc:
+            log.debug("LEASE: one-shot acquire of '%s' failed: %s", name, exc)
+            granted, token = None, None
+        if not granted or name not in self._scoped:
+            self._scoped.pop(name, None)
+            return False
+        self._held[name] = _Holding(since=started, ttl=ttl, token=token)
+        self._transition(name)
+        return True
+
+    async def release_scoped(self, name: str) -> None:
+        """End a scope opened with :meth:`acquire_scoped` and free the lease."""
+        if self._scoped.pop(name, None) is None:
+            return  # fenced meanwhile (or never ours): nothing to give back
+        if self._held.pop(name, None) is not None:
+            self._transition(name)
+            await self._release_and_announce(name, [])
+
     def kick(self) -> None:
         """Run the acquire pass as soon as possible (a peer released a lease)."""
         if self._kick is not None:
@@ -345,7 +382,8 @@ class LeaseKeeper:
         """
         async with self._lock():
             self.fence_expired()
-            attempts = [task for task in (self._start_attempt(name) for name in list(self._wanted)) if task is not None]
+            names = list(self._wanted) + [name for name in self._scoped if name not in self._wanted]
+            attempts = [task for task in (self._start_attempt(name) for name in names) if task is not None]
             if attempts:
                 await asyncio.wait(attempts, timeout=self._round_timeout())
             self.fence_expired()
@@ -400,8 +438,11 @@ class LeaseKeeper:
 
     def _start_attempt(self, name: str) -> Optional[asyncio.Task]:
         entry = self._wanted.get(name)
-        if entry is None or self._stopped:
+        ttl = entry.ttl if entry is not None else self._scoped.get(name)
+        if ttl is None or self._stopped:
             return None
+        if entry is None and name not in self._held:
+            return None  # a scope that is still acquiring (or lost its lease): not the tick's business
         running = self._inflight.setdefault(name, set())
         if len(running) >= self.MAX_INFLIGHT:
             return None  # the coordinator is sitting on earlier calls — do not stack more threads
@@ -411,7 +452,7 @@ class LeaseKeeper:
             # heartbeat) start on fresh connections.
             self._refresh_connections(f"lease call for '{name}' still pending")
         task = bus.create_tracked_task(
-            self._attempt(name, entry.ttl, self._generation.get(name, 0), fresh=name not in self._held),
+            self._attempt(name, ttl, self._generation.get(name, 0), fresh=name not in self._held),
             name=f"cluster:lease_attempt:{name}",
         )
         running.add(task)
@@ -497,6 +538,7 @@ class LeaseKeeper:
     def _lose(self, name: str) -> None:
         if self._held.pop(name, None) is None:
             return
+        self._scoped.pop(name, None)      # a one-shot scope is not re-acquired behind its back
         self._transition(name)
         self._fire_all(name, "lost")
         self._notify(name, False)

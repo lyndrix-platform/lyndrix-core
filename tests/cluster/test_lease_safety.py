@@ -442,7 +442,9 @@ def test_event_loop_pause_longer_than_the_ttl_fences_before_it_renews(engine):
     tick checks the deadlines first; ``holds`` is deadline-aware even before
     the ``lost`` callback ran; the re-acquisition carries a new token."""
     clock, db_clock = FakeClock(), DbClock()
-    keeper = LeaseKeeper(_coord(engine, "a", db_clock, ttl=TTL), ttl=TTL, heartbeat_s=0.05, clock=clock)
+    # heartbeat 2 s: a tick waits up to one interval for its attempts, and a real
+    # (SQLite) round trip must fit into that — 50 ms was a race on a slow disk.
+    keeper = LeaseKeeper(_coord(engine, "a", db_clock, ttl=TTL), ttl=TTL, heartbeat_s=2.0, clock=clock)
     events: list = []
     keeper.want("x", acquired=lambda token: events.append(("acquired", token)),
                 lost=lambda: events.append(("lost", None)))
@@ -582,3 +584,59 @@ def test_requested_ttl_below_two_heartbeats_is_raised():
     keeper.want("short", ttl=5)
     keeper.want("fine", ttl=45)
     assert keeper._wanted["short"].ttl == 20 and keeper._wanted["fine"].ttl == 45
+
+
+# --- CL-13: ctx.lease() scopes ---------------------------------------------------------
+
+def test_one_shot_scope_is_renewed_while_open_and_exclusive_within_the_instance():
+    """A scope used to acquire once and never renew: work longer than the TTL
+    ran on without a lease, and a second scope on the same instance (timer +
+    "run now") was told it held the lease too."""
+    clock = FakeClock()
+    table, ca, cb, ka, kb = _pair(clock, hb=0.05)
+
+    async def run():
+        assert await ka.acquire_scoped("report") is True
+        assert await ka.acquire_scoped("report") is False        # same instance, second scope
+        assert await kb.acquire_scoped("report") is False        # a peer
+        assert ka.holds("report") and ka.wanted == []            # held without a standing interest
+        for _ in range(5):                                       # the work takes 2.5 × TTL
+            clock.advance(TTL / 2)
+            await ka.tick()                                      # … the keeper renews it
+            assert ka.holds("report") and await kb.acquire_scoped("report") is False
+        await ka.release_scoped("report")
+        assert not ka.holds("report") and "report" in ca.released
+        assert await kb.acquire_scoped("report") is True         # free at once, not after the TTL
+        await kb.release_scoped("report")
+
+    asyncio.run(run())
+
+
+def test_a_scope_that_cannot_be_renewed_is_fenced_and_not_reacquired():
+    clock = FakeClock()
+    table, ca, cb, ka, kb = _pair(clock, hb=0.05)
+
+    async def run():
+        assert await ka.acquire_scoped("report") is True
+        ca.mode = "fail"                                         # the database is gone for A
+        clock.advance(TTL)
+        await ka.tick()
+        assert not ka.holds("report")                            # ctx.holds_lease() tells the body
+        ca.mode = "ok"
+        await ka.tick()
+        assert not ka.holds("report")                            # never taken again behind the scope's back
+        await ka.release_scoped("report")                        # the block ends: nothing left to release
+        assert ca.released == []
+
+    asyncio.run(run())
+
+
+def test_scope_ttl_is_validated_like_any_lease():
+    clock = FakeClock()
+    table, ca, cb, ka, kb = _pair(clock, hb=2.0)
+
+    async def run():
+        assert await ka.acquire_scoped("short", ttl=1) is True
+        return ka._held["short"].ttl
+
+    assert asyncio.run(run()) == 4.0                              # raised to two heartbeat intervals
