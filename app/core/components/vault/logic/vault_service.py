@@ -12,15 +12,25 @@ log = get_logger("Core:VaultService")
 
 # Delay between connection-failure retries of the initial health check.
 _HEALTH_RETRY_SECONDS = 5
+# hvac's default request timeout is 30 s. Every Vault call of the core is a
+# small KV/sys request; a hung Vault must fail fast instead of parking worker
+# threads (and, for the remaining sync callers, the event loop) for 30 s.
+_CLIENT_TIMEOUT_SECONDS = 5
+# Seal watchdog: how often the seal state is probed after the first "ready",
+# and how many consecutive unreachable probes count as "Vault is gone".
+_WATCHDOG_INTERVAL_SECONDS = 30
+_WATCHDOG_UNREACHABLE_THRESHOLD = 2
 
 
 class VaultService:
     def __init__(self) -> None:
         # Vault address comes from settings.VAULT_URL (env > .env > Vault > default).
         self.url = settings.VAULT_URL
-        self.client = hvac.Client(url=self.url)
+        self.client = hvac.Client(url=self.url, timeout=_CLIENT_TIMEOUT_SECONDS)
         self.is_connected = False
         self.ui_state = "loading"  # loading, needs_init, needs_unseal, ready, error
+        self._watchdog_task: asyncio.Task | None = None
+        self._unreachable_probes = 0
 
         # Subscribe to bus events
         bus.subscribe("system:started")(self.check_vault_health)
@@ -63,21 +73,115 @@ class VaultService:
         except Exception:
             log.error("ERROR: Token restoration failed (Wrong Master Key?)")
 
+    def _set_ui_state(self, state: str) -> None:
+        """Set ``ui_state`` and tell the frontends (SSE topic ``vault:status_changed``)."""
+        if self.ui_state == state:
+            return
+        self.ui_state = state
+        bus.emit("vault:status_changed", {"state": state})
+
+    def _announce_ready(self) -> None:
+        """Vault is unsealed, the token works and the mount exists.
+
+        The one place that flips to "ready" — at boot, after init, after a manual
+        or automatic unseal, and when the watchdog sees Vault come back. Emitting
+        ``vault:opened`` / ``vault:ready_for_data`` again after a re-seal is safe:
+        the core subscribers are idempotent (the database ignores it while its
+        engine is live, settings hydration just re-reads) and plugins use
+        ``vault:ready_for_data`` to (re)load their settings.
+        """
+        self.is_connected = True
+        self._unreachable_probes = 0
+        self._set_ui_state("ready")
+        bus.emit("vault:opened", {})
+        bus.emit("vault:ready_for_data", {})  # Plugins may load now
+        self._start_watchdog()
+
+    # ------------------------------------------------------------------
+    # Seal watchdog
+    # ------------------------------------------------------------------
+
+    def _start_watchdog(self) -> None:
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = bus.create_tracked_task(self._watchdog(), name="vault_service:watchdog")
+
+    async def _watchdog(self) -> None:
+        """Notice a Vault that re-seals or disappears AFTER boot.
+
+        The health check used to run once at ``system:started``; a Vault pod
+        that restarted and came back sealed left ``is_connected`` True forever:
+        reads returned nothing, the system API key read as "not configured",
+        and auto-unseal never ran although ``LYNDRIX_MASTER_KEY`` was set.
+        """
+        while True:
+            await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+            try:
+                await self._watchdog_tick()
+            except Exception as exc:  # the watchdog itself must never die
+                log.error(f"WATCHDOG: Vault check failed unexpectedly: {exc}")
+
+    async def _probe_seal_state(self) -> str:
+        """``"unsealed"``, ``"sealed"`` or ``"unreachable"`` (one cheap sys call, off the loop)."""
+        try:
+            return "sealed" if await asyncio.to_thread(self.client.sys.is_sealed) else "unsealed"
+        except Exception:
+            return "unreachable"
+
+    async def _watchdog_tick(self) -> None:
+        state = await self._probe_seal_state()
+
+        if self.is_connected:
+            if state == "unsealed":
+                self._unreachable_probes = 0
+                return
+            if state == "unreachable":
+                # One failed probe is a blip (leader election, network); do not
+                # flap the whole platform on it.
+                self._unreachable_probes += 1
+                if self._unreachable_probes < _WATCHDOG_UNREACHABLE_THRESHOLD:
+                    return
+                log.error("WATCHDOG: Vault is unreachable — secrets are unavailable until it returns.")
+                self.is_connected = False
+                self._set_ui_state("error")
+                return
+            log.warning("WATCHDOG: Vault was sealed while the core is running.")
+            self.is_connected = False
+            self._set_ui_state("needs_unseal")
+            bus.emit("vault:needs_unseal", {})  # → auto-unseal when LYNDRIX_MASTER_KEY is set
+            return
+
+        # Not connected (any longer). The watchdog only starts after the first
+        # "ready", so this is a Vault we lost — bring it back by ourselves.
+        if state == "unsealed":
+            # Back and unsealed (restart with auto-unseal on Vault's side, or an
+            # operator unsealed it outside the core): same steps as at boot.
+            await self._restore_token_from_keyfile()
+            if await self._ensure_lyndrix_mount():
+                log.info("WATCHDOG: Vault is reachable and unsealed again.")
+                self._announce_ready()
+            return
+        if state == "sealed":
+            self._set_ui_state("needs_unseal")
+            if settings.LYNDRIX_MASTER_KEY:
+                # Keep trying the automatic unseal; without a master key there
+                # is nothing to retry — the operator unseals through the UI.
+                bus.emit("vault:needs_unseal", {})
+
     async def check_vault_health(self, payload: dict | None = None) -> None:
         log.info("CHECK: Checking Vault status...")
         try:
             if not await asyncio.to_thread(self.client.sys.is_initialized):
-                self.ui_state = "needs_init"
+                self._set_ui_state("needs_init")
                 log.warning("WARNING: Vault is not initialized yet!")
                 bus.emit("vault:needs_init", {})
                 return
 
             if await asyncio.to_thread(self.client.sys.is_sealed):
-                self.ui_state = "needs_unseal"
+                self._set_ui_state("needs_unseal")
                 log.info("LOCKED: Vault is sealed. Waiting for key...")
                 bus.emit("vault:needs_unseal", {})
             else:
-                self.ui_state = "ready"
+                self._set_ui_state("ready")
                 self.is_connected = True
 
                 await self._restore_token_from_keyfile()
@@ -89,13 +193,12 @@ class VaultService:
                     return
 
                 log.info("SUCCESS: Vault is already open and ready.")
-                bus.emit("vault:opened", {})
-                bus.emit("vault:ready_for_data", {})  # Plugins may load now
+                self._announce_ready()
         except Exception as e:
             # Connection failure (Vault down/unreachable) must not silently hang the
             # boot chain: surface an explicit error state and schedule a retry.
             log.error(f"ERROR: Vault connection error: {e}", exc_info=True)
-            self.ui_state = "error"
+            self._set_ui_state("error")
             bus.emit("vault:connection_failed", {"reason": "unreachable"})
             bus.emit(
                 "system:maintenance_mode",
@@ -126,10 +229,7 @@ class VaultService:
             # IMPORTANT: create mount after init
             await self._ensure_lyndrix_mount()
 
-            self.ui_state = "ready"
-            self.is_connected = True
-            bus.emit("vault:opened", {})
-            bus.emit("vault:ready_for_data", {})
+            self._announce_ready()
         except WeakMasterKeyError as e:
             log.warning(f"INIT: Rejected weak master key: {e}")
             bus.emit("vault:init_failed", {"reason": "weak_key"})
@@ -152,11 +252,8 @@ class VaultService:
 
             success = await self._ensure_lyndrix_mount()
             if success:
-                self.ui_state = "ready"
-                self.is_connected = True
                 log.info("UNSEAL: Vault successfully unsealed and ready!")
-                bus.emit("vault:opened", {})
-                bus.emit("vault:ready_for_data", {})  # Plugins may load now
+                self._announce_ready()
             else:
                 bus.emit("vault:unseal_failed", {"reason": "mount_failed"})
         except Exception as e:
