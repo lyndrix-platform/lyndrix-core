@@ -14,6 +14,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
 | `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
 | `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → `/api/ready` 503 → wait → close SSE → release leases → exit |
+| `LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT` | `15` | 0/1 | seconds a plugin's `teardown()` may take on disable/unload/reload before the core stops waiting and continues |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
 | `DB_HOST` | `db` | 0 | the **single-writer endpoint** (MaxScale/ProxySQL/Service); the preflight warns when it is a Galera node addressed directly |
 | `DB_ALLOW_DIRECT_NODE` | `false` | 2 | silence that warning on purpose |

@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # the SSRF guard in core.components.plugins.logic.git_providers. Add your
     # self-hosted GitLab's hostname here to install plugins from it.
     LYNDRIX_PLUGIN_REPO_HOSTS: str = "github.com"
+    # Seconds a plugin's teardown() may take on disable/unload/reload before
+    # the core stops waiting for it and continues (the plugin lifecycle reads
+    # this; a hanging teardown must not block the operation forever).
+    LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: int = 15
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
