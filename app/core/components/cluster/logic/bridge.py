@@ -21,6 +21,7 @@ from typing import Optional
 from core.bus import bus
 from core.logger import get_logger
 
+from . import payload_guard
 from .coordinator import Coordinator
 
 log = get_logger("Core:Cluster:Bridge")
@@ -83,6 +84,11 @@ class ClusterBridge:
         if RELAY_ORIGIN.get() is not None:
             return  # derived from a relayed event — stays on this instance
         if not (forced or topic in CLUSTER_TOPICS):
+            return
+        # Accepted for publishing — except when the payload carries a secret:
+        # it must not be persisted in cluster_events (SC-06). Local delivery
+        # already happened through the bus.
+        if payload_guard.blocks(topic, payload):
             return
         loop = self._loop
         if loop is None or loop.is_closed():

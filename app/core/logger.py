@@ -246,6 +246,77 @@ def mask_secrets(obj, *, in_env: bool = False):
     return obj
 
 
+# --- "Does this payload carry a secret?" (persist guard, SC-06) -----------------------
+# High-confidence value shapes only: an explicit user:password@ URL, an auth header
+# value, a Bearer token, a known token prefix or a JWT. The broad ``name=value`` rule
+# of mask_text is left out on purpose — "Invalid token: expired" in an error message
+# is worth masking in a log line, but it is no reason to withhold an event.
+_URL_PASSWORD_RE = re.compile(r"://[^/\s:@\"']+:[^/\s@\"']+@")
+# Bare "key"/"auth" are too common as ordinary field names ({"key": "sort_order"}).
+_AMBIGUOUS_PAYLOAD_NAMES = frozenset({"key", "keys", "auth"})
+_MAX_PAYLOAD_DEPTH = 8
+
+
+def has_secret_shape(text: str) -> bool:
+    """True when a string contains something shaped like a credential."""
+    if not text or not _TEXT_HINT_RE.search(text):
+        return False
+    return bool(
+        _URL_PASSWORD_RE.search(text)
+        or _HEADER_RE.search(text)
+        or _BEARER_RE.search(text)
+        or _TOKEN_PREFIX_RE.search(text)
+    )
+
+
+def _has_content(value) -> bool:
+    """A secret needs a value: empty strings, None, flags and counters are none."""
+    if isinstance(value, (str, bytes)):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple, set)):
+        return bool(value)
+    return False
+
+
+def find_sensitive(obj, path: str = "", _depth: int = 0) -> str | None:
+    """Location of the first secret-looking entry of a payload, or ``None``.
+
+    Uses the same name matcher as ``mask_secrets`` plus ``has_secret_shape`` for
+    values. Returns a key path such as ``config.api_token`` or ``items[2].url``
+    — never a value — so the caller can name what it refused.
+    """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        return None
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            where = f"{path}.{key}" if path else str(key)
+            if isinstance(key, str):
+                lowered = key.lower()
+                if lowered in _ENV_CONTAINERS and _has_content(value):
+                    return where
+                if (lowered not in _AMBIGUOUS_PAYLOAD_NAMES and _sensitive_name(key)
+                        and _has_content(value)):
+                    return where
+            found = find_sensitive(value, where, _depth + 1)
+            if found:
+                return found
+        # {"key": "<NAME>", "value": "<secret>"} — environment-variable style pair.
+        pair_name = obj.get("key")
+        if (isinstance(pair_name, str) and "value" in obj and _has_content(obj["value"])
+                and pair_name.lower() not in _AMBIGUOUS_PAYLOAD_NAMES and _sensitive_name(pair_name)):
+            return f"{path}.value" if path else "value"
+        return None
+    if isinstance(obj, (list, tuple)):
+        for index, item in enumerate(obj):
+            found = find_sensitive(item, f"{path}[{index}]", _depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(obj, str):
+        return (path or "<value>") if has_secret_shape(obj) else None
+    return None
+
+
 class EnterpriseFormatter(logging.Formatter):
     # Kept for backwards compatibility; delegates to the module-level helper.
     SENSITIVE_KEYS = SENSITIVE_KEYS
