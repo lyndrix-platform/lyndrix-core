@@ -1591,8 +1591,49 @@ class ModuleManager:
                     continue
                 if have.lstrip("vV") == want.lstrip("vV") and entry.get("status") in ("active", "remote"):
                     await self._report_operation(op["plugin_id"], op.get("repo_name"), "done", "already at this version")
+                    continue
+                # The operation asks for a version that failed verification here
+                # and is backed off: the reconcile will not install it now, so
+                # nothing would report and the operation would sit "running"
+                # until the timeout sweep. Say so at once — unless this instance
+                # is working on the plugin right now (it reports by itself).
+                reason = self._backed_off_reason(op["plugin_id"], want)
+                if reason and not self._plugin_busy(op["plugin_id"], entry, op.get("repo_name")):
+                    await self._report_operation(op["plugin_id"], op.get("repo_name"), "failed", reason)
         except Exception:
             log.debug("OPS: already-current report failed", exc_info=True)
+
+    def _backed_off_reason(self, module_id: str, version: str) -> str | None:
+        """Operator-facing text when ``version`` of the plugin is backed off on
+        this instance after a failed verification, else ``None``."""
+        if self._reconcile_verify_allowed(module_id, version):
+            return None
+        import time as _time
+
+        failures, next_attempt = self._reconcile_verify_backoff[self._verify_backoff_key(module_id, version)]
+        minutes = max(1, int((next_attempt - _time.monotonic()) // 60) + 1)
+        return (
+            f"{version} failed verification on this instance {failures}× and was reverted — "
+            f"not retried for another {minutes} min (restart the instance or install a fixed version)"
+        )
+
+    def _plugin_busy(self, module_id: str, entry: dict, repo_name: str | None) -> bool:
+        """An install/upgrade of the plugin is in flight on this instance."""
+        if module_id in self._reconcile_upgrading:
+            return True
+        module_file = getattr(entry.get("module"), "__file__", None)
+        folder = Path(module_file).parent.name if module_file else repo_name
+        if self._install_in_flight(folder) or self._install_in_flight(repo_name):
+            return True
+        try:
+            from .plugin_service import plugin_service
+
+            # Held from the download to the file swap (before the load handler runs).
+            return any(
+                name and plugin_service._install_lock(name).locked() for name in {folder, repo_name}
+            )
+        except Exception:
+            return False
 
     async def _reconcile_version(self, mid: str, entry: dict, row: dict, plugin_service, trigger: str, summary: dict) -> bool:
         """Bring this instance's artifact to ``plugin_states.installed_version`` when
