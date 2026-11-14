@@ -197,6 +197,10 @@ class ModuleManager:
             
             if not hasattr(module, 'manifest'):
                 log.warning(f"VALIDATION_ERROR: Module '{module_name}' missing 'manifest'")
+                # Not registered → forget the import, or a fixed entrypoint would
+                # never be re-read (import_module returns the cached module).
+                if is_plugin:
+                    self._purge_failed_import(prefix, module_name)
                 return False
 
             raw_manifest = module.manifest
@@ -300,7 +304,29 @@ class ModuleManager:
             if path_added and vendor_path_str in sys.path:
                 log.debug(f"VENDORS: Cleaning up failed import path {vendor_path_str}")
                 sys.path.remove(vendor_path_str)
+            if is_plugin:
+                self._purge_failed_import(prefix, module_name)
             return False
+
+    def _purge_failed_import(self, prefix: str, module_name: str) -> None:
+        """Forget a plugin package whose load failed before it was registered.
+
+        Python removes only the module that raised (``…entrypoint``); the package
+        and every submodule it imported before the error stay in ``sys.modules``,
+        and their ORM classes stay on the shared ``Base``. The next import of the
+        folder — typically the auto-revert loading the restored OLD version —
+        would then bind the old entrypoint to the cached NEW submodules (mixed
+        code until restart) or die with "Table … is already defined".
+        """
+        if self._find_plugin_id_by_folder(module_name):
+            return  # the folder backs a registered plugin — its modules are live
+        package = f"{prefix}.{module_name}"
+        self._forget_plugin_models(package)
+        stale = [m for m in sys.modules if m == package or m.startswith(package + ".")]
+        for name in stale:
+            sys.modules.pop(name, None)
+        if stale:
+            log.info(f"LOAD_ERROR: purged {len(stale)} half-imported module(s) of '{package}'.")
 
     async def _handle_plugin_change(self, payload: dict):
         """Reacts to install/uninstall events from the PluginService."""
