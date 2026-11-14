@@ -9,6 +9,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The core is released as the image `ghcr.io/lyndrix-platform/lyndrix-core:<version>`; the version is
 `app/version.py` (a push to `main` builds the image and creates the tag `v<version>`).
 
+## [1.12.0] - unreleased
+Result of the 2026-11 core audit (cluster, security, bugs, tests). Plugin API **1.14.0** (was 1.13.0).
+Read **Upgrade notes** before rolling out — several defaults became stricter.
+
+### Upgrade notes
+- **Login sessions expire** 30 days after creation (`LYNDRIX_SESSION_MAX_AGE_HOURS`, default `720`, `0` =
+  never). Older sessions end at the first request after the upgrade; scripts that stored a
+  `/api/auth/login` token must log in again or use a named API key (those never expire).
+- **Changing your own password needs `current_password`** (`PATCH /api/users/{u}`, 422 without it). The
+  React shell must send it — until then the profile tab cannot change the own password.
+- **Config precedence**: a value in `.env` now wins over a Vault override of the same editable setting
+  (documented order OS env > `.env` > Vault > default; before, Vault won over `.env`).
+- **`LOG_LEVEL` is honoured from startup**: with the default `INFO` the file log and the in-memory log
+  ring no longer collect DEBUG records.
+- **Stricter permissions**: `/api/cluster*`, `/docs`, `/redoc`, `/openapi.json` need `admin:read` (docs stay
+  open with `ENV_TYPE=dev`); non-admins get a reduced `GET /api/system/config`; `POST /api/system/config`
+  accepts only the editable settings (422 otherwise); `admin:write` can no longer manage credentials of
+  superadmin accounts or set the system API key.
+- **SSE topics are permission-gated**: `plugin:installed`, `plugin:install_failed`,
+  `plugin:update_available`, `plugin:operation_changed` need `feature:plugins.manage` or `admin:read`,
+  `cluster:*` needs `admin:read`. Non-admins no longer get install toasts.
+- **Plugin installs are stricter**: `requirements.txt` may only contain plain requirement specifiers; an
+  install/upgrade fails when its dependencies cannot be installed (before: activated without them); repo
+  URLs with credentials/query/fragment are rejected; provider tokens are never sent over `http://` and
+  the GitLab token only to its own host (set `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST` when several GitLab
+  hosts are on `LYNDRIX_PLUGIN_REPO_HOSTS`).
+- **Container file modes**: the entrypoint no longer runs `chmod -R 777`; `/data/security` becomes `0700`
+  and `vault_keys.enc` `0600` on start.
+- **Cluster**: set `stop_grace_period: 30s` (Docker) / check `progressDeadlineSeconds` (k3s); a new pod is
+  not ready until its plugins are loaded (`plugins:converging`, capped by
+  `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`); `LYNDRIX_INSTANCE_ID` must be unique among running processes;
+  rotating `STORAGE_SECRET` needs a restart of all instances. Schema changes are additive and safe next
+  to 1.11.x instances during a rolling update (`cluster_leases.token`, `cluster_instances.incarnation`,
+  `cluster_instances.stopped_at`, `users.email_trusted`).
+- **Disabled plugins lose their REST routes** (404 until re-enabled); `PUT` plugin settings is a merge.
+- Themes uploaded earlier through the NiceGUI page live in the image directory and now count as built-in.
+
+### Security
+- Identity linking fails closed: no session is issued for an external login that could not be linked
+  (previously a linking error could yield a session for a same-named local account).
+- Email auto-linking of LDAP/OIDC identities requires an email set by an admin or a provider; a
+  self-service email change loses that trust (`users.email_trusted`).
+- Password verification has one choke point for `/api/auth/login`, HTTP Basic, the NiceGUI login and
+  LDAP: per-account, per-address and per-pair budgets, bounded Argon2 concurrency
+  (`LYNDRIX_LOGIN_VERIFY_CONCURRENCY`), 429/503 with `Retry-After`. HTTP Basic is no longer evaluated on
+  `/api/health`, `/api/auth/whoami`, `/api/events` and can be switched off (`LYNDRIX_API_BASIC_AUTH`).
+  The cluster preflight warns when `LYNDRIX_TRUSTED_PROXIES` is `*`.
+- Scoped API keys are bounded by their scopes even for superadmins and cannot mint keys or change
+  credentials. Deleting a user removes their keys, sessions, identities and preferences; keys without
+  an owner are rejected; a password change signs out the account's other sessions; SSO-only accounts
+  cannot set a local password themselves.
+- Permission-gated notifications reach only entitled users over SSE; a revoked key or deleted user ends
+  its stream within ~20 s; open streams are capped per user (`LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER`).
+- OIDC start rejects crafted `redirect_uri`/`next` values and is rate-limited; the auth config API
+  accepts only known keys and requires the secret again when the LDAP URL / OIDC issuer changes;
+  unseal/init limiter keyed on the real client address plus a global cap; a non-ASCII API key is a 401.
+- Vault key material is owner-only on disk; `/api/socket/repair` and the Docker cleanup endpoint validate
+  their input (cleanup needs a real prefix and minimum age and never removes the core's container).
+- Theme uploads are validated strictly (no markup/CSS injection from a theme; size limits).
+- Plugin dependency installs run `pip --isolated` with a minimal environment (no core secrets), new
+  `LYNDRIX_PLUGIN_PIP_INDEX_URL`; archive size/file-count limits (`LYNDRIX_PLUGIN_MAX_*`).
+- Log masking covers secret-like key names, URL credentials, auth headers, known token prefixes, %-args
+  and tracebacks. The cluster bridge keeps events with secret-looking payloads on the emitting instance.
+- NiceGUI settings pages no longer send stored secrets to the browser. `requests>=2.32.4`.
+
+### Cluster
+- Leases: self-fencing before the TTL can expire for peers, late-returning acquire/renew calls cannot
+  resurrect a lost lease, per-acquisition fencing token (`ctx.lease_token(name)`), scoped leases are
+  renewed and exclusive within an instance.
+- Instance lifecycle: graceful stops leave a tombstone — peers see `draining` / `restarting` instead of
+  "no runner instance online" (`LYNDRIX_RESTART_GRACE_SECONDS`); incarnation ids; SIGTERM hands leases
+  over at once (`lost` before release) and turns `/api/ready` 503 during the drain; new
+  `ctx.instance_state(id)`, `ctx.role_state(role)`, local event `cluster:instance_lost`.
+- Readiness: based on live coordinator state (a transient DB error no longer pins 503 for 5 min; a
+  starved heartbeat turns the instance unready); preflight runs outside the heartbeat with bounded
+  checks; a hung storage mount no longer leaks threads; a `STORAGE_SECRET` mismatch takes only the odd
+  instance out; `plugins:converging` until boot plugins are loaded.
+- Event bridge: no permanently skipped late-committed ids, ordered publishing with a bounded outbox that
+  survives a DB outage, 64 kB payload cap; plugins activated by a peer-triggered reconcile can publish
+  cluster events again.
+- Rolling restart restarts one instance at a time, leader last; storage preflight checks marker
+  content among the roles that must share storage (`LYNDRIX_STORAGE_SHARED_ROLES`).
+- Plugin operations: a version that failed verification is backed off (10 min … 24 h) instead of being
+  re-installed on every reconcile pass, reverts announce themselves, backed-off instances report at
+  once, dead participants are marked `gone`.
+
+### Fixed
+- Disabling a plugin unmounts its REST routes; a failed import leaves no modules/ORM classes behind;
+  async `setup()` runs once; unload/reload awaits `teardown()` (bounded by
+  `LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT`) before tasks are cancelled and leases released; several routers
+  per plugin; route/package prefix matching with boundaries; locale reload on plugin upgrade.
+- Vault read-modify-write never writes after a failed read and uses KV v2 check-and-set
+  (`ctx.set_secret`, system config, auth config, plugin settings, custom-repo tokens).
+- NotificationRouter sync: coalesced, READ COMMITTED with a short lock wait, writes only changes, never
+  deletes rows of installed plugins (the source of the 1205 lock storms).
+- SSE: an overflowing client's stream is closed so it reconnects (no more zombie streams).
+- Notifications written during an in-flight flush are persisted; CorrelationStore survives a restart
+  (timezone-aware) and its housekeeping loops no longer die on the first error.
+- First DB connect retries forever with capped backoff; Vault re-seal after boot is detected
+  (`vault:status_changed`, auto-unseal re-requested, hvac timeout 5 s).
+- `/api/health`: one shared plugin round, no second `health()` while the previous one still runs.
+- Maintenance API: `effective_state` cost for overlapping cron windows (~300 ms → ~3 ms), new
+  `MaintenanceState.open_ended` (an open-ended `until` is a lower bound — do not store it).
+- Event bus delivers every distinct callback (bound methods of two instances, closures); blocking
+  DB/Vault calls moved off the event loop on the login, SSE, plugin lifecycle and webhook paths.
+- Preferences lost-update race; bootstrap DDL under the cluster lock; desired-plugin pins match exactly.
+
+### Added (plugin API 1.14.0)
+- `ctx.aget_secret`, `ctx.aset_secret`, `ctx.aget_setting`, `ctx.aget_all_settings`.
+- `ctx.lease_token`, `ctx.instance_state`, `ctx.role_state`, `ctx.incarnation`; `cluster:instance_lost`.
+- `module_manager.set_module_active` / `unload_module_async` (await an async teardown).
+- Settings: `LYNDRIX_API_BASIC_AUTH`, `LYNDRIX_LOGIN_VERIFY_CONCURRENCY`, `LYNDRIX_SESSION_MAX_AGE_HOURS`,
+  `LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER`, `LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT`,
+  `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST`, `LYNDRIX_PLUGIN_PIP_INDEX_URL`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_MB`,
+  `LYNDRIX_PLUGIN_MAX_EXTRACTED_MB`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES`, `LYNDRIX_THEME_MAX_ZIP_MB`,
+  `LYNDRIX_RESTART_GRACE_SECONDS`, `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`, `LYNDRIX_STORAGE_SHARED_ROLES`,
+  `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS` — see `docs/ha/configuration.md`.
+
+### Known limits
+- MariaDB/Galera-, NFS- and Vault-specific paths (READ COMMITTED sessions, `GET_LOCK` skip,
+  `FOR UPDATE`, KV v2 CAS, `ALTER TABLE` upgrade, lease `UPDATE` order) are covered by fakes and SQLite
+  only — run the HA dev bench (`docs/ha/operations/test-plan.md`) before releasing.
+
 ## [1.11.1] - 2026-11-13
 ### Fixed
 - Database connections against a silently dead peer (DB VIP failover, half-open TCP) no longer block
