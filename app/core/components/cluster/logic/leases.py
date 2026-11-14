@@ -48,6 +48,7 @@ from core.bus import bus
 from core.logger import get_logger
 
 from .coordinator import Coordinator
+from .origin import clean_context
 
 log = get_logger("Core:Cluster:Leases")
 
@@ -247,7 +248,9 @@ class LeaseKeeper:
             except Exception as exc:
                 log.debug("LEASE: synchronous release of '%s' failed: %s", name, exc)
             return
-        bus.create_tracked_task(coro, name=f"cluster:lease_release:{name}")
+        # Clean context: the release broadcast must reach the peers even when
+        # the release was triggered from a relayed event's handler.
+        bus.create_tracked_task(coro, name=f"cluster:lease_release:{name}", context=clean_context())
 
     async def release_now(self, name: str) -> bool:
         """Give a held lease up explicitly (admin action, drain).
@@ -568,15 +571,20 @@ class LeaseKeeper:
         if callback is None:
             return None
         try:
+            # Lease work has a life of its own: it must not inherit "derived
+            # from a relayed event" from whoever caused the transition (a
+            # relayed hand-over, a plugin activated by a peer-triggered
+            # reconcile) — its cluster events would never be published.
+            context = clean_context()
             how = _accepts_token(callback) if event == "acquired" else None
             if how == "keyword":
-                result = callback(token=token)
+                result = context.run(callback, token=token)
             elif how == "positional":
-                result = callback(token)
+                result = context.run(callback, token)
             else:
-                result = callback()
+                result = context.run(callback)
             if inspect.isawaitable(result):
-                return bus.create_tracked_task(result, name=f"cluster:lease_{event}:{name}")
+                return bus.create_tracked_task(result, name=f"cluster:lease_{event}:{name}", context=context)
         except Exception:
             log.error("LEASE: %s callback for '%s' raised", event, name, exc_info=True)
         return None

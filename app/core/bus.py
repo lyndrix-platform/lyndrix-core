@@ -210,12 +210,14 @@ class GlobalEventBus:
 
         task.add_done_callback(_on_done)
 
-    def create_tracked_task(self, coro, *, name: str = None) -> asyncio.Task:
+    def create_tracked_task(self, coro, *, name: str = None, context=None) -> asyncio.Task:
         """Creates and tracks an asyncio task with failure logging.
 
         Use this instead of bare asyncio.create_task() for observability.
+        ``context`` (a ``contextvars.Context``) runs the task in that context
+        instead of a copy of the caller's.
         """
-        task = asyncio.create_task(coro, name=name)
+        task = asyncio.create_task(coro, name=name, context=context)
         self._active_tasks.add(task)
 
         def _on_done(t: asyncio.Task):

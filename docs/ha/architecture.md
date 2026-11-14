@@ -106,7 +106,11 @@ instances. Plugin topics stay local unless the plugin opts in on purpose.
 
 Two rules keep one action from turning into N × N toasts: an event a handler emits *in reaction
 to a relayed event* (synchronously or from the task/thread spawned for it) is never published
-again — the originating instance already bridged its own reaction — and installs performed by a
+again — the originating instance already bridged its own reaction. That suppression ends at
+lifecycle boundaries: a plugin's `setup()`, every `ctx.create_task`, lease callbacks and the
+reconcile a peer's change triggers start outside the relay context, so a plugin that was
+(re)activated because a *peer* installed or enabled it publishes its cluster events like any
+other (before core 1.12 it silently could not, until the instance restarted). And installs performed by a
 reconcile (boot-time `LYNDRIX_PLUGINS_DESIRED`, cluster convergence) are silent; only the instance
 that executed the operator's action emits `plugin:installed` and the "Plugin installed"
 notification, which then reaches every browser exactly once through the relay.

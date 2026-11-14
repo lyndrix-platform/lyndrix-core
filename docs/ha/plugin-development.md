@@ -174,6 +174,11 @@ their local bus with `payload["_origin"] = <sender instance id>`. Use it for "my
 re-read it" — **never** to fan work out N times. Your own emit still reaches your own subscribers
 without `_origin`, so check it before reacting to avoid doing the work twice.
 
+Do not emit a bridged event *as a direct reaction* to a relayed one (`payload["_origin"]` set) and
+expect it to travel on: reactions to relayed events stay local by design. Work you start with
+`ctx.create_task`, your `setup()` and your lease callbacks are not reactions — whatever they emit
+later is published normally, no matter what caused the plugin to be loaded.
+
 `ctx.emit` may be called from a worker thread (core ≥ 1.7): the bus hands the call over to the
 application loop with `call_soon_threadsafe`, so subscribers — sync and async — always run on the
 loop. Older cores needed a manual `loop.call_soon_threadsafe` hop.

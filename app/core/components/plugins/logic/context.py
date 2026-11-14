@@ -541,7 +541,13 @@ class ModuleContext:
     def create_task(self, coro, *, name: str = None):
         """Create an observed background task owned by this module."""
         task_name = name or f"module:{self.manifest.id}"
-        task = global_bus.create_tracked_task(coro, name=task_name)
+        # A module's background work outlives whatever triggered it — also when
+        # that was an event relayed from a peer (a peer-triggered reconcile
+        # activating this plugin). Start it outside the relay context, or every
+        # cluster event it ever emits would count as "derived from a relayed
+        # event" and never be published.
+        from core.components.cluster.logic.origin import clean_context
+        task = global_bus.create_tracked_task(coro, name=task_name, context=clean_context())
         self._tasks.append(task)
         return task
 
