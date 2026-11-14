@@ -487,8 +487,13 @@ class ModuleContext:
         except ValueError:
             pass  # dispose() already cleared the list
 
-    def dispose(self) -> None:
+    def dispose(self, *, only_tasks: list | None = None) -> None:
         """Remove this module's bus subscriptions and cancel its background tasks.
+
+        ``only_tasks`` limits the cancellation to the given tasks. The
+        ModuleManager passes the tasks that existed *before* it ran the
+        module's ``teardown``: stop work the teardown scheduled through
+        ``ctx.create_task`` must not be cancelled before its first step.
 
         Called by the ModuleManager on unload/disable so a reloaded or disabled
         plugin's stale handlers stop firing (freeing their de-dup keys for a fresh
@@ -508,7 +513,7 @@ class ModuleContext:
                 future.cancel()
         self._pending_requests.clear()
 
-        for task in self._tasks:
+        for task in (self._tasks if only_tasks is None else only_tasks):
             try:
                 if not task.done():
                     task.cancel()

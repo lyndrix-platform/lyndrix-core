@@ -41,7 +41,10 @@ def test_auto_revert_announces_the_revert_and_records_history_off_loop(monkeypat
         lambda *a, **k: history.append((a, k, threading.get_ident() != loop_thread)),
     )
     monkeypatch.setattr(db_service.db_instance, "is_connected", False, raising=False)
-    monkeypatch.setattr(mgr, "unload_module", lambda mid: mgr.registry.pop(mid, None) is not None)
+    async def fake_unload(mid):
+        return mgr.registry.pop(mid, None) is not None
+
+    monkeypatch.setattr(mgr, "unload_module_async", fake_unload)
 
     def fake_load(name, is_plugin=True):
         mgr.registry[MID] = _entry("1.0.0")

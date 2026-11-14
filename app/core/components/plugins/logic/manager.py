@@ -362,7 +362,7 @@ class ModuleManager:
                 await self._handle_plugin_install(payload, module_name)
         elif action == "uninstall":
             module_id = payload.get("id")
-            self.unload_module(module_id)
+            await self.unload_module_async(module_id)
             # plugin_states is the cluster's source of truth: without this the row
             # kept saying "active" and peers (or the next boot) re-installed the plugin.
             # A failed delete must not fail open (peers would silently keep the
@@ -599,7 +599,7 @@ class ModuleManager:
             failed_version = getattr(self.registry[module_id].get("manifest"), "version", None)
         # Drop the broken version from memory before swapping files back.
         if module_id and module_id in self.registry:
-            self.unload_module(module_id)
+            await self.unload_module_async(module_id)
         # Folder swap + rmtree of the failed tree (seconds with a large vendor/)
         # — off the event loop.
         if not await asyncio.to_thread(plugin_service.restore_previous, module_name):
@@ -710,6 +710,10 @@ class ModuleManager:
             return
 
         if entry.get("status") in ("active", "remote"):
+            return
+
+        # Being disabled/unloaded right now (teardown is awaited): hands off.
+        if entry.get("stopping"):
             return
 
         # Degraded plugins (critical manifest issues) must not be activated.
@@ -947,6 +951,8 @@ class ModuleManager:
                 continue
             manifest = entry["manifest"]
             entry["persisted"] = True
+            if entry.get("stopping"):
+                continue  # mid-disable/unload — that operation decides its state
             if row_states[module_id]:
                 if not self._check_dependencies_met(manifest):
                     entry["status"] = "blocked"
@@ -1073,32 +1079,58 @@ class ModuleManager:
         re-broadcasting ``plugin:desired_changed``.
 
         Synchronous and therefore BLOCKING when it persists (DB round trips,
-        retry sleeps, possibly the bootstrap lock): code running on the event
-        loop must use ``await set_module_active(...)`` instead. Kept for sync
-        callers and backwards compatibility.
+        retry sleeps, possibly the bootstrap lock), and it cannot wait for an
+        async ``teardown``: code running on the event loop must use
+        ``await set_module_active(...)`` instead. Kept for sync callers and
+        backwards compatibility.
         """
         if module_id not in self.registry:
             return False
         if persist and not self._persist_toggle(module_id, active):
             return False
-        self._apply_toggle(module_id, active)
+        if active:
+            self._enable(module_id)
+        else:
+            entry, was_remote = self._disable_begin(module_id)
+            self._stop_module(module_id, entry, teardown=not was_remote, label="DISABLE")
+            self._disable_end(module_id, entry)
         if persist:
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
         return True
 
     async def set_module_active(self, module_id: str, active: bool, *, persist: bool = True) -> bool:
         """Async ``toggle_module``: the ``plugin_states`` write runs in a worker
-        thread, the lifecycle part (setup/teardown, routes, bus) on the loop."""
-        if module_id not in self.registry:
-            return False
-        if persist and not await asyncio.to_thread(self._persist_toggle, module_id, active):
-            return False
-        if module_id not in self.registry:
-            return False  # unloaded while the row was being written
-        self._apply_toggle(module_id, active)
+        thread, the lifecycle part on the loop — and a disable waits (bounded)
+        for the plugin's ``teardown`` before its tasks are cancelled and its
+        leases released (see ``_stop_module_async``).
+
+        Toggles and unloads of one module are serialized, so an enable issued
+        while the disable is still tearing down starts from a stopped plugin.
+        """
+        async with self._lifecycle_lock(module_id):
+            if module_id not in self.registry:
+                return False
+            if persist and not await asyncio.to_thread(self._persist_toggle, module_id, active):
+                return False
+            if module_id not in self.registry:
+                return False  # unloaded while the row was being written
+            if active:
+                self._enable(module_id)
+            else:
+                entry, was_remote = self._disable_begin(module_id)
+                try:
+                    await self._stop_module_async(module_id, entry, teardown=not was_remote, label="DISABLE")
+                finally:
+                    self._disable_end(module_id, entry)
         if persist:
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
         return True
+
+    def _lifecycle_lock(self, module_id: str) -> asyncio.Lock:
+        """Serializes enable/disable/unload of one module. Separate from the
+        reload lock, which is held across the activation pass (and with it the
+        cluster reconcile, which may toggle the very same module)."""
+        return self._lock_for(f"lifecycle:{module_id}")
 
     def _persist_toggle(self, module_id: str, active: bool) -> bool:
         """Write ``is_active`` to the plugin's row (blocking). False = not saved."""
@@ -1123,66 +1155,162 @@ class ModuleManager:
             log.error(f"DB_ERROR: Failed to save toggle state: {e}")
             return False
 
-    def _apply_toggle(self, module_id: str, active: bool) -> None:
-        """Update the in-memory status and run the lifecycle hooks (event loop)."""
+    def _enable(self, module_id: str) -> None:
+        """In-memory part of an enable: run ``setup()`` (or park as blocked)."""
+        entry = self.registry[module_id]
+        if not self._check_dependencies_met(entry["manifest"]):
+            entry["status"] = "blocked"
+            log.warning(
+                f"MODULE: Plugin '{module_id}' was enabled but is waiting for dependencies."
+            )
+        else:
+            entry["status"] = "initializing"
+            self._execute_setup(module_id)
+            log.info(f"MODULE: 🟢 '{module_id}' is now ACTIVE")
+        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
+
+    def _disable_begin(self, module_id: str) -> tuple:
+        """First half of a disable: mark the entry and stop serving its UI/API.
+        Returns ``(entry, was_remote)``; the caller stops the module next."""
         entry = self.registry[module_id]
         was_remote = entry.get("status") == "remote"
+        entry["status"] = "disabled"
+        # Hands off for every other pass while teardown is awaited (_execute_setup
+        # refuses a stopping entry).
+        entry["stopping"] = True
+        # A still-running async setup() is cancelled by dispose() and no longer
+        # owns this entry (see _owns_setup).
+        entry.pop("setup_task", None)
+        log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
+        # "Soft" unload: remove UI and call teardown, but keep module in memory.
+        self._teardown_ui(module_id)
+        # The plugin's REST API goes with it (for a "remote" plugin that is
+        # the 503 stub). Without this the routes kept answering 200 against
+        # a service whose tasks and subscriptions were already torn down;
+        # re-enabling re-registers them through setup() → register_routes.
+        try:
+            from core.api.router_registry import router_registry
 
-        if active:
-            manifest = entry["manifest"]
-            if not self._check_dependencies_met(manifest):
-                entry["status"] = "blocked"
+            router_registry.unmount(module_id)
+        except Exception as e:
+            log.warning(f"DISABLE: could not unmount routes for '{module_id}': {e}")
+        return entry, was_remote
+
+    def _disable_end(self, module_id: str, entry: dict) -> None:
+        entry.pop("stopping", None)
+        self._unmount_plugin_statics(module_id)
+        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
+
+    # ------------------------------------------------------------------
+    # Stopping a module: teardown → dispose (tasks, subscriptions, leases)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _teardown_timeout() -> float:
+        """Seconds an unload/disable waits for a plugin's teardown work
+        (``LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT``, default 15)."""
+        # TODO(agent): declare LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT (float, default 15)
+        # on Settings in config.py (owned by another branch); until then the
+        # environment variable is read directly.
+        raw = getattr(settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", None)
+        if raw is None:
+            raw = os.environ.get("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT")
+        try:
+            return max(0.0, float(raw)) if raw not in (None, "") else 15.0
+        except (TypeError, ValueError):
+            return 15.0
+
+    def _call_teardown(self, module_id: str, entry: dict, label: str):
+        """Run the module's ``teardown`` hook. Returns the task of an async hook
+        (already scheduled), else ``None``. Never raises."""
+        teardown = getattr(entry.get("module"), "teardown", None)
+        if not callable(teardown):
+            return None
+        log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")
+        try:
+            result = teardown(entry.get("context"))
+        except Exception as e:
+            log.warning(f"{label}: teardown of '{module_id}' raised: {e}")
+            return None
+        if asyncio.isfuture(result):
+            return result  # teardown returned a task it scheduled itself
+        if inspect.iscoroutine(result):
+            return bus.create_tracked_task(result, name=f"module_teardown:{module_id}")
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(result)
+        return None
+
+    @staticmethod
+    def _dispose_context(module_id: str, ctx, snapshot: list, label: str) -> None:
+        """Dispose the context, cancelling only the tasks that existed before
+        teardown ran — never the stop work teardown scheduled."""
+        if ctx is None or not hasattr(ctx, "dispose"):
+            return
+        try:
+            ctx.dispose(only_tasks=snapshot)
+        except Exception as e:
+            log.warning(f"{label}: dispose failed for '{module_id}': {e}")
+
+    def _stop_module(self, module_id: str, entry: dict, *, teardown: bool, label: str) -> None:
+        """Sync stop (legacy callers without a running coroutine): teardown is
+        called, an async hook and the tasks it scheduled run on unawaited —
+        the leases are released right away. Prefer ``_stop_module_async``."""
+        ctx = entry.get("context")
+        snapshot = list(getattr(ctx, "_tasks", None) or [])
+        if teardown:
+            self._call_teardown(module_id, entry, label)
+        self._dispose_context(module_id, ctx, snapshot, label)
+
+    async def _stop_module_async(self, module_id: str, entry: dict, *, teardown: bool, label: str) -> None:
+        """Stop a module in an order a plugin can rely on:
+
+        1. ``teardown(ctx)`` runs; an async hook and every task it created
+           through ``ctx.create_task`` are awaited, bounded by
+           ``LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT`` (stragglers are cancelled);
+        2. ``dispose()`` cancels the tasks that existed before teardown,
+           removes the subscriptions and only then releases the leases — a
+           peer never takes the work over while the old incarnation still
+           drains (``lost`` is not fired on dispose, as before);
+        3. the caller purges modules/ORM classes afterwards (unload only).
+
+        It used to be teardown-scheduled → dispose at once: a stop task created
+        in teardown was cancelled before its first step, and an async teardown
+        was still running when the lease had already moved on.
+        """
+        ctx = entry.get("context")
+        snapshot = list(getattr(ctx, "_tasks", None) or [])
+        waiting: set = set()
+        if teardown:
+            task = self._call_teardown(module_id, entry, label)
+            if task is not None:
+                waiting.add(task)
+        try:
+            await self._await_teardown_work(module_id, ctx, snapshot, waiting, label)
+        finally:
+            self._dispose_context(module_id, ctx, snapshot, label)
+
+    async def _await_teardown_work(self, module_id: str, ctx, snapshot: list, waiting: set, label: str) -> None:
+        loop = asyncio.get_running_loop()
+        timeout = self._teardown_timeout()
+        deadline = loop.time() + timeout
+        known = set(snapshot)
+        while True:
+            # Tasks created since the snapshot = work the teardown scheduled
+            # (and whatever that work schedules in turn).
+            waiting |= {t for t in (getattr(ctx, "_tasks", None) or []) if t not in known}
+            pending = {t for t in waiting if not t.done()}
+            if not pending:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
                 log.warning(
-                    f"MODULE: Plugin '{module_id}' was enabled but is waiting for dependencies."
+                    f"{label}: teardown of '{module_id}' did not finish within {timeout:g}s — "
+                    f"cancelling {len(pending)} task(s) and continuing."
                 )
-            else:
-                entry["status"] = "initializing"
-                self._execute_setup(module_id)
-                log.info(f"MODULE: 🟢 '{module_id}' is now ACTIVE")
-            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
-        else:
-            entry["status"] = "disabled"
-            # A still-running async setup() is cancelled by dispose() below and
-            # no longer owns this entry (see _owns_setup).
-            entry.pop("setup_task", None)
-            log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
-            # "Soft" unload: remove UI and call teardown, but keep module in memory.
-            self._teardown_ui(module_id)
-            # The plugin's REST API goes with it (for a "remote" plugin that is
-            # the 503 stub). Without this the routes kept answering 200 against
-            # a service whose tasks and subscriptions were already torn down;
-            # re-enabling re-registers them through setup() → register_routes.
-            try:
-                from core.api.router_registry import router_registry
-
-                router_registry.unmount(module_id)
-            except Exception as e:
-                log.warning(f"DISABLE: could not unmount routes for '{module_id}': {e}")
-            entry = self.registry.get(module_id)
-            if entry and not was_remote and hasattr(entry["module"], 'teardown'):
-                log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")
-                teardown_func = entry["module"].teardown
-                if inspect.iscoroutinefunction(teardown_func):
-                    bus.create_tracked_task(
-                        teardown_func(entry["context"]),
-                        name=f"module_teardown:{module_id}"
-                    )
-                else:
-                    teardown_func(entry["context"])
-
-            # Stop the disabled plugin's bus subscriptions + background tasks and
-            # drop its static mount. dispose() clears the context's tracking lists,
-            # so a later re-enable (which re-runs setup on the same context)
-            # re-subscribes cleanly instead of being blocked as a duplicate.
-            ctx = entry.get("context") if entry else None
-            if ctx is not None and hasattr(ctx, "dispose"):
-                try:
-                    ctx.dispose()
-                except Exception as e:
-                    log.warning(f"DISABLE: dispose failed for '{module_id}': {e}")
-            self._unmount_plugin_statics(module_id)
-
-            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
+                for task in pending:
+                    task.cancel()
+                return
+            await asyncio.wait(pending, timeout=remaining)
 
     # ------------------------------------------------------------------
     # Cluster: converge this instance on plugin_states (docs/ha/building-blocks/plugins.md)
@@ -1407,9 +1535,9 @@ class ModuleManager:
                         await plugin_service.uninstall_plugin(mid, folder)  # removes files, emits files_changed → unload
                     except Exception as exc:
                         log.warning(f"RECONCILE: uninstall of '{mid}' failed ({exc}) — unloading only.")
-                        self.unload_module(mid)
+                        await self.unload_module_async(mid)
                 else:
-                    self.unload_module(mid)
+                    await self.unload_module_async(mid)
                 summary["unloaded"].append(mid)
 
         await self._report_already_current()
@@ -1580,36 +1708,47 @@ class ModuleManager:
                 log.error(f"TEARDOWN_ERROR: Failed to remove UI for '{module_id}': {e}")
 
     def unload_module(self, module_id: str):
+        """Sync unload. Cannot wait for an async ``teardown`` — coroutines use
+        ``await unload_module_async(...)``."""
         if module_id not in self.registry:
             return False
 
         self._teardown_ui(module_id)
         entry = self.registry[module_id]
+        # Run the plugin's own teardown first: background work the plugin
+        # started itself (asyncio.create_task, schedulers) otherwise survives
+        # the swap and keeps running against disposed ORM classes.
+        self._stop_module(module_id, entry, teardown=entry.get("status") != "remote", label="UNLOAD")
+        return self._finish_unload(module_id, entry)
 
-        # Run the plugin's own teardown first (reload/upgrade/uninstall used to
-        # skip it — only disable called it): background work the plugin started
-        # itself (asyncio.create_task, schedulers) otherwise survives the swap
-        # and keeps running against disposed ORM classes. Async hooks run as a
-        # tracked task; the new incarnation may start meanwhile — hooks must
-        # tolerate that (stop flags, bounded waits).
-        module = entry.get("module")
-        if entry.get("status") not in ("remote",) and callable(getattr(module, "teardown", None)):
+    async def unload_module_async(self, module_id: str) -> bool:
+        """Unload with the teardown awaited (bounded) before the context is
+        disposed, the leases are released and the modules are purged — see
+        ``_stop_module_async``. Used by reload, install/upgrade, uninstall,
+        auto-revert and the cluster reconcile."""
+        async with self._lifecycle_lock(module_id):
+            entry = self.registry.get(module_id)
+            if entry is None:
+                return False
+            # Stop serving first: no request may reach handlers of a plugin
+            # that is tearing down, and no other pass may set it up again.
+            entry["stopping"] = True
+            self._teardown_ui(module_id)
             try:
-                result = module.teardown(entry.get("context"))
-                if inspect.isawaitable(result):
-                    bus.create_tracked_task(result, name=f"module_teardown:{module_id}")
+                from core.api.router_registry import router_registry
+                router_registry.unmount(module_id)
             except Exception as e:
-                log.warning(f"UNLOAD: teardown of '{module_id}' raised: {e}")
+                log.warning(f"UNLOAD: could not unmount routes for '{module_id}': {e}")
+            await self._stop_module_async(
+                module_id, entry, teardown=entry.get("status") != "remote", label="UNLOAD",
+            )
+            if self.registry.get(module_id) is not entry:
+                return False  # replaced/removed while teardown was awaited
+            return self._finish_unload(module_id, entry)
 
-        # Dispose bus subscriptions + background tasks owned by this module so a
-        # reloaded/uninstalled plugin's stale handlers stop firing.
-        ctx = entry.get("context")
-        if ctx is not None and hasattr(ctx, "dispose"):
-            try:
-                ctx.dispose()
-            except Exception as e:
-                log.warning(f"UNLOAD: dispose failed for '{module_id}': {e}")
-
+    def _finish_unload(self, module_id: str, entry: dict) -> bool:
+        """Everything after the module was stopped: mounts, registrations,
+        ``sys.path``, ORM classes and the modules themselves."""
         # Remove any mounted React bundle route.
         self._unmount_plugin_statics(module_id)
 
@@ -1752,7 +1891,9 @@ class ModuleManager:
             if not module_folder:
                 module_folder = entry["module"].__name__.split('.')[-2]
 
-            self.unload_module(module_id)
+            # Awaits the old incarnation's teardown (bounded) before the modules
+            # are purged and the new code is imported.
+            await self.unload_module_async(module_id)
             importlib.invalidate_caches()
             await asyncio.sleep(0.1) # Brief pause to let things settle
 
