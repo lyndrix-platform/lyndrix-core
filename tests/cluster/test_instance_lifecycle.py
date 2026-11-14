@@ -399,3 +399,43 @@ def test_remote_stub_tells_restarting_from_gone(monkeypatch):
     assert answer("draining")[1] == "5"
     state, retry, detail = answer("dead")
     assert (state, retry) == ("dead", "30") and "no such instance" in detail
+
+
+# --- admin release of a lease a live peer holds -----------------------------------------
+
+def test_admin_release_asks_a_live_holder_to_hand_over(engine, ready_core, monkeypatch):
+    """Freeing the row behind a live holder's back left it working until its
+    next renewal while another instance already started."""
+    clock = ClusterClock()
+    holder, other = make_service(engine, "pod-1", clock=clock), make_service(engine, "pod-2", clock=clock)
+    asked: list = []
+    events: list = []
+
+    def hook(topic, payload, forced):
+        if topic == cs_mod.LEASE_HANDOVER_TOPIC:
+            asked.append((dict(payload), forced))
+
+    async def run():
+        await holder._start_once()
+        holder.leases.want("monitoring:prober", acquired=lambda: events.append("acquired"),
+                           lost=lambda: events.append("lost"))
+        await holder.leases.tick()
+        await other._start_once()
+        previous = bus._cluster_publisher
+        bus.set_cluster_publisher(hook)
+        try:
+            assert await other.force_release("monitoring:prober") is True
+        finally:
+            bus.set_cluster_publisher(previous)
+        assert asked == [({"name": "monitoring:prober", "holder": "pod-1"}, True)]
+        assert (await other.coordinator.holder("monitoring:prober")).holder == "pod-1"   # not yanked away
+        await holder._on_handover_requested({**asked[0][0], "_origin": "pod-2"})        # the relayed request
+        assert events == ["acquired", "lost"]
+        assert await other.coordinator.holder("monitoring:prober") is None
+        # force=true (or a dead holder) frees the row directly
+        await holder.leases.tick()
+        assert await other.force_release("monitoring:prober", force=True) is True
+        assert await other.coordinator.holder("monitoring:prober") is None
+        await holder.stop(), await other.stop()
+
+    asyncio.run(run())

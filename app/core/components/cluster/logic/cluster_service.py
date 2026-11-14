@@ -63,6 +63,9 @@ LEADER_TOPIC = "cluster:leader_changed"
 # graceful}. Not for a graceful restart within the grace; again if the peer
 # comes back and dies later.
 INSTANCE_LOST_TOPIC = "cluster:instance_lost"
+# Bridged: "holder, please hand lease <name> over" (admin release of a lease
+# that a live peer holds — the holder stops its work before the lease moves).
+LEASE_HANDOVER_TOPIC = "cluster:lease_handover_requested"
 _STATE_RANK = {"alive": 4, "draining": 3, "restarting": 2, "unknown": 1, "dead": 0}
 # Legacy broadcast of core ≤ 1.11 ("everybody restart, staggered by 5 s"). Never
 # emitted any more; when an old instance sends it during a rollout, the leader
@@ -200,6 +203,7 @@ class ClusterService:
             bus.subscribe(RESTART_TOPIC)(self._on_restart_requested)
             bus.subscribe(RESTART_REQUEST_TOPIC)(self._on_restart_requested)
             bus.subscribe(RESTART_INSTANCE_TOPIC)(self._on_restart_instance)
+            bus.subscribe(LEASE_HANDOVER_TOPIC)(self._on_handover_requested)
             bus.subscribe(RELEASED_TOPIC)(self._on_peer_released_lease)
 
     def _on_peer_released_lease(self, payload: Optional[dict] = None) -> None:
@@ -1033,10 +1037,34 @@ class ClusterService:
     # admin actions
     # ------------------------------------------------------------------
 
-    async def force_release(self, name: str) -> bool:
+    async def force_release(self, name: str, *, force: bool = False) -> bool:
+        """Admin action "release this lease".
+
+        Held here: handed over in order (``lost`` callbacks, release). Held by
+        a live peer: that peer is asked to do the same — freeing its row behind
+        its back left it working as holder until its next renewal while another
+        instance already started. ``force=True`` (or a holder that is dead,
+        unknown or on a core that does not know the request) frees the row
+        directly.
+        """
         if self.leases.holds(name):
             return await self.leases.release_now(name)
+        if not force:
+            info = await asyncio.wait_for(self.coordinator.holder(name), timeout=_IO_TIMEOUT_S)
+            holder = next((i for i in self._instances if info is not None and i.instance_id == info.holder), None)
+            if (info is not None and not info.expired and holder is not None and not holder.is_self
+                    and holder.state in ("alive", "draining") and supports_sequential_restart(holder)):
+                bus.emit(LEASE_HANDOVER_TOPIC, {"name": name, "holder": holder.instance_id}, cluster=True)
+                return True
         return await self.coordinator.force_release(name)
+
+    async def _on_handover_requested(self, payload: Optional[dict] = None) -> None:
+        payload = payload or {}
+        if payload.get("_origin") and payload.get("holder") == self.instance_id:
+            name = str(payload.get("name") or "")
+            if self.leases.holds(name):
+                log.warning("CLUSTER: lease '%s' released on request of %s", name, payload.get("_origin"))
+                await self.leases.release_now(name)
 
     def request_restart(self, requested_by: str, *, include_runners: bool = False) -> dict:
         """Cluster mode: restart the instances ONE AT A TIME, leader last.

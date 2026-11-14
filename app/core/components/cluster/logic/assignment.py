@@ -11,9 +11,11 @@ Both answers are computed **locally on every instance from the same inputs** —
 the live instance list the heartbeats maintain — with rendezvous hashing, so all
 instances agree without a round trip, and a membership change moves only the
 keys of the instance that left or joined (no global reshuffle). Plugins
-recompute on ``cluster:changed`` (and may poll); the result is at-least-once
-during the few seconds in which heartbeat views differ. For exactly-once
-singleton work use a lease (``ctx.on_lease``) instead.
+recompute on ``cluster:changed`` (and may poll). When an instance JOINS, a key
+may be worked on twice for the few seconds in which heartbeat views differ
+(at-least-once); when one CRASHES its keys are nobody's until the others notice
+(up to TTL + one heartbeat) — a graceful stop announces ``draining`` first and
+loses nothing. For exactly-once singleton work use a lease (``ctx.on_lease``).
 
 Rules: ``count`` ≤ live candidates (fewer live → fewer workers, never none while
 one candidate lives); ``roles`` filters candidates (``None`` = every live
@@ -44,6 +46,12 @@ class WorkAssigner:
         """Live, non-draining instance ids (optionally having one of ``roles``)."""
         wanted = {r for r in (roles or []) if r}
         out: list[str] = []
+        if getattr(self._service, "is_cluster", False) and not getattr(self._service, "view_ready", True):
+            # Cluster mode without a usable registry view (just started,
+            # database unreachable): claim nothing. Answering "only me" made a
+            # new instance take every key until its first refresh. Plugins
+            # recompute on cluster:changed, which fires with the first view.
+            return out
         instances = list(getattr(self._service, "_instances", None) or [])
         if not instances:  # single mode / coordinator not up yet: this instance
             me = self._service.instance_id

@@ -92,7 +92,7 @@ is shared, so every instance would leave at once.
 | `GET /api/ready` | none | 200 = send traffic, 503 + `reasons[]` = do not (readiness probe, LB health check) |
 | `GET /api/cluster` | `api:read` | instances, leader, leases, placements, preflight, coordinator |
 | `GET /api/cluster/preflight` | `api:read` | re-run the checks now |
-| `POST /api/cluster/leases/{name}/release` | `admin:write` | hand a lease over (also clears a dead instance's stale row) |
+| `POST /api/cluster/leases/{name}/release` | `admin:write` | hand a lease over: the live holder stops its work and releases (asked over the bus when it is another instance); a dead instance's stale row is freed directly, as is any lease with `?force=true` |
 | `GET /api/health` | optional | plugin health round (cached 10 s) + `ready`; **not** a load-balancer check |
 | `POST /api/system/restart` | `admin:write` | cluster mode: sequential rolling restart driven by the leader — one instance at a time, each must be ready again before the next, leader last; runners only with `?include_runners=true`; 409 when no leader can coordinate it |
 

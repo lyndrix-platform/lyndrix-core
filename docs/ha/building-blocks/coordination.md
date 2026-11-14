@@ -74,3 +74,7 @@ Core unit tests: `tests/cluster/test_db_coordinator.py` (two coordinators on one
   five minutes (or beyond 1000 queued events), is lost; state that must converge anyway needs a
   periodic re-read (plugins: the reconcile every five minutes; settings: not yet).
 - Events carry no sequence number: a receiver cannot detect a gap by itself.
+- Lease expiry lives on the clock of the database node that answers. In a Galera cluster the
+  nodes' clocks must agree (NTP/chrony): when the writer moves to a node whose clock is *ahead* by
+  more than the fencing margin (7.5 s by default), leases expire for the peers before the holder
+  has fenced itself. The preflight only compares each instance's clock with the database's.
