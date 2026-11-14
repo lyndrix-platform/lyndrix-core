@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # followers of a cluster, but anyone who can write that directory could poison
     # the next install on every instance — enable only on trusted storage.
     LYNDRIX_PLUGIN_PIP_CACHE_DIR: str = ""
+    # Package index for plugin requirement installs (e.g. an internal mirror).
+    # Empty = PyPI. pip runs with --isolated and a minimal environment, so
+    # PIP_INDEX_URL / pip.conf of the core container are deliberately ignored.
+    LYNDRIX_PLUGIN_PIP_INDEX_URL: str = ""
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"

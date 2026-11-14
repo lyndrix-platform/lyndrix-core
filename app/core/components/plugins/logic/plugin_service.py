@@ -15,6 +15,7 @@ from config import settings
 from core.logger import get_logger
 from core.bus import bus
 from . import git_providers
+from .requirements_guard import check_requirements, pip_environment
 
 log = get_logger("Core:PluginService")
 
@@ -1033,32 +1034,22 @@ class PluginService:
         if not req_file.exists():
             return
 
-        # Validate requirements file doesn't contain suspicious entries. This is a
-        # best-effort guard; full supply-chain safety (hash-pinning + sandboxing)
-        # is tracked below.
-        req_content = req_file.read_text()
-        for line in req_content.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
-                continue
-            lowered = stripped.lower()
-            # Block local paths, parent-dir refs, direct VCS/URL installs and
-            # PEP 508 "pkg @ <url>" specs, plus pip option lines (-e/--*) — all of
-            # which can pull code from outside trusted package indexes.
-            if (
-                stripped.startswith('/')
-                or stripped.startswith('..')
-                or stripped.startswith('-')
-                or '@' in stripped
-                or '://' in lowered
-                or lowered.startswith(('git+', 'http:', 'https:', 'file:'))
-            ):
-                log.error(f"SECURITY: Blocked suspicious requirement entry: {stripped}")
-                return
+        # Allowlist, not blocklist (SC-03): every line must be a plain requirement
+        # specifier. See requirements_guard for what pip would otherwise accept.
+        req_content = await asyncio.to_thread(req_file.read_text, encoding="utf-8", errors="replace")
+        problems = check_requirements(req_content)
+        if problems:
+            log.error(
+                f"SECURITY: Blocked requirements of {plugin_path.name}: "
+                + "; ".join(problems[:5])
+            )
+            return
 
         # TODO(agent): require hash-pinned requirements and isolate dependency
         # installs in a sandboxed runtime (CORE-AUTH-PLUGINS-008). Deferred —
-        # needs a sandbox/runtime design beyond this pass.
+        # needs a sandbox/runtime design beyond this pass. --only-binary=:all:
+        # would stop sdist build code at install time but breaks plugins whose
+        # dependencies ship no wheel (e.g. docker-py) — revisit with SC-04.
 
         log.info(f"DEPENDENCIES: Installing requirements for {plugin_path.name} into private vendor directory...")
         vendor_dir = plugin_path / "vendor"
@@ -1079,13 +1070,24 @@ class PluginService:
                     cache_args = ["--cache-dir", str(cache_dir)]
                 except OSError as exc:
                     log.warning(f"DEPENDENCIES: pip cache dir {cache_dir} unusable ({exc}); installing without cache.")
+            # Optional package index (internal mirror). --isolated ignores PIP_*
+            # variables and user config, so this setting is the only way in.
+            index_args: list[str] = []
+            index_url = str(getattr(settings, "LYNDRIX_PLUGIN_PIP_INDEX_URL", "") or "").strip()
+            if index_url:
+                index_args = ["--index-url", index_url]
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", *cache_args,
+                sys.executable, "-m", "pip", "install",
+                # --isolated: no pip.conf / PIP_* influence on where code comes from.
+                "--isolated", "--no-input", "--disable-pip-version-check",
+                *index_args, *cache_args,
                 "--target", str(vendor_dir),
-                "--no-input",
                 "-r", str(req_file),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                # pip and sdist build backends must not inherit the core's
+                # secrets (DB password, master key, provider tokens).
+                env=pip_environment(),
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout
