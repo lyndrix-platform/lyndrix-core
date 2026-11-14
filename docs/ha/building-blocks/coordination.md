@@ -37,8 +37,15 @@ notifications, plugin state changes), so polling is cheap.
   is exactly the race that produces 1020 under MariaDB ≥ 11.6 defaults.
 - A fresh instance starts reading events at `MAX(id)`; the leader prunes events older than an
   hour, dead instance rows and expired keys every five minutes.
-- An instance that stops gracefully deletes its row and its leases and broadcasts
+- An instance that stops gracefully deletes its row, releases its leases and broadcasts
   `cluster:lease_released`, so peers acquire immediately.
+- A released lease keeps its row (`holder = NULL`): the row carries the lease's fencing token,
+  which must keep growing across releases. The leader drops released rows nobody asked for in
+  24 hours. `cluster_leases.token` is an additive, nullable column the first instance of core
+  ≥ 1.12 adds under the bootstrap lock; older instances ignore it.
+- The driver runs its SQL on a thread pool of its own (16 threads), separate from the one request
+  handlers, Vault and login hashing share — coordinator calls stuck on a dead database socket
+  cannot starve the rest of the process, and the other way round.
 
 ## Verify
 

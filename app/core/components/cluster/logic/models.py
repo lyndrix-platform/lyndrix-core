@@ -37,6 +37,10 @@ class ClusterLease(Base):
     acquired_at = Column(DateTime, nullable=True)
     renewed_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=False)
+    # Fencing token (core ≥ 1.12): grows with every acquisition of this lease
+    # name, kept across releases (a released lease keeps its row with
+    # holder = NULL). Nullable: rows written by older instances have none.
+    token = Column(BigInteger, nullable=True)
 
 
 class ClusterKV(Base):

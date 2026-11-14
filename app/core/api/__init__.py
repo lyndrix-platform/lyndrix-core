@@ -1,5 +1,5 @@
 """
-Lyndrix Core Plugin API — Stable Surface v1.13
+Lyndrix Core Plugin API — Stable Surface v1.14
 
 Plugins SHOULD import everything they need from this package rather than
 reaching into core.components.* internals. Breaking changes will bump
@@ -86,6 +86,16 @@ One code path for single and cluster mode::
     ctx.my_shard("probe", keys, count=2, roles=["runner"])    # instances run a workload / my share
     ctx.release_lease("monitoring:prober")   # API >= 1.9: stop contending (fires ``lost`` when held)
 
+Lease fencing (API 1.14): ``lost`` fires before a peer can hold the lease (the
+holder fences itself ``margin`` seconds ahead of the TTL), and every
+acquisition carries a token that only grows::
+
+    ctx.on_lease("x", acquired=lambda token: svc.start(token), lost=svc.stop)
+    ctx.lease_token("x")     # int while held here, else None — stamp writes with it:
+    # UPDATE … SET lease_token = :t WHERE id = :id AND lease_token <= :t   (0 rows → stale holder)
+
+``acquired`` gets the token only when it declares a ``token`` parameter.
+
 ``ctx.emit`` is thread-safe since core 1.7: a call from a worker thread
 (``asyncio.to_thread`` code) is handed over to the application loop.
 
@@ -165,7 +175,7 @@ Old cores: guard with ``getattr(ctx, "on_lease", None)`` and start the work
 directly when it is missing.
 """
 
-__api_version__ = "1.13.0"
+__api_version__ = "1.14.0"
 
 from typing import Any, Dict, Literal, Optional
 

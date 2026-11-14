@@ -94,8 +94,11 @@ class ClusterService:
         self.drain_seconds = int(settings.LYNDRIX_DRAIN_SECONDS or 0)
         self.started_at = _utcnow()
 
+        # Injectable for tests (heartbeat staleness, lease deadlines, storage probe age).
+        self._clock = time.monotonic
         self.coordinator: Coordinator = self._build_coordinator()
-        self.leases = LeaseKeeper(self.coordinator, ttl=self.ttl, heartbeat_s=self.heartbeat_s)
+        self.leases = LeaseKeeper(self.coordinator, ttl=self.ttl, heartbeat_s=self.heartbeat_s,
+                                  clock=lambda: self._clock())
         self.leases.on_change = self._on_lease_change
         self.bridge = ClusterBridge(self.coordinator, self.instance_id)
         self.drain = DrainController(seconds=self.drain_seconds, on_drain=self._on_drain)
@@ -130,8 +133,6 @@ class ClusterService:
         self._preflight_wake: Optional[asyncio.Event] = None
         self._preflight_recheck = False
         self._preflight_quick_rechecks = 0
-        # Injectable for tests (heartbeat staleness, storage probe age).
-        self._clock = time.monotonic
         # All STORAGE_DIR I/O of the cluster layer: one job at a time, own thread.
         self.storage = StorageProbe(clock=lambda: self._clock())
         self.storage_last_error: Optional[str] = None

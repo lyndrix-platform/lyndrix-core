@@ -79,8 +79,18 @@ ctx.cluster_shard("probe", monitor_ids)                              # {instance
 ### Leases
 
 - `acquired` fires when this instance obtains the lease (immediately in single mode), `lost`
-  when a peer took it over or the coordinator was unreachable for a full TTL. **Stop the work in
+  when a peer took it over or the lease could not be renewed in time. **Stop the work in
   `lost`.** Callbacks may be sync or async.
+- **`lost` fires before a peer can hold the lease** (core ≥ 1.12). The holder fences itself on its
+  own monotonic clock at `last successful renewal + TTL − margin` (margin = a quarter of the TTL,
+  at most one heartbeat interval, at least 2 s — 7.5 s with the default 30 s / 10 s), measured from
+  the moment the renewal was *sent*. A watchdog fires at that deadline whatever the renewals are
+  doing; a hung database call delays neither the other leases nor the fencing. Keep `lost` quick:
+  the margin is the time your worker has to stop.
+- On a hand-over (`ctx.release_lease`, drain, the admin *Release* button) the order is: `lost`
+  callbacks → wait for async ones (at most 5 s) → release → a peer's `acquired`.
+- A `ttl=` below two heartbeat intervals is raised to that minimum (logged) — a shorter lease
+  would expire between two renewals.
 - `dispose()` (unload/disable) forgets the plugin's leases and releases them so a peer takes
   over at once.
 - `placement="singleton"` binds every `on_lease` call of the plugin to one lease
@@ -91,6 +101,45 @@ ctx.cluster_shard("probe", monitor_ids)                              # {instance
   is released at once, the plugin's `lost` callback fires (one "stop the work" path) and the
   release is broadcast so a peer acquires it within about a second. Use it when a setting such as
   monitoring's `probe_roles` excludes this instance — no plugin reload needed.
+
+### Fencing tokens (API ≥ 1.14)
+
+The deadline above stops the *keeper*. It cannot stop work that is already running in a thread or
+a subprocess while the event loop is stalled (a blocking call on the loop, a frozen container): the
+paused holder wakes up after the TTL, a peer has taken over, and the old work still writes. For
+that case every acquisition of a lease carries a **token that only grows** (per lease name,
+cluster-wide, also across restarts and releases):
+
+```python
+def setup(ctx):
+    ctx.on_lease("myplugin:worker", acquired=svc.start, lost=svc.stop)
+
+class Service:
+    def start(self, token=None):          # gets the token because the parameter is named "token"
+        self.token = token                # None on cores < 1.14 → no fencing, as before
+    ...
+    def write(self, session, row_id, values):
+        token = self.ctx.lease_token("myplugin:worker")      # None once this instance is fenced
+        if token is None:
+            return False                                     # not the holder any more → stop
+        updated = session.execute(
+            update(State).where(State.id == row_id, State.lease_token <= token)
+            .values(**values, lease_token=token)
+        ).rowcount
+        return bool(updated)              # 0 rows: a newer holder wrote already → I am stale
+```
+
+- `acquired` receives the token only when the callback declares a parameter named `token` (or has
+  one required positional parameter); existing callbacks without parameters keep working unchanged.
+- `ctx.lease_token(name)` returns the token while this instance holds the lease, else `None`.
+  Call it per write (it is a dict lookup, thread-safe) rather than caching it for long.
+- Compare with `<=` and store the token with the row; never compute with it — it is opaque
+  (today: a counter that never drops below the database clock in microseconds).
+- Side effects outside the database (ICMP, Docker, GitLab, Discord) cannot be fenced this way —
+  make them idempotent or record "done by token N" first.
+- Mixed versions: an instance of core ≤ 1.11 that takes a lease over issues no token. The next
+  acquisition by a newer instance still gets a larger one; only while such an old instance *holds*
+  the lease are its writes unfenced.
 
 ### Cluster events
 

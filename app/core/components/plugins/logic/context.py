@@ -314,6 +314,12 @@ class ModuleContext:
 
         Guard with ``getattr(ctx, "on_lease", None)`` to stay loadable on older
         cores (fall back to starting the work directly).
+
+        API ≥ 1.14: ``acquired`` receives the lease's fencing token when it
+        declares a ``token`` parameter (``def start(token): …``); callbacks
+        without parameters are called as before. ``lost`` fires *before* a peer
+        can hold the lease (the holder fences itself ahead of the TTL), and a
+        ``ttl`` below two heartbeat intervals is raised to that minimum.
         """
         full = self._lease_name(name)
         self._cluster().leases.want(full, acquired=acquired, lost=lost, ttl=ttl)
@@ -322,6 +328,23 @@ class ModuleContext:
 
     def holds_lease(self, name: str) -> bool:
         return self._cluster().leases.holds(self._lease_name(name))
+
+    def lease_token(self, name: str) -> int | None:
+        """Fencing token of lease ``name`` while this instance holds it, else
+        ``None`` (API ≥ 1.14).
+
+        The token grows with every acquisition of the lease, cluster-wide. A
+        holder that was paused (stalled event loop, frozen container) cannot
+        know that a peer took over — but its late writes can be made to fail:
+        store the token with the data and write conditionally::
+
+            token = ctx.lease_token("monitoring:prober")
+            UPDATE probe_state SET …, lease_token = :token
+             WHERE id = :id AND lease_token <= :token      -- 0 rows → I am stale, stop
+
+        Thread-safe; ``None`` as soon as the self-fencing deadline has passed.
+        """
+        return self._cluster().leases.token(self._lease_name(name))
 
     def lease(self, name: str, *, ttl: int | None = None) -> _LeaseScope:
         """One-shot lease for a piece of work (``async with ctx.lease("x") as held``)."""

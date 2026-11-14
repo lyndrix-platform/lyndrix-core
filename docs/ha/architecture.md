@@ -42,8 +42,12 @@ as dead.
 A **lease** is "exactly one instance does this". Leases live in `cluster_leases`; acquire and
 renew are one atomic `UPDATE … WHERE holder = me OR expires_at < now`, compared on the
 **database clock** so instance clock drift cannot steal or extend a lease. A holder renews every
-heartbeat; if it cannot reach the coordinator for a full TTL it treats the lease as lost and stops
-the work (fencing) — by then a peer may own it.
+heartbeat, each lease independently of the others. If a renewal does not succeed the holder
+**fences itself before the TTL is over**: `lost` fires at `last renewal sent + TTL − margin` on the
+holder's monotonic clock (margin 7.5 s by default), i.e. before the row can expire for any peer.
+Every acquisition additionally carries a growing **fencing token** (`cluster_leases.token`,
+`ctx.lease_token()`), so the late writes of a holder that was paused past its TTL can be rejected
+— see [For plugin developers](plugin-development.md#fencing-tokens-api-114).
 
 The core leader is the holder of `core:leader`. It is the only instance that prunes the event
 log and dead instance rows; plugins use `ctx.is_leader` for one-shot tasks. Failover: a dead

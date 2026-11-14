@@ -47,6 +47,7 @@ class LeaseInfo:
     expires_at: Optional[datetime]
     remaining_s: float      # negative when expired
     expired: bool
+    token: Optional[int] = None   # fencing token of the current acquisition (drivers with tokens)
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -69,7 +70,12 @@ class Coordinator(Protocol):
     async def instances(self) -> list[InstanceInfo]: ...
 
     # --- leases ---
-    async def try_acquire(self, name: str, ttl: Optional[int] = None) -> bool: ...
+    async def try_acquire(self, name: str, ttl: Optional[float] = None) -> bool: ...
+    # Optional (drivers with fencing tokens — ``local`` and ``db`` have it):
+    #   async def acquire(name, ttl=None, *, fresh=False) -> Optional[int]
+    # returns the lease's token (None = held by a peer); ``fresh=True`` forces a
+    # new acquisition with a new token. The LeaseKeeper falls back to
+    # ``try_acquire`` (no token) when a driver lacks it.
     async def release(self, name: str) -> bool: ...
     async def force_release(self, name: str) -> bool: ...
     async def holder(self, name: str) -> Optional[LeaseInfo]: ...

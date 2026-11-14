@@ -22,6 +22,9 @@ def _utcnow() -> datetime:
 
 class LocalCoordinator:
     driver = "local"
+    # The only member: a lease cannot move to anybody, so the LeaseKeeper does
+    # not fence itself when a renewal is late (e.g. after a stalled event loop).
+    self_fencing = False
 
     def __init__(self, *, instance_id: str, ttl: int) -> None:
         self.instance_id = instance_id
@@ -30,6 +33,9 @@ class LocalCoordinator:
         self._heartbeat_at = self._started_at
         self._meta: dict = {}
         self._leases: dict[str, tuple[datetime, datetime]] = {}  # name → (acquired, expires)
+        # name → fencing token of the current/last acquisition. Kept across
+        # releases so a token only grows, as with the db driver.
+        self._tokens: dict[str, int] = {}
         self._kv: dict[str, tuple[Any, Optional[float]]] = {}    # key → (value, expires_monotonic)
         self._subscribers: list[EventCallback] = []
         self.started = False
@@ -70,11 +76,20 @@ class LocalCoordinator:
 
     # --- leases ---
 
-    async def try_acquire(self, name: str, ttl: Optional[int] = None) -> bool:
+    async def try_acquire(self, name: str, ttl: Optional[float] = None) -> bool:
+        return await self.acquire(name, ttl) is not None
+
+    async def acquire(self, name: str, ttl: Optional[float] = None, *, fresh: bool = False) -> Optional[int]:
+        """Always granted (this instance is the only member); returns the
+        fencing token — a new one per acquisition, so plugin code that fences
+        its writes behaves the same in single and cluster mode."""
         now = _utcnow()
-        acquired = self._leases.get(name, (now, now))[0]
-        self._leases[name] = (acquired, now + timedelta(seconds=int(ttl or self.ttl)))
-        return True
+        held = self._leases.get(name)
+        if held is None or fresh:
+            held = (now, now)
+            self._tokens[name] = self._tokens.get(name, 0) + 1
+        self._leases[name] = (held[0], now + timedelta(seconds=float(ttl or self.ttl)))
+        return self._tokens[name]
 
     async def release(self, name: str) -> bool:
         return self._leases.pop(name, None) is not None
@@ -89,7 +104,7 @@ class LocalCoordinator:
         acquired, expires = entry
         remaining = (expires - _utcnow()).total_seconds()
         return LeaseInfo(name=name, holder=self.instance_id, acquired_at=acquired, expires_at=expires,
-                         remaining_s=remaining, expired=remaining < 0)
+                         remaining_s=remaining, expired=remaining < 0, token=self._tokens.get(name))
 
     async def leases(self) -> list[LeaseInfo]:
         out = []

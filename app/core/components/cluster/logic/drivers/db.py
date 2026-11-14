@@ -17,24 +17,41 @@ Rules this driver follows:
   produce. READ COMMITTED sidesteps it; the retry covers deadlocks/lock waits.
 * **Atomic lease acquire/renew** in one ``UPDATE … WHERE holder = me OR expired``;
   the first holder is created with an ``INSERT`` whose ``IntegrityError`` means
-  "somebody else was faster".
+  "somebody else was faster". The same statement assigns the **fencing token**:
+  kept on an uninterrupted renewal, larger than every earlier one on a new
+  acquisition. A released lease keeps its row (``holder = NULL``) so the token
+  sequence survives the release.
+* **Own threads.** The blocking SQL runs on a small executor of its own, not on
+  the loop's shared default executor: coordinator calls hanging on a dead
+  database socket cannot use up the threads the rest of the process needs
+  (request handlers, Vault, logins), and vice versa.
 * **Events are append-only** and read by ``id > last_seen``; a fresh instance
   starts at ``MAX(id)`` so it never replays history. The leader prunes rows
   older than one hour and instances that stopped heart-beating.
 
-Every method is ``async`` and runs its blocking SQL in ``asyncio.to_thread``.
+Every method is ``async`` and runs its blocking SQL in a worker thread.
+
+Mixed versions during a rolling update: schema changes are additive (nullable
+columns added under the bootstrap lock). Instances of core ≤ 1.11 ignore the new
+columns, still ``DELETE`` a lease row on release and take over expired leases
+without touching ``token`` — the token of the next acquisition by a newer
+instance is then derived from the database clock (see ``_next_token``), so it
+still exceeds every token issued before.
 """
 from __future__ import annotations
 
 import asyncio
+import calendar
+import functools
 import json
 import random
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
-from sqlalchemy import case, delete, insert, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, insert, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from core.bus import bus
@@ -51,12 +68,31 @@ _RETRY_CODES = (1020, 1205, 1213)
 _EVENT_RETENTION = timedelta(hours=1)
 _PRUNE_INTERVAL_S = 300
 _EVENT_BATCH = 500
+# Released lease rows are kept (they carry the token counter); names nobody
+# asked for in a day are dropped so one-off lease names cannot pile up.
+_RELEASED_LEASE_RETENTION = timedelta(hours=24)
+# Worker threads for coordinator SQL. Sized for: one renewal per lease (twice
+# while calls hang), heartbeat, event poll, publisher, kv calls of requests.
+_EXECUTOR_THREADS = 16
+# Columns added after the tables first shipped (core 1.4) — all nullable, so
+# older instances that never mention them keep inserting and updating rows.
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "cluster_leases": {"token": "BIGINT NULL"},
+}
+# A metadata lock the ALTER cannot get within this many seconds is not waited
+# for: the pending ALTER would block every other statement on the table.
+_DDL_LOCK_WAIT_S = 5
 
 
 def _mysql_errno(exc: BaseException) -> Optional[int]:
     orig = getattr(exc, "orig", None)
     args = getattr(orig, "args", None) or ()
     return args[0] if args and isinstance(args[0], int) else None
+
+
+def _epoch_micros(moment: datetime) -> int:
+    """Naive UTC datetime → microseconds since the epoch (token floor)."""
+    return calendar.timegm(moment.timetuple()) * 1_000_000 + moment.microsecond
 
 
 def _json_safe(payload: dict) -> dict:
@@ -79,13 +115,18 @@ class DbCoordinator:
         poll_ms: int,
         engine_getter: Optional[Callable[[], Any]] = None,
         should_prune: Optional[Callable[[], bool]] = None,
+        now_fn: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.instance_id = instance_id
-        self.ttl = int(ttl)
-        self.heartbeat_s = int(heartbeat_s)
+        self.ttl = ttl
+        self.heartbeat_s = heartbeat_s
         self.poll_s = max(0.1, int(poll_ms) / 1000.0)
         self._engine_getter = engine_getter or self._default_engine
         self._should_prune = should_prune or (lambda: False)
+        # Test seam: replaces the database clock (naive UTC). Several
+        # coordinators sharing one fake clock see the same "database time".
+        self._now_fn = now_fn
+        self._executor: Optional[ThreadPoolExecutor] = None
         self._subscribers: list[EventCallback] = []
         self._poll_task: Optional[asyncio.Task] = None
         self._last_event_id = 0
@@ -119,6 +160,12 @@ class DbCoordinator:
 
     def _is_sqlite(self) -> bool:
         return self._engine_getter().dialect.name == "sqlite"
+
+    async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Run blocking coordinator SQL on this driver's own worker threads."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=_EXECUTOR_THREADS, thread_name_prefix="lyndrix-coord")
+        return await asyncio.get_running_loop().run_in_executor(self._executor, functools.partial(fn, *args))
 
     def refresh_connections(self, reason: str = "") -> bool:
         """Start over with fresh pooled connections after a call timed out.
@@ -174,8 +221,41 @@ class DbCoordinator:
                 if _mysql_errno(exc) != 1050:  # 1050 = a peer created it first
                     raise
                 log.info("COORDINATOR: cluster tables were created by another instance")
+            self._add_missing_columns(engine)
+
+    def _add_missing_columns(self, engine) -> None:
+        """Additive upgrade of tables created by an older core (rolling update:
+        the first new instance adds the columns while the old ones keep
+        running — they neither read nor write them)."""
+        existing_tables = set(inspect(engine).get_table_names())
+        for table, columns in _ADDITIVE_COLUMNS.items():
+            if table not in existing_tables:
+                continue
+            present = {col["name"] for col in inspect(engine).get_columns(table)}
+            for column, ddl in columns.items():
+                if column in present:
+                    continue
+                log.warning("COORDINATOR: upgrading table %s — adding column '%s'", table, column)
+                with engine.connect() as conn:
+                    mysql = engine.dialect.name in ("mysql", "mariadb")
+                    if mysql:
+                        conn.execute(text(f"SET SESSION lock_wait_timeout = {_DDL_LOCK_WAIT_S}"))
+                    try:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                        conn.commit()
+                    except Exception as exc:
+                        # 1060 / "duplicate column": a peer added it between our
+                        # look and our ALTER — exactly what we wanted.
+                        if _mysql_errno(exc) != 1060 and "duplicate column" not in str(exc).lower():
+                            raise
+                        conn.rollback()
+                    finally:
+                        if mysql:
+                            conn.execute(text("SET SESSION lock_wait_timeout = DEFAULT"))
 
     def _db_now(self, conn) -> datetime:
+        if self._now_fn is not None:
+            return self._now_fn()
         if self._is_sqlite():
             raw = conn.execute(text("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')")).scalar()
             return datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S.%f")
@@ -208,9 +288,9 @@ class DbCoordinator:
     async def start(self) -> None:
         if self.started:
             return
-        await asyncio.to_thread(self.ensure_schema)
-        self._last_event_id = await asyncio.to_thread(self._max_event_id)
-        self._started_at = await asyncio.to_thread(self._now_sync)
+        await self._run(self.ensure_schema)
+        self._last_event_id = await self._run(self._max_event_id)
+        self._started_at = await self._run(self._now_sync)
         self.started = True
         self._poll_task = bus.create_tracked_task(self._poll_loop(), name="cluster:event_poll")
         log.info(
@@ -224,7 +304,7 @@ class DbCoordinator:
             self._poll_task.cancel()
         self._poll_task = None
         try:
-            await asyncio.to_thread(self._deregister_sync)
+            await self._run(self._deregister_sync)
         except Exception as exc:  # pragma: no cover - best effort on shutdown
             log.debug("COORDINATOR: deregister failed: %s", exc)
 
@@ -240,7 +320,8 @@ class DbCoordinator:
     def _deregister_sync(self) -> None:
         def _run():
             with self._engine().begin() as conn:
-                conn.execute(delete(ClusterLease).where(ClusterLease.holder == self.instance_id))
+                now = self._db_now(conn)
+                self._release_rows(conn, now, ClusterLease.holder == self.instance_id)
                 conn.execute(delete(ClusterInstance).where(ClusterInstance.instance_id == self.instance_id))
 
         self._retrying(_run)
@@ -250,7 +331,7 @@ class DbCoordinator:
     # ------------------------------------------------------------------
 
     async def heartbeat(self, meta: dict) -> None:
-        await asyncio.to_thread(self._heartbeat_sync, _json_safe(meta or {}))
+        await self._run(self._heartbeat_sync, _json_safe(meta or {}))
 
     def _heartbeat_sync(self, meta: dict) -> None:
         from config import settings
@@ -285,7 +366,7 @@ class DbCoordinator:
         self._retrying(_run)
 
     async def instances(self) -> list[InstanceInfo]:
-        return await asyncio.to_thread(self._instances_sync)
+        return await self._run(self._instances_sync)
 
     def _instances_sync(self) -> list[InstanceInfo]:
         with self._engine().connect() as conn:
@@ -314,71 +395,124 @@ class DbCoordinator:
     # leases
     # ------------------------------------------------------------------
 
-    async def try_acquire(self, name: str, ttl: Optional[int] = None) -> bool:
-        return await asyncio.to_thread(self._try_acquire_sync, name, int(ttl or self.ttl))
+    async def try_acquire(self, name: str, ttl: Optional[float] = None) -> bool:
+        return await self.acquire(name, ttl) is not None
 
-    def _try_acquire_sync(self, name: str, ttl: int) -> bool:
+    async def acquire(self, name: str, ttl: Optional[float] = None, *, fresh: bool = False) -> Optional[int]:
+        """Acquire or renew ``name``; returns its fencing token, ``None`` when a
+        peer holds it.
+
+        ``fresh=True`` (the caller does not consider itself the holder) always
+        starts a new acquisition with a new token — also when the row still
+        names this instance, e.g. after the caller fenced itself locally or
+        after a restart under a fixed instance id.
+        """
+        return await self._run(self._acquire_sync, name, float(ttl or self.ttl), bool(fresh))
+
+    @staticmethod
+    def _next_token(now: datetime):
+        """SQL expression for the token of a new acquisition: one more than the
+        row's last token, but never below "now" in microseconds on the database
+        clock. The counter alone would restart at 1 when the row was deleted
+        (core ≤ 1.11 releases by DELETE; the leader prunes idle rows); the
+        clock alone could step back when the database fails over to a node
+        with a slower clock. Together a token only grows."""
+        floor = _epoch_micros(now)
+        successor = func.coalesce(ClusterLease.token, 0) + 1
+        return case((successor > floor, successor), else_=floor), floor
+
+    def _acquire_sync(self, name: str, ttl: float, fresh: bool) -> Optional[int]:
         me = self.instance_id
 
-        def _run() -> bool:
+        def _run() -> Optional[int]:
             with self._engine().begin() as conn:
                 now = self._db_now(conn)
                 expires = now + timedelta(seconds=ttl)
+                next_token, floor = self._next_token(now)
+                if fresh:
+                    token_value, acquired_value = next_token, now
+                else:
+                    # An uninterrupted holding — the row is ours and has not
+                    # expired — keeps its token and its acquisition time.
+                    unbroken = and_(ClusterLease.holder == me, ClusterLease.expires_at >= now)
+                    token_value = case(
+                        (and_(unbroken, ClusterLease.token.is_not(None)), ClusterLease.token), else_=next_token)
+                    acquired_value = case((unbroken, ClusterLease.acquired_at), else_=now)
                 result = conn.execute(
                     update(ClusterLease)
                     .where(
                         ClusterLease.name == name,
                         or_(ClusterLease.holder == me, ClusterLease.holder.is_(None), ClusterLease.expires_at < now),
                     )
-                    .values(
-                        holder=me,
-                        expires_at=expires,
-                        renewed_at=now,
-                        acquired_at=case((ClusterLease.holder == me, ClusterLease.acquired_at), else_=now),
+                    # ORDER MATTERS: MariaDB/MySQL evaluate SET left to right
+                    # and later assignments see the values assigned before
+                    # them. token and acquired_at depend on the OLD holder and
+                    # expiry, so they come first (SQLAlchemy would otherwise
+                    # emit table column order: holder first — and "the row is
+                    # mine" would always be true).
+                    .ordered_values(
+                        (ClusterLease.token, token_value),
+                        (ClusterLease.acquired_at, acquired_value),
+                        (ClusterLease.holder, me),
+                        (ClusterLease.renewed_at, now),
+                        (ClusterLease.expires_at, expires),
                     )
                 )
                 if result.rowcount:
-                    return True
+                    token = conn.execute(select(ClusterLease.token).where(ClusterLease.name == name)).scalar()
+                    return int(token) if token is not None else floor
                 existing = conn.execute(select(ClusterLease.holder).where(ClusterLease.name == name)).first()
                 if existing is not None:
-                    return False  # held by somebody else and not expired
+                    return None  # held by somebody else and not expired
                 try:
                     conn.execute(insert(ClusterLease).values(
-                        name=name, holder=me, acquired_at=now, renewed_at=now, expires_at=expires,
+                        name=name, holder=me, acquired_at=now, renewed_at=now, expires_at=expires, token=floor,
                     ))
-                    return True
+                    return floor
                 except IntegrityError:
-                    return False  # a peer inserted first
+                    return None  # a peer inserted first
 
-        return bool(self._retrying(_run))
+        return self._retrying(_run)
 
     async def release(self, name: str) -> bool:
-        return await asyncio.to_thread(self._release_sync, name, self.instance_id)
+        return await self._run(self._release_sync, name, self.instance_id)
 
     async def force_release(self, name: str) -> bool:
-        return await asyncio.to_thread(self._release_sync, name, None)
+        return await self._run(self._release_sync, name, None)
+
+    @staticmethod
+    def _release_rows(conn, now: datetime, *criteria) -> int:
+        """Mark matching held leases as free. The row stays (``holder = NULL``,
+        expired) because it carries the token counter of that lease name."""
+        return int(conn.execute(
+            update(ClusterLease)
+            .where(ClusterLease.holder.is_not(None), *criteria)
+            .values(holder=None, expires_at=now, renewed_at=now)
+        ).rowcount or 0)
 
     def _release_sync(self, name: str, holder: Optional[str]) -> bool:
         def _run() -> bool:
             with self._engine().begin() as conn:
-                stmt = delete(ClusterLease).where(ClusterLease.name == name)
+                criteria = [ClusterLease.name == name]
                 if holder is not None:
-                    stmt = stmt.where(ClusterLease.holder == holder)
-                return bool(conn.execute(stmt).rowcount)
+                    criteria.append(ClusterLease.holder == holder)
+                return bool(self._release_rows(conn, self._db_now(conn), *criteria))
 
         return bool(self._retrying(_run))
 
     async def holder(self, name: str) -> Optional[LeaseInfo]:
-        leases = await asyncio.to_thread(self._leases_sync, name)
+        leases = await self._run(self._leases_sync, name)
         return leases[0] if leases else None
 
     async def leases(self) -> list[LeaseInfo]:
-        return await asyncio.to_thread(self._leases_sync, None)
+        return await self._run(self._leases_sync, None)
 
     def _leases_sync(self, name: Optional[str]) -> list[LeaseInfo]:
         with self._engine().connect() as conn:
             now = self._db_now(conn)
-            stmt = select(ClusterLease).order_by(ClusterLease.name)
+            # Released rows (holder NULL) only keep the token counter — they are
+            # not leases anybody holds.
+            stmt = select(ClusterLease).where(ClusterLease.holder.is_not(None)).order_by(ClusterLease.name)
             if name is not None:
                 stmt = stmt.where(ClusterLease.name == name)
             rows = conn.execute(stmt).mappings().all()
@@ -388,7 +522,7 @@ class DbCoordinator:
             remaining = (expires - now).total_seconds() if isinstance(expires, datetime) else -1.0
             out.append(LeaseInfo(
                 name=row["name"], holder=row["holder"], acquired_at=row["acquired_at"],
-                expires_at=expires, remaining_s=remaining, expired=remaining < 0,
+                expires_at=expires, remaining_s=remaining, expired=remaining < 0, token=row["token"],
             ))
         return out
 
@@ -397,7 +531,7 @@ class DbCoordinator:
     # ------------------------------------------------------------------
 
     async def kv_set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        await asyncio.to_thread(self._kv_set_sync, key, _json_safe({"v": value})["v"], ttl)
+        await self._run(self._kv_set_sync, key, _json_safe({"v": value})["v"], ttl)
 
     def _kv_set_sync(self, key: str, value: Any, ttl: Optional[int]) -> None:
         def _run():
@@ -415,7 +549,7 @@ class DbCoordinator:
         self._retrying(_run)
 
     async def kv_get(self, key: str) -> Any:
-        return await asyncio.to_thread(self._kv_get_sync, key)
+        return await self._run(self._kv_get_sync, key)
 
     def _kv_get_sync(self, key: str) -> Any:
         with self._engine().begin() as conn:
@@ -434,10 +568,10 @@ class DbCoordinator:
             with self._engine().begin() as conn:
                 return bool(conn.execute(delete(ClusterKV).where(ClusterKV.k == key)).rowcount)
 
-        return bool(await asyncio.to_thread(self._retrying, _run))
+        return bool(await self._run(self._retrying, _run))
 
     async def kv_incr(self, key: str, ttl: Optional[int] = None) -> int:
-        return await asyncio.to_thread(self._kv_incr_sync, key, ttl)
+        return await self._run(self._kv_incr_sync, key, ttl)
 
     def _kv_incr_sync(self, key: str, ttl: Optional[int]) -> int:
         def _run() -> int:
@@ -471,7 +605,7 @@ class DbCoordinator:
     # ------------------------------------------------------------------
 
     async def publish(self, topic: str, payload: dict) -> None:
-        await asyncio.to_thread(self._publish_sync, topic, _json_safe(payload or {}))
+        await self._run(self._publish_sync, topic, _json_safe(payload or {}))
         self.events_published += 1
 
     def _publish_sync(self, topic: str, payload: dict) -> None:
@@ -501,7 +635,7 @@ class DbCoordinator:
         failures = 0
         while self.started:
             try:
-                rows = await asyncio.to_thread(self._fetch_events_sync, self._last_event_id)
+                rows = await self._run(self._fetch_events_sync, self._last_event_id)
                 failures = 0
                 for row in rows:
                     self._last_event_id = max(self._last_event_id, int(row["id"]))
@@ -511,7 +645,7 @@ class DbCoordinator:
                     self._dispatch(str(row["topic"]), dict(row["payload"] or {}), str(row["origin"]))
                 if time.monotonic() - self._last_prune > _PRUNE_INTERVAL_S and self._should_prune():
                     self._last_prune = time.monotonic()
-                    await asyncio.to_thread(self._prune_sync)
+                    await self._run(self._prune_sync)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -540,6 +674,9 @@ class DbCoordinator:
                 dead_after = timedelta(seconds=max(3 * self.ttl, 120))
                 conn.execute(delete(ClusterInstance).where(ClusterInstance.heartbeat_at < now - dead_after))
                 conn.execute(delete(ClusterKV).where(ClusterKV.expires_at.is_not(None), ClusterKV.expires_at < now))
+                conn.execute(delete(ClusterLease).where(
+                    ClusterLease.holder.is_(None), ClusterLease.expires_at < now - _RELEASED_LEASE_RETENTION,
+                ))
 
         self._retrying(_run)
 
@@ -548,10 +685,10 @@ class DbCoordinator:
     # ------------------------------------------------------------------
 
     async def db_now(self) -> datetime:
-        return await asyncio.to_thread(self._now_sync)
+        return await self._run(self._now_sync)
 
     async def server_info(self) -> dict:
-        return await asyncio.to_thread(self._server_info_sync)
+        return await self._run(self._server_info_sync)
 
     def _server_info_sync(self) -> dict:
         info: dict[str, Any] = {

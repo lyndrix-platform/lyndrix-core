@@ -42,7 +42,8 @@ many others are alive) and shared storage (not available in this version).
 | `CLUSTER: mode=cluster driver=db instance=… roles=…` | startup summary |
 | `COORDINATOR: db driver started …` | tables ready, event polling from id N |
 | `LEASE: acquired 'core:leader'` / `LEASE: lost '…' to a peer` | lease transitions |
-| `LEASE: '…' could not be renewed for 30s — treating it as lost` | coordinator unreachable → fenced |
+| `LEASE: '…' was not renewed for 22.5s (ttl 30s) — treating it as lost before a peer can take it` | coordinator unreachable → the holder fenced itself ahead of the TTL |
+| `LEASE: '…' came back under a new token — the holding was interrupted` | the row was force-released or expired while this instance believed it held it; `lost` fired, the next tick re-acquires |
 | `PREFLIGHT [storage_secret] FAIL: …` | contract violation; instance stays out of rotation |
 | `CLUSTER: heartbeat failed (N×, …)` / `heartbeat recovered after …` | the registry row could not be written; after a full TTL `/api/ready` answers 503 `heartbeat` |
 | `COORDINATOR: database connection pool refreshed (heartbeat timed out)` | a call hung on a dead database socket; the next call opens new connections |
