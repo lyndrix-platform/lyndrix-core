@@ -1,5 +1,6 @@
 """Preflight checks and /api/ready logic."""
 import asyncio
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -187,6 +188,7 @@ def test_secret_mismatch_keeps_healthy_instances_ready(monkeypatch):
     monkeypatch.setattr(cluster_service, "preflight_at", None)
     monkeypatch.setattr(cluster_service, "_instances", [])
     monkeypatch.setattr(cluster_service, "_write_storage_marker", lambda: None)
+    monkeypatch.setattr(cluster_service, "_hb_last_ok_started", time.monotonic())   # heart-beating fine
 
     healthy = [inst(cluster_service.instance_id, good, True)] + [inst(f"pod-{n}", good) for n in (2, 3, 4)]
 

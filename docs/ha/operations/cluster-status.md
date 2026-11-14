@@ -44,5 +44,8 @@ many others are alive) and shared storage (not available in this version).
 | `LEASE: acquired 'core:leader'` / `LEASE: lost '…' to a peer` | lease transitions |
 | `LEASE: '…' could not be renewed for 30s — treating it as lost` | coordinator unreachable → fenced |
 | `PREFLIGHT [storage_secret] FAIL: …` | contract violation; instance stays out of rotation |
+| `CLUSTER: heartbeat failed (N×, …)` / `heartbeat recovered after …` | the registry row could not be written; after a full TTL `/api/ready` answers 503 `heartbeat` |
+| `COORDINATOR: database connection pool refreshed (heartbeat timed out)` | a call hung on a dead database socket; the next call opens new connections |
+| `CLUSTER: storage job 'marker' has not returned for 120s …` | the `STORAGE_DIR` mount hangs; marker writes are skipped until it answers |
 | `DRAIN: SIGTERM received — /api/ready → 503, draining for 10s` | graceful stop in progress |
 | `RECONCILE (peer dev-a: installed): {'loaded': […]}` | plugin artifacts converged after a peer's install |

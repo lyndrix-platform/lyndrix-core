@@ -90,8 +90,13 @@ notification, which then reaches every browser exactly once through the relay.
 
 `GET /api/ready` is the one contract every load balancer and Kubernetes readiness probe uses. It
 is 200 only when boot finished, the database and Vault are connected, the instance is not
-draining, the coordinator is up (cluster mode) and no hard preflight failure concerns this
-instance (`coordinator`, `storage_secret`).
+draining, the coordinator is up and a heartbeat succeeded within the last lease TTL (cluster mode)
+and no hard preflight failure concerns this instance (`storage_secret`). The reasons are listed in
+the [configuration reference](configuration.md#readiness).
+
+Heartbeat, lease renewal and preflight are three independent loops. The heartbeat does nothing but
+write the registry row and read the peer view at a fixed rate; it never waits for a preflight check
+or for the storage mount (the marker file is written by a dedicated thread, one job at a time).
 
 On SIGTERM with `LYNDRIX_DRAIN_SECONDS > 0`: `/api/ready` flips to 503, the instance waits for the
 load balancer to notice, closes every SSE stream with an `event: reconnect`, releases its leases

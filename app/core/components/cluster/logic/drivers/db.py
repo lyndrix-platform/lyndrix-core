@@ -90,6 +90,8 @@ class DbCoordinator:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_event_id = 0
         self._last_prune = 0.0
+        self._last_pool_refresh = 0.0
+        self.pool_refreshes = 0
         self._started_at: Optional[datetime] = None
         self.started = False
         self.last_error: Optional[str] = None
@@ -117,6 +119,38 @@ class DbCoordinator:
 
     def _is_sqlite(self) -> bool:
         return self._engine_getter().dialect.name == "sqlite"
+
+    def refresh_connections(self, reason: str = "") -> bool:
+        """Start over with fresh pooled connections after a call timed out.
+
+        A call that hung on a dead peer (DB VIP moved, half-open TCP) is
+        abandoned by its caller, but the next one would take another pooled
+        connection with the same dead peer and wait for the socket timeout
+        again (``pool_pre_ping`` included) — one such round per pooled
+        connection. Swapping the pool makes the next call connect anew
+        (``connect_timeout`` 5 s). The old connections are only de-referenced
+        (``close=False``): threads still inside a call finish on their own.
+
+        Rate-limited to once per lease TTL so a merely slow database is not
+        answered with a reconnect storm. Returns ``True`` when the pool was
+        swapped. A no-op for SQLite (no sockets; an in-memory database would
+        vanish with its pool).
+        """
+        try:
+            engine = self._engine_getter()
+        except Exception:
+            return False
+        if engine.dialect.name not in ("mysql", "mariadb"):
+            return False
+        now = time.monotonic()
+        if self._last_pool_refresh and now - self._last_pool_refresh < max(self.ttl, 30):
+            return False
+        self._last_pool_refresh = now
+        engine.dispose(close=False)
+        self.pool_refreshes += 1
+        log.warning("COORDINATOR: database connection pool refreshed (%s) — the next call opens new connections",
+                    reason or "a call timed out")
+        return True
 
     def ensure_schema(self) -> None:
         """Create the cluster_* tables once, cluster-wide.
@@ -526,6 +560,7 @@ class DbCoordinator:
             "events_received": self.events_received,
             "events_published": self.events_published,
             "last_error": self.last_error,
+            "pool_refreshes": self.pool_refreshes,
         }
         try:
             with self._engine().connect() as conn:

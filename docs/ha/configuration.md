@@ -35,12 +35,15 @@ Planned but not shipped (documented so the names are reserved): `LYNDRIX_MIGRATE
 ## Preflight rules
 
 The preflight runs after boot, whenever the set of live instances changes, every five minutes,
-and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run checks*). Each check is
-`ok`, `warn`, `fail` or `skip`:
+and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run checks*). It runs in its
+own task — never inside the heartbeat — and every check that does I/O is bounded to 8 s: a check
+that times out or hits a transient error reports `warn` and is repeated two heartbeats later (at
+most five times in a row, then at the normal interval). Each check is `ok`, `warn`, `fail` or
+`skip`:
 
 | Check | fail | warn |
 |---|---|---|
-| `coordinator` | cluster mode and the coordinator is not connected | — |
+| `coordinator` | cluster mode and the coordinator never started | the instance list could not be refreshed (the last known view is used), or no heartbeat succeeded within the lease TTL |
 | `redundancy` | — | only one live instance |
 | `storage_secret` | **this** instance's `STORAGE_SECRET` fingerprint differs from the one most live instances share (tie: the longest-running instance's value wins) | another instance's fingerprint differs (named in the message; that instance fails its own check) |
 | `versions` | — | mixed core versions (expected during a rolling update) |
@@ -52,12 +55,27 @@ and on demand (`GET /api/cluster/preflight`, Settings → Cluster → *Re-run ch
 | `clock` | — | this instance's clock is more than 5 s off the database clock |
 | `vault_nodes` | — | a node in `VAULT_NODES` does not answer `/v1/sys/health` |
 | `drain` | — | cluster mode with `LYNDRIX_DRAIN_SECONDS=0` |
-| `storage` | — | cluster mode: `STORAGE_DIR` is not one shared mount (peer marker files missing/stale), or only one instance is alive so it cannot be verified |
+| `storage` | — | cluster mode: `STORAGE_DIR` is not one shared mount (peer marker files missing/stale), only one instance is alive so it cannot be verified, or the mount does not respond (a storage job is stuck) |
 
-Only `coordinator` and `storage_secret` failures take **this** instance out of rotation
-(`/api/ready` → 503 with `preflight:<id>` in `reasons`). A cluster-level failure such as a missing
-runner instance is shown red on the Cluster page and in the logs but does not stop every instance
-from serving traffic.
+## Readiness
+
+`GET /api/ready` answers 503 with one or more `reasons`:
+
+| Reason | Meaning |
+|---|---|
+| `boot:<phase>` | boot has not finished (or failed) |
+| `database` / `vault` | not connected |
+| `draining` | SIGTERM received, the instance is leaving |
+| `coordinator` | cluster mode: the coordinator has not started yet (it retries with back-off) |
+| `heartbeat` | cluster mode: no heartbeat succeeded for a full lease TTL — the peers already count this instance as dead (no leases, no shards), so it must not receive traffic either. Clears with the next successful beat |
+| `preflight:storage_secret` | this instance's `STORAGE_SECRET` differs from the cluster's |
+
+Coordinator health is read **live** (`coordinator`, `heartbeat`); the cached `coordinator` preflight
+check is display only, so a single failed query during a preflight can no longer keep an instance
+out of rotation for minutes. Of the preflight checks only `storage_secret` gates readiness. A
+cluster-level failure such as a missing runner instance, or a `STORAGE_DIR` mount that hangs, is
+shown on the Cluster page and in the logs but does not take instances out of rotation — the mount
+is shared, so every instance would leave at once.
 
 ## Endpoints
 

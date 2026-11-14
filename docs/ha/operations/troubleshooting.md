@@ -3,6 +3,8 @@
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/ready` → 503 with `reasons: ["coordinator"]` on one instance | the coordinator could not start (first-boot DDL race, DB unreachable); it retries with back-off | check `CLUSTER: coordinator start failed` in the logs; it recovers by itself once the DB answers |
+| `reasons: ["heartbeat"]` | no heartbeat reached the database for a full lease TTL (dead pooled sockets after a VIP move, a starved event loop/executor, the DB unreachable from this host only) | `GET /api/cluster` on that instance → `coordinator.heartbeat` (`failures`, `last_error`, `last_duration_s`); it clears with the next successful beat. Peers showed the instance as stale during that time |
+| Preflight `storage: WARN — … is not responding — a storage job has been stuck for N s` | the `STORAGE_DIR` mount hangs (NFS server / share-manager restart) | fix the mount; the core keeps one thread waiting on it and skips further marker writes meanwhile (`GET /api/cluster` → `storage`). Requests that touch files block until it is back |
 | `reasons: ["preflight:storage_secret"]` on one instance | its `STORAGE_SECRET` differs from the value most instances share | set the cluster's value on that instance; the others stay ready and only show `storage_secret: WARN` naming it. To rotate the secret restart all instances together |
 | Preflight `roles: FAIL — no live instance has role 'runner'` | the IaC Orchestrator is pinned to `runner` and no live instance has it | start the runner instance / add `runner` to one instance's `LYNDRIX_INSTANCE_ROLES` |
 | Plugin page shows a plugin as **Remote** | it is `pinned:<role>` and this instance lacks the role | expected; route its paths to the pinned instance at the balancer |

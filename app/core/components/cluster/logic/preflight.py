@@ -2,24 +2,36 @@
 
 Each check returns ``ok``, ``warn``, ``fail`` or ``skip`` with a plain-text
 message and a hint. ``fail`` is reserved for states in which routing traffic to
-this instance would be wrong (different ``STORAGE_SECRET``, no instance for a
-required role, coordinator down) — those keep ``/api/ready`` at 503.
+this instance would be wrong (a ``STORAGE_SECRET`` that differs from the
+cluster's, no instance for a required role, coordinator not started).
 Everything that merely degrades the experience is a ``warn``.
 
-Runs once on ``system:boot_complete`` and on demand via
+Runs once on ``system:boot_complete``, then in its own task every five minutes
+and whenever the membership changes, and on demand via
 ``GET /api/cluster/preflight`` (also the Cluster page's "Re-run" button).
+
+Two rules keep the preflight from doing harm itself:
+
+* every check that does I/O is bounded (:data:`CHECK_TIMEOUT_S`). A check that
+  times out or hits a transient error reports ``warn`` and asks for a re-run
+  soon (``Check.recheck``) — it never turns into a readiness failure;
+* ``/api/ready`` reads coordinator health live (see
+  ``ClusterService.readiness``); the cached result of the ``coordinator`` check
+  is display only.
 """
 from __future__ import annotations
 
 import asyncio
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Optional
 
 from config import settings
 from core.logger import get_logger
+
+from .storage import StorageBusy
 
 if TYPE_CHECKING:  # pragma: no cover
     from .cluster_service import ClusterService
@@ -31,6 +43,10 @@ _CLOCK_DRIFT_WARN_S = 5.0
 # sys/health answers with these codes for initialized/sealed/standby/… nodes —
 # any of them means "reachable".
 _VAULT_HEALTH_CODES = {200, 429, 472, 473, 501, 503}
+# Upper bound for one I/O check (database round trip, Vault probes, storage
+# listing). The drivers' own timeouts are far longer (socket timeout 90 s; a
+# hung NFS mount: none) — the preflight must not wait for them.
+CHECK_TIMEOUT_S = 8.0
 
 
 @dataclass
@@ -39,9 +55,22 @@ class Check:
     status: str  # ok | warn | fail | skip
     message: str
     hint: Optional[str] = None
+    # Internal: this result is provisional (timeout, transient error, peer too
+    # young to judge) — run the preflight again in a couple of heartbeats.
+    recheck: bool = field(default=False, repr=False)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {"id": self.id, "status": self.status, "message": self.message, "hint": self.hint}
+
+
+async def _bounded(awaitable: Awaitable[Any]) -> Any:
+    return await asyncio.wait_for(awaitable, timeout=CHECK_TIMEOUT_S)
+
+
+def _why(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"no answer within {CHECK_TIMEOUT_S:.0f}s"
+    return str(exc)[:120] or exc.__class__.__name__
 
 
 def _probe_vault(url: str) -> tuple[bool, str]:
@@ -109,30 +138,52 @@ def _secret_reference(alive: list, own_fp: Optional[str]) -> tuple[Optional[str]
     return reference, odd, len(groups[reference])
 
 
+async def _read_markers(service: "ClusterService") -> dict:
+    """Marker listing through the service's storage probe (one storage job at a
+    time, bounded); plain thread for services without a probe (test fakes)."""
+    reader = getattr(service, "read_storage_markers", None)
+    if callable(reader):
+        return await reader(timeout=CHECK_TIMEOUT_S)
+    return await _bounded(asyncio.to_thread(service.storage_markers))
+
+
 async def run_checks(service: "ClusterService") -> list[Check]:
     checks: list[Check] = []
     cluster = service.is_cluster
 
-    def add(check_id: str, status: str, message: str, hint: Optional[str] = None) -> None:
-        checks.append(Check(check_id, status, message, hint))
+    def add(check_id: str, status: str, message: str, hint: Optional[str] = None, *, recheck: bool = False) -> None:
+        checks.append(Check(check_id, status, message, hint, recheck))
 
+    # The view every membership check works on. A failed or slow refresh is a
+    # transient event (VIP move, Galera hiccup): keep the last known view —
+    # judging "only this instance is alive" from an empty list would be wrong —
+    # and say so with a warning, never with a readiness failure.
+    refresh_error: Optional[str] = None
     try:
-        instances = await service.refresh_instances()
+        instances = await _bounded(service.refresh_instances())
     except Exception as exc:
-        instances = []
-        add("coordinator", "fail" if cluster else "warn", f"coordinator unreachable: {str(exc)[:120]}",
-            "Check DB connectivity; the cluster_* tables are created automatically on first start.")
+        refresh_error = _why(exc)
+        instances = list(getattr(service, "_instances", None) or [])
     alive = [i for i in instances if i.alive]
 
-    # 1. coordinator
-    if not any(c.id == "coordinator" for c in checks):
-        if not cluster:
-            add("coordinator", "skip", "single-instance mode — coordinator driver 'local'")
-        elif service.started:
-            add("coordinator", "ok", f"db coordinator connected, {len(alive)} live instance(s)")
-        else:
-            add("coordinator", "fail", f"coordinator not started: {service.start_error or 'unknown error'}",
-                "Check DB connectivity; the cluster_* tables are created automatically on first start.")
+    # 1. coordinator — live state. /api/ready does not read this result.
+    if not cluster:
+        add("coordinator", "skip", "single-instance mode — coordinator driver 'local'")
+    elif not service.started:
+        add("coordinator", "fail", f"coordinator not started: {service.start_error or 'unknown error'}",
+            "Check DB connectivity; the cluster_* tables are created automatically on first start.")
+    elif refresh_error is not None:
+        add("coordinator", "warn",
+            f"instance list could not be refreshed ({refresh_error}) — showing the last known view",
+            "A single failure is harmless (database fail-over, short network blip). Readiness follows the "
+            "heartbeat: /api/ready turns 503 only when no heartbeat succeeded for a full lease TTL.",
+            recheck=True)
+    elif getattr(service, "heartbeat_stale", False):
+        add("coordinator", "warn", "no successful heartbeat within the lease TTL — peers see this instance as dead",
+            "Check DB connectivity of this instance (GET /api/cluster → coordinator.heartbeat); "
+            "/api/ready answers 503 'heartbeat' until a beat succeeds.", recheck=True)
+    else:
+        add("coordinator", "ok", f"db coordinator connected, {len(alive)} live instance(s)")
 
     # 2. redundancy
     if cluster:
@@ -228,21 +279,21 @@ async def run_checks(service: "ClusterService") -> list[Check]:
 
     # 9. database topology / isolation
     try:
-        info = await service.coordinator.server_info()
+        info = await _bounded(service.coordinator.server_info())
         if info.get("wsrep_on") is True and not settings.DB_ALLOW_DIRECT_NODE:
             add("database", "warn", "DB_HOST is a Galera node (wsrep_on=ON) addressed directly",
                 "Route all writes through one MaxScale/ProxySQL endpoint (single writer); set DB_ALLOW_DIRECT_NODE=1 to silence.")
         elif info.get("error"):
-            add("database", "warn", f"could not inspect the database server: {info['error']}")
+            add("database", "warn", f"could not inspect the database server: {info['error']}", recheck=True)
         else:
             extra = " (snapshot isolation on → coordinator uses READ COMMITTED)" if info.get("snapshot_isolation") else ""
             add("database", "ok", f"{info.get('dialect', 'db')} {info.get('version', '')}{extra}".strip())
     except Exception as exc:
-        add("database", "warn", f"database inspection failed: {str(exc)[:100]}")
+        add("database", "warn", f"database inspection failed: {_why(exc)}", recheck=True)
 
     # 10. clock drift vs. the DB clock (leases are compared on the DB clock)
     try:
-        db_now = await service.coordinator.db_now()
+        db_now = await _bounded(service.coordinator.db_now())
         local = datetime.now(timezone.utc).replace(tzinfo=None)
         drift = abs((local - db_now).total_seconds())
         if drift > _CLOCK_DRIFT_WARN_S:
@@ -251,17 +302,22 @@ async def run_checks(service: "ClusterService") -> list[Check]:
         else:
             add("clock", "ok", f"clock drift to the database: {drift:.1f}s")
     except Exception as exc:
-        add("clock", "skip", f"clock drift check unavailable: {str(exc)[:80]}")
+        add("clock", "skip", f"clock drift check unavailable: {_why(exc)}", recheck=True)
 
     # 11. Vault nodes
     if settings.VAULT_NODES:
-        results = await asyncio.gather(*(asyncio.to_thread(_probe_vault, node) for node in settings.vault_nodes))
-        unreachable = [node for node, (ok, _) in zip(settings.vault_nodes, results) if not ok]
-        if unreachable:
-            add("vault_nodes", "warn", f"{len(unreachable)} of {len(results)} Vault node(s) unreachable: {', '.join(unreachable)}",
-                "Each node in VAULT_NODES must answer /v1/sys/health from every core instance.")
+        try:
+            results = await _bounded(
+                asyncio.gather(*(asyncio.to_thread(_probe_vault, node) for node in settings.vault_nodes)))
+        except Exception as exc:
+            add("vault_nodes", "warn", f"Vault node probes did not finish: {_why(exc)}", recheck=True)
         else:
-            add("vault_nodes", "ok", f"all {len(results)} Vault node(s) reachable")
+            unreachable = [node for node, (ok, _) in zip(settings.vault_nodes, results) if not ok]
+            if unreachable:
+                add("vault_nodes", "warn", f"{len(unreachable)} of {len(results)} Vault node(s) unreachable: {', '.join(unreachable)}",
+                    "Each node in VAULT_NODES must answer /v1/sys/health from every core instance.")
+            else:
+                add("vault_nodes", "ok", f"all {len(results)} Vault node(s) reachable")
     else:
         add("vault_nodes", "skip", "VAULT_NODES not set — single Vault endpoint (VAULT_URL)")
 
@@ -282,9 +338,17 @@ async def run_checks(service: "ClusterService") -> list[Check]:
         others = [i for i in alive if not i.is_self]
         markers = {}
         try:
-            markers = await asyncio.to_thread(service.storage_markers)
+            markers = await _read_markers(service)
+        except StorageBusy as exc:
+            # The mount is holding an earlier job hostage: do not send a second
+            # thread after it, and do not guess — report what is known.
+            add("storage", "warn",
+                f"{settings.STORAGE_DIR} is not responding — a storage job ({exc.label or 'io'}) has been stuck "
+                f"for {exc.stuck_for_s:.0f}s",
+                "The mount (NFS/CIFS/RWX volume) hangs. Requests that read or write files block until it is "
+                "back; everything else keeps working, so the instance stays in rotation.", recheck=True)
         except Exception as exc:
-            add("storage", "warn", f"could not inspect {settings.STORAGE_DIR}: {str(exc)[:80]}")
+            add("storage", "warn", f"could not inspect {settings.STORAGE_DIR}: {_why(exc)}", recheck=True)
         else:
             fresh_s = max(3 * service.heartbeat_s, 60)
             if not others:

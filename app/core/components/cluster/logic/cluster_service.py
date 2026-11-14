@@ -13,8 +13,15 @@ Lifecycle (both modes, one code path):
   lease immediately — ``ctx.is_leader`` is ``True`` before any plugin loads.
 * ``system:boot_complete`` → preflight runs once (hard failures keep
   ``/api/ready`` at 503 so a load balancer never routes to a misconfigured
-  instance).
+  instance) and then periodically in its own task.
 * SIGTERM → drain (cluster default 10 s), leases released, shutdown.
+
+Three loops, deliberately independent so one cannot starve another: the
+heartbeat (registry row + peer view, every ``heartbeat_s``), the LeaseKeeper
+(lease renewals) and the preflight (contract checks, every five minutes or
+when asked). The heartbeat never waits for the preflight or for the storage
+mount, and readiness is derived from the live coordinator/heartbeat state
+rather than from a cached check result.
 """
 from __future__ import annotations
 
@@ -35,6 +42,7 @@ from .bridge import ClusterBridge
 from .coordinator import Coordinator, InstanceInfo
 from .drain import DrainController
 from .leases import RELEASED_TOPIC, LeaseKeeper
+from .storage import StorageProbe
 
 log = get_logger("Core:Cluster")
 
@@ -44,8 +52,19 @@ LEADER_TOPIC = "cluster:leader_changed"
 RESTART_TOPIC = "system:restart_requested"
 _RESTART_STAGGER_S = 5
 _PREFLIGHT_REFRESH_S = 300
-# Preflight failures that keep /api/ready at 503 for this instance.
-_READINESS_CHECKS = frozenset({"coordinator", "storage_secret"})
+# A check that could not decide (timeout, transient error, peer too young) asks
+# for a re-run after this many heartbeats instead of the full refresh interval;
+# after _PREFLIGHT_MAX_QUICK_RECHECKS in a row the normal interval applies again
+# (a permanent warning must not turn into a check every 20 seconds).
+_PREFLIGHT_RECHECK_BEATS = 2
+_PREFLIGHT_MAX_QUICK_RECHECKS = 5
+# Upper bound for one coordinator round trip made on behalf of an API request
+# or a preflight check (the driver's own socket timeout is much longer).
+_IO_TIMEOUT_S = 8.0
+# Preflight failures that keep /api/ready at 503 for this instance. Coordinator
+# health is NOT in here: readiness reads it live (``started`` + heartbeat age),
+# a cached check result would pin /api/ready at 503 long after a blip is over.
+_READINESS_CHECKS = frozenset({"storage_secret"})
 
 
 def _utcnow() -> datetime:
@@ -55,6 +74,12 @@ def _utcnow() -> datetime:
 def _default_instance_id() -> str:
     host = socket.gethostname().split(".")[0][:40] or "lyndrix"
     return f"{host}-{secrets.token_hex(2)}"
+
+
+def _describe_error(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"coordinator did not answer within {_IO_TIMEOUT_S:.0f}s"
+    return str(exc)[:200] or exc.__class__.__name__
 
 
 class ClusterService:
@@ -94,10 +119,23 @@ class ClusterService:
         self._start_task: Optional[asyncio.Task] = None
         self._hb_failures = 0
         self._hb_last_ok_mono = 0.0
+        # Monotonic START time of the last successful beat — the moment the row
+        # was written, i.e. what the peers measure this instance's age from.
+        self._hb_last_ok_started = 0.0
         self.last_heartbeat_ok_at: Optional[datetime] = None
         self.last_heartbeat_error: Optional[str] = None
         self.last_heartbeat_duration_s: Optional[float] = None
         self._preflight_running = False
+        self._preflight_task: Optional[asyncio.Task] = None
+        self._preflight_wake: Optional[asyncio.Event] = None
+        self._preflight_recheck = False
+        self._preflight_quick_rechecks = 0
+        # Injectable for tests (heartbeat staleness, storage probe age).
+        self._clock = time.monotonic
+        # All STORAGE_DIR I/O of the cluster layer: one job at a time, own thread.
+        self.storage = StorageProbe(clock=lambda: self._clock())
+        self.storage_last_error: Optional[str] = None
+        self.storage_last_ok_at: Optional[datetime] = None
 
         bus.subscribe("db:connected")(self.on_db_connected)
         bus.subscribe("system:boot_complete")(self.on_boot_complete)
@@ -197,11 +235,10 @@ class ClusterService:
             log.debug("CLUSTER: log store not started", exc_info=True)
         log.info("CLUSTER: coordinator '%s' online (leader: %s)", self.driver, self.leader_id or "pending")
         self._emit_changed("started")
-        if self.preflight_at is not None:
-            # Boot finished before the coordinator came up (first-boot DDL race,
-            # DB blip): the cached "coordinator failed" would keep /api/ready at
-            # 503 — re-evaluate now that we are online.
-            await self.run_preflight()
+        # Boot finished before the coordinator came up (first-boot DDL race, DB
+        # blip): the Cluster page still shows "coordinator not started" from
+        # that run — re-evaluate now that we are online.
+        self.request_preflight()
 
     def _record_start_failure(self, exc: Exception, *, attempt: int) -> None:
         self.start_error = str(exc)[:300]
@@ -226,14 +263,16 @@ class ClusterService:
             await self.run_preflight()
         except Exception:
             log.error("CLUSTER: preflight failed to run", exc_info=True)
+        if self._preflight_task is None or self._preflight_task.done():
+            self._preflight_task = bus.create_tracked_task(self._preflight_loop(), name="cluster:preflight")
         await self._heartbeat_once()
 
     async def stop(self, reason: str = "shutdown") -> None:
         self.draining = True
-        for task in (self._hb_task, self._start_task):
+        for task in (self._hb_task, self._start_task, self._preflight_task):
             if task is not None and not task.done():
                 task.cancel()
-        self._hb_task = self._start_task = None
+        self._hb_task = self._start_task = self._preflight_task = None
         try:
             await self.leases.stop()
         except Exception:
@@ -255,19 +294,25 @@ class ClusterService:
     # ------------------------------------------------------------------
 
     async def _heartbeat_loop(self) -> None:
-        beats = 0
+        """Beat at a fixed rate and do nothing else.
+
+        The preflight used to run inline here: a slow check (hung storage
+        mount, black-holed DB) stopped every heartbeat for as long as it took
+        and the peers declared this instance dead. It lives in its own task
+        now. Fixed rate (not "sleep a full interval after each beat") keeps the
+        row fresh when a beat is slow: the next one starts as soon as its slot
+        is due.
+        """
+        delay = float(self.heartbeat_s)
         while True:
-            await asyncio.sleep(self.heartbeat_s)
+            await asyncio.sleep(delay)
+            started = self._clock()
             await self._heartbeat_once()
-            beats += 1
-            # Peers come and go; re-check the contracts every ~5 minutes so the
-            # Cluster page and /api/ready never show a stale picture.
-            if self.preflight_at is not None and beats * self.heartbeat_s >= _PREFLIGHT_REFRESH_S:
-                beats = 0
-                try:
-                    await self.run_preflight()
-                except Exception:
-                    log.debug("CLUSTER: periodic preflight failed", exc_info=True)
+            delay = self._next_beat_delay(started)
+
+    def _next_beat_delay(self, started: float) -> float:
+        """Seconds to sleep before the next beat, given when the last one started."""
+        return max(0.0, started + self.heartbeat_s - self._clock())
 
     # Marker files that let the preflight tell whether STORAGE_DIR is one shared
     # mount (every instance sees the others' markers) or instance-local disks.
@@ -280,8 +325,40 @@ class ClusterService:
             path = os.path.join(marker_dir, self.instance_id)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(_utcnow().isoformat())
+            self.storage_last_ok_at, self.storage_last_error = _utcnow(), None
         except Exception as exc:  # read-only or missing storage → the preflight reports it
+            self.storage_last_error = str(exc)[:200]
             log.debug("CLUSTER: storage marker not written: %s", exc)
+
+    def _drop_storage_marker(self) -> None:
+        """Refresh this instance's marker without ever waiting for the mount.
+
+        Skipped while the previous storage job has not returned: a hung mount
+        costs one blocked thread, not one per beat.
+        """
+        if self.storage.submit(self._write_storage_marker, label="marker") is None:
+            stuck = self.storage.stuck_for_s
+            if stuck >= self.ttl and int(stuck) % max(60, self.ttl) < self.heartbeat_s:
+                log.warning(
+                    "CLUSTER: storage job '%s' has not returned for %.0fs — STORAGE_DIR (%s) is not responding; "
+                    "marker writes are skipped until it does",
+                    self.storage.stuck_label, stuck, settings.STORAGE_DIR,
+                )
+
+    async def read_storage_markers(self, timeout: float = _IO_TIMEOUT_S) -> dict[str, float]:
+        """:meth:`storage_markers` through the storage probe: bounded, and never
+        a second thread on a mount that already holds one hostage. Raises
+        :class:`StorageBusy` / ``asyncio.TimeoutError``."""
+        return await self.storage.call(self.storage_markers, label="read markers", timeout=timeout)
+
+    def storage_status(self) -> dict:
+        """Storage probe telemetry for ``GET /api/cluster`` and the heartbeat meta."""
+        return {
+            **self.storage.status(),
+            "dir": settings.STORAGE_DIR,
+            "last_ok_at": self.storage_last_ok_at.isoformat() if self.storage_last_ok_at else None,
+            "last_error": self.storage_last_error,
+        }
 
     def storage_markers(self) -> dict[str, float]:
         """instance_id → marker age in seconds, for every marker visible from here."""
@@ -314,11 +391,15 @@ class ClusterService:
         once pymysql's ``read_timeout`` fires), the failure is logged with its
         duration, and the next beat runs on a fresh pooled connection.
         """
-        started = time.monotonic()
+        started = self._clock()
         try:
             await asyncio.wait_for(self._heartbeat_body(), timeout=self.heartbeat_timeout_s)
         except asyncio.TimeoutError:
             self._record_heartbeat_failure(f"timed out after {self.heartbeat_timeout_s:.0f}s", started)
+            # The pooled connection (and probably its siblings) has a dead peer:
+            # let the next beat open a fresh one instead of pre-pinging the
+            # remaining dead sockets, each for a full socket timeout.
+            self._refresh_coordinator_connections("heartbeat timed out")
         except Exception as exc:
             self._record_heartbeat_failure(str(exc)[:200] or exc.__class__.__name__, started)
         else:
@@ -327,15 +408,24 @@ class ClusterService:
     async def _heartbeat_body(self) -> None:
         await self.coordinator.heartbeat(self._meta())
         if self.is_cluster:
-            await asyncio.to_thread(self._write_storage_marker)
+            self._drop_storage_marker()   # fire and forget — never waits for the mount
         await self.refresh_instances()
         await self._refresh_leader()
 
+    def _refresh_coordinator_connections(self, reason: str) -> None:
+        refresh = getattr(self.coordinator, "refresh_connections", None)
+        if callable(refresh):
+            try:
+                refresh(reason)
+            except Exception:
+                log.debug("CLUSTER: connection refresh failed", exc_info=True)
+
     def _record_heartbeat_success(self, started: float) -> None:
-        elapsed = time.monotonic() - started
+        now = self._clock()
+        elapsed = now - started
         self.last_heartbeat_duration_s = elapsed
         if self._hb_failures:
-            gap = time.monotonic() - self._hb_last_ok_mono if self._hb_last_ok_mono else 0.0
+            gap = now - self._hb_last_ok_mono if self._hb_last_ok_mono else 0.0
             log.warning(
                 "CLUSTER: heartbeat recovered after %s failure(s), %.0fs without a successful beat (lease ttl %ss)",
                 self._hb_failures, gap, self.ttl,
@@ -345,16 +435,21 @@ class ClusterService:
             # the early warning before beats start timing out.
             log.warning("CLUSTER: heartbeat took %.1fs (interval %ss) — database latency", elapsed, self.heartbeat_s)
         self._hb_failures = 0
-        self._hb_last_ok_mono = time.monotonic()
+        self._hb_last_ok_mono = now
+        self._hb_last_ok_started = started
         self.last_heartbeat_ok_at = _utcnow()
         self.last_heartbeat_error = None
+        if self._preflight_recheck:
+            # A check could not decide while the coordinator was struggling —
+            # do not leave its warning on the Cluster page for five minutes.
+            self.request_preflight()
 
     def _record_heartbeat_failure(self, error: str, started: float) -> None:
-        elapsed = time.monotonic() - started
+        elapsed = self._clock() - started
         self._hb_failures += 1
         self.last_heartbeat_error = error
         self.last_heartbeat_duration_s = elapsed
-        since_ok = time.monotonic() - self._hb_last_ok_mono if self._hb_last_ok_mono else None
+        since_ok = self._clock() - self._hb_last_ok_mono if self._hb_last_ok_mono else None
         # Every one of the first three failures, then about once a minute —
         # enough to see the outage start, last and end in the log without a
         # line per beat.
@@ -367,11 +462,22 @@ class ClusterService:
                 self.ttl, error,
             )
 
+    @property
+    def heartbeat_stale(self) -> bool:
+        """No successful heartbeat within the lease TTL: the peers already count
+        this instance as dead (they measure from the moment the row was
+        written, hence the START of the last good beat). ``True`` as well while
+        no beat has succeeded at all."""
+        if not self._hb_last_ok_started:
+            return True
+        return self._clock() - self._hb_last_ok_started > self.ttl
+
     def heartbeat_status(self) -> dict:
         """Heartbeat telemetry for ``GET /api/cluster`` (Cluster page) and the logs."""
         return {
             "interval_s": self.heartbeat_s,
             "timeout_s": self.heartbeat_timeout_s,
+            "stale": self.heartbeat_stale if self.is_cluster else False,
             "failures": self._hb_failures,
             "last_ok_at": self.last_heartbeat_ok_at.isoformat() if self.last_heartbeat_ok_at else None,
             "last_duration_s": round(self.last_heartbeat_duration_s, 2) if self.last_heartbeat_duration_s is not None else None,
@@ -379,9 +485,13 @@ class ClusterService:
         }
 
     def _meta(self) -> dict:
-        ready, reasons = self.readiness()
+        _, reasons = self.readiness()
+        # This meta is written BY a heartbeat: when it lands, the heartbeat
+        # works. A stale one shows in the row's age instead — publishing
+        # "not ready: heartbeat" would stick for a whole interval after recovery.
+        reasons = [r for r in reasons if r != "heartbeat"]
         return {
-            "ready": ready,
+            "ready": not reasons,
             "reasons": reasons,
             "draining": self.draining,
             "is_leader": self.is_leader,
@@ -390,6 +500,7 @@ class ClusterService:
             "plugins_fp": self.plugins_fingerprint(),
             "ui_engines": settings.LYNDRIX_UI_ENGINE,
             "leases": self.leases.held,
+            "storage_stuck_s": round(self.storage.stuck_for_s),
         }
 
     async def refresh_instances(self) -> list[InstanceInfo]:
@@ -403,18 +514,60 @@ class ClusterService:
             self._emit_changed("instances")
             # Membership changed → contracts (role coverage, secret, versions)
             # may have changed with it; re-check instead of waiting 5 minutes.
-            if self.preflight_at is not None and not self._preflight_running:
-                bus.create_tracked_task(self._preflight_quietly(), name="cluster:preflight_refresh")
+            self.request_preflight()
         return self._instances
 
+    def request_preflight(self) -> None:
+        """Ask for a preflight run now (membership change, coordinator back,
+        a check that wanted a second look). Never runs it inline: the caller is
+        the heartbeat or the start path and must not wait for the checks."""
+        if self.preflight_at is None:
+            return  # boot has not finished — the first run happens on system:boot_complete
+        if self._preflight_task is not None and not self._preflight_task.done():
+            if self._preflight_wake is not None:
+                self._preflight_wake.set()
+            return
+        if not self._preflight_running:
+            try:
+                bus.create_tracked_task(self._preflight_quietly(), name="cluster:preflight_refresh")
+            except RuntimeError:
+                pass  # no running loop (sync test code) — the next periodic run covers it
+
     async def _preflight_quietly(self) -> None:
+        if self._preflight_running:
+            return
         self._preflight_running = True
         try:
             await self.run_preflight()
         except Exception:
-            log.debug("CLUSTER: preflight after membership change failed", exc_info=True)
+            log.debug("CLUSTER: preflight run failed", exc_info=True)
         finally:
             self._preflight_running = False
+
+    def _preflight_delay(self) -> float:
+        """Seconds until the next periodic run: the refresh interval, or a
+        couple of heartbeats when the last run left something undecided."""
+        if self._preflight_recheck and self._preflight_quick_rechecks < _PREFLIGHT_MAX_QUICK_RECHECKS:
+            return float(_PREFLIGHT_RECHECK_BEATS * self.heartbeat_s)
+        return float(_PREFLIGHT_REFRESH_S)
+
+    async def _preflight_loop(self) -> None:
+        """Peers come and go; re-check the contracts every ~5 minutes (sooner
+        on request) so the Cluster page never shows a stale picture. Its own
+        task: nothing in here can delay a heartbeat or a lease renewal."""
+        self._preflight_wake = asyncio.Event()
+        while True:
+            delay = self._preflight_delay()
+            quick = delay < _PREFLIGHT_REFRESH_S
+            try:
+                await asyncio.wait_for(self._preflight_wake.wait(), timeout=delay)
+                quick = False  # asked for explicitly — not one of the automatic re-checks
+            except asyncio.TimeoutError:
+                pass
+            self._preflight_wake.clear()
+            if quick:
+                self._preflight_quick_rechecks += 1
+            await self._preflight_quietly()
 
     async def _refresh_leader(self) -> None:
         info = await self.coordinator.holder(LEADER_LEASE)
@@ -452,7 +605,14 @@ class ClusterService:
     # ------------------------------------------------------------------
 
     def readiness(self) -> tuple[bool, list[str]]:
-        """``/api/ready``: boot finished ∧ DB ∧ Vault ∧ not draining ∧ coordinator (cluster) ∧ no hard preflight failure."""
+        """``/api/ready``: boot finished ∧ DB ∧ Vault ∧ not draining ∧ coordinator
+        started and heart-beating (cluster) ∧ no hard preflight failure.
+
+        Everything about the coordinator is read live. In cluster mode an
+        instance without a successful heartbeat for a full lease TTL is dead to
+        its peers (no leases, no shards, "no runner online") — it must not keep
+        answering 200 to the load balancer just because the process is up.
+        """
         reasons: list[str] = []
         if self.draining:
             reasons.append("draining")
@@ -468,8 +628,11 @@ class ClusterService:
                 reasons.append("vault")
         except Exception:  # pragma: no cover - import-order edge case during tests
             reasons.append("core")
-        if self.is_cluster and not self.started:
-            reasons.append("coordinator")
+        if self.is_cluster:
+            if not self.started:
+                reasons.append("coordinator")
+            elif self.heartbeat_stale:
+                reasons.append("heartbeat")
         # Only contract failures that make THIS instance unfit for traffic gate
         # readiness. A cluster-level problem (e.g. no live runner instance) is a
         # red check on the Cluster page, not a reason to take every instance out.
@@ -485,6 +648,10 @@ class ClusterService:
         checks = await run_checks(self)
         self.preflight_results = [c.to_dict() for c in checks]
         self.preflight_at = _utcnow().isoformat()
+        # Undecided checks (timeout, transient error) get a second look soon.
+        self._preflight_recheck = any(c.recheck for c in checks)
+        if not self._preflight_recheck:
+            self._preflight_quick_rechecks = 0
         for check in checks:
             if check.status == "fail":
                 log.error("PREFLIGHT [%s] FAIL: %s%s", check.id, check.message, f" — {check.hint}" if check.hint else "")
@@ -608,6 +775,7 @@ class ClusterService:
             "instances": [i.to_dict() for i in self._instances],
             "alive": len(alive),
             "leases": {"held": self.leases.held, "wanted": self.leases.wanted},
+            "storage": self.storage_status(),
             "work": self.assigner.report(),
             "preflight": {**self.preflight_summary(), "checks": self.preflight_results},
             "settings": {
@@ -618,21 +786,28 @@ class ClusterService:
         }
 
     async def describe(self) -> dict:
-        """Full picture for ``GET /api/cluster`` (fresh instance + lease lists)."""
+        """Full picture for ``GET /api/cluster`` (fresh instance + lease lists).
+
+        Every coordinator round trip is bounded: with a black-holed database
+        the page answers from the cached view (and says so) instead of hanging
+        for three socket timeouts.
+        """
         try:
-            await self.refresh_instances()
+            await asyncio.wait_for(self.refresh_instances(), timeout=_IO_TIMEOUT_S)
         except Exception as exc:
             log.debug("CLUSTER: instance refresh failed: %s", exc)
         data = self.snapshot()
         try:
-            data["lease_table"] = [l.to_dict() for l in await self.coordinator.leases()]
+            leases = await asyncio.wait_for(self.coordinator.leases(), timeout=_IO_TIMEOUT_S)
+            data["lease_table"] = [lease.to_dict() for lease in leases]
         except Exception as exc:
             data["lease_table"] = []
-            data["coordinator"]["error"] = data["coordinator"].get("error") or str(exc)[:200]
+            data["coordinator"]["error"] = data["coordinator"].get("error") or _describe_error(exc)
         try:
-            data["coordinator"]["server"] = await self.coordinator.server_info()
+            data["coordinator"]["server"] = await asyncio.wait_for(
+                self.coordinator.server_info(), timeout=_IO_TIMEOUT_S)
         except Exception as exc:
-            data["coordinator"]["server"] = {"error": str(exc)[:200]}
+            data["coordinator"]["server"] = {"error": _describe_error(exc)}
         data["placements"] = self.placements()
         return data
 
