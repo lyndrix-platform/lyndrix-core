@@ -104,6 +104,17 @@ event, a browser connected to instance B receives what happened on instance A.
 Why an allowlist: the moment a topic is bridged, every side-effecting subscriber runs on N
 instances. Plugin topics stay local unless the plugin opts in on purpose.
 
+Delivery guarantees (core ≥ 1.12): an instance publishes its events **in the order it emitted
+them**, through one publisher task with an outbox. While the database is unreachable the events
+wait there and are sent afterwards (retry with back-off; at most 1000 events — the oldest is
+dropped — and none older than five minutes; counters in `GET /api/cluster` →
+`coordinator.bridge`). Readers re-read the last 500 event ids on every poll, so a row that was
+committed after a higher id (normal with concurrent writers) is still delivered instead of being
+skipped for good. Delivery is at-least-once per reader within that window; order across
+*different* instances is not defined. A payload above 64 kB is not published (logged) — bridged
+events are signals, not data transport. The row format is unchanged, so instances of core ≤ 1.11
+and newer ones understand each other's events.
+
 Two rules keep one action from turning into N × N toasts: an event a handler emits *in reaction
 to a relayed event* (synchronously or from the task/thread spawned for it) is never published
 again — the originating instance already bridged its own reaction. That suppression ends at

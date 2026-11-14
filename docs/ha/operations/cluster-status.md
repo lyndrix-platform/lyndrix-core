@@ -15,8 +15,9 @@ Settings → **Cluster** (needs `admin:read`) shows, for the instance that answe
 - **Plugin placement**: placement and status per plugin, where its lease is held, `remote`
   markers for pinned plugins.
 - **Preflight**: every check with status, message and hint; *Re-run checks* evaluates them now.
-- **Coordinator**: TTL, heartbeat, poll interval, bridge counters (published/relayed), drain,
-  trusted proxies, database version.
+- **Coordinator**: TTL, heartbeat, poll interval, bridge counters (published/relayed; the API
+  also has `outbox`, `failures`, `dropped`, `expired`, `oversized`), drain, trusted proxies,
+  database version.
 
 The page refreshes on `cluster:changed` / `cluster:leader_changed` over SSE and every 15 s.
 

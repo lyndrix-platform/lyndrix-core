@@ -170,7 +170,9 @@ class Service:
 ### Cluster events
 
 `ctx.emit(topic, payload, cluster=True)` writes the event to the shared log; peers receive it on
-their local bus with `payload["_origin"] = <sender instance id>`. Use it for "my data changed,
+their local bus with `payload["_origin"] = <sender instance id>`. Your instance's events arrive in
+the order you emitted them and survive a short database outage (they are queued and sent
+afterwards); keep payloads small — above 64 kB an event is not published. Use it for "my data changed,
 re-read it" — **never** to fan work out N times. Your own emit still reaches your own subscribers
 without `_origin`, so check it before reacting to avoid doing the work twice.
 

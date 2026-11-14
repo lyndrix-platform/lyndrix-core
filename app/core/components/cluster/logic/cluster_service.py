@@ -352,6 +352,8 @@ class ClusterService:
             await self.leases.stop()
         except Exception:
             log.debug("CLUSTER: lease release on stop failed", exc_info=True)
+        if self.bridge.attached:
+            await self.bridge.flush()   # let the release broadcasts out before the bridge goes
         self.bridge.detach()
         try:
             await asyncio.wait_for(self.coordinator.stop(), timeout=_IO_TIMEOUT_S)
@@ -1014,7 +1016,7 @@ class ClusterService:
                 "ttl_s": self.ttl,
                 "heartbeat_s": self.heartbeat_s,
                 "poll_ms": self.poll_ms,
-                "bridge": {"attached": self.bridge.attached, "published": self.bridge.published, "relayed": self.bridge.relayed},
+                "bridge": self.bridge.status(),
                 "heartbeat": self.heartbeat_status(),
             },
             "instances": [i.to_dict() for i in self._instances],

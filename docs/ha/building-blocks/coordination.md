@@ -37,6 +37,10 @@ notifications, plugin state changes), so polling is cheap.
   is exactly the race that produces 1020 under MariaDB ≥ 11.6 defaults.
 - A fresh instance starts reading events at `MAX(id)`; the leader prunes events older than an
   hour, dead instance rows and expired keys every five minutes.
+- Event ids do not become visible in order (InnoDB assigns the id at INSERT, the row appears at
+  COMMIT; Galera adds certification): every poll re-reads the last 500 ids and delivers the ones
+  it has not seen (`coordinator.server.events_late` counts them). Publishing goes through a
+  per-instance outbox: ordered, retried while the database is away, bounded.
 - An instance that stops gracefully releases its leases, broadcasts `cluster:lease_released` (peers
   acquire immediately) and turns its row into a tombstone (`stopped_at`); peers show it as
   `restarting` for `LYNDRIX_RESTART_GRACE_SECONDS`, the leader prunes silent rows after
@@ -66,3 +70,7 @@ Core unit tests: `tests/cluster/test_db_coordinator.py` (two coordinators on one
 - `redis` driver not shipped.
 - Fan-out latency equals the poll interval (500 ms default) — fine for UI refreshes and plugin
   state, not meant for high-frequency data.
+- An event committed more than 500 ids "late", or emitted during a database outage longer than
+  five minutes (or beyond 1000 queued events), is lost; state that must converge anyway needs a
+  periodic re-read (plugins: the reconcile every five minutes; settings: not yet).
+- Events carry no sequence number: a receiver cannot detect a gap by itself.

@@ -25,9 +25,13 @@ Rules this driver follows:
   the loop's shared default executor: coordinator calls hanging on a dead
   database socket cannot use up the threads the rest of the process needs
   (request handlers, Vault, logins), and vice versa.
-* **Events are append-only** and read by ``id > last_seen``; a fresh instance
-  starts at ``MAX(id)`` so it never replays history. The leader prunes rows
-  older than one hour and instances that stopped heart-beating.
+* **Events are append-only**; a fresh instance starts at ``MAX(id)`` so it
+  never replays history. Readers do NOT assume that ids become visible in
+  order: InnoDB hands out AUTO_INCREMENT ids at INSERT and shows the row at
+  COMMIT (Galera: after certification), so id N can appear after N+1 was
+  read. Every poll therefore re-reads the last ``_EVENT_REREAD_WINDOW`` ids
+  and delivers the ones it has not seen yet. The leader prunes rows older than
+  one hour and instances that stopped heart-beating.
 
 Every method is ``async`` and runs its blocking SQL in a worker thread.
 
@@ -69,6 +73,9 @@ _RETRY_CODES = (1020, 1205, 1213)
 _EVENT_RETENTION = timedelta(hours=1)
 _PRUNE_INTERVAL_S = 300
 _EVENT_BATCH = 500
+# How far below the newest id a poll looks for rows that were committed late.
+# With "id > cursor" alone such a row was skipped for good.
+_EVENT_REREAD_WINDOW = 500
 # Released lease rows are kept (they carry the token counter); names nobody
 # asked for in a day are dropped so one-off lease names cannot pile up.
 _RELEASED_LEASE_RETENTION = timedelta(hours=24)
@@ -143,7 +150,10 @@ class DbCoordinator:
         self._executor: Optional[ThreadPoolExecutor] = None
         self._subscribers: list[EventCallback] = []
         self._poll_task: Optional[asyncio.Task] = None
-        self._last_event_id = 0
+        self._last_event_id = 0      # highest event id seen so far
+        self._event_floor = 0        # ids up to here are history from before this instance joined
+        self._seen_event_ids: set[int] = set()   # ids inside the re-read window that were handled
+        self.events_late = 0         # events that showed up below the cursor (committed out of order)
         self._last_prune = 0.0
         self._last_pool_refresh = 0.0
         self.pool_refreshes = 0
@@ -303,7 +313,8 @@ class DbCoordinator:
         if self.started:
             return
         await self._run(self.ensure_schema)
-        self._last_event_id = await self._run(self._max_event_id)
+        self._last_event_id = self._event_floor = await self._run(self._max_event_id)
+        self._seen_event_ids.clear()
         self._started_at = await self._run(self._now_sync)
         self.started = True
         self._poll_task = bus.create_tracked_task(self._poll_loop(), name="cluster:event_poll")
@@ -703,13 +714,27 @@ class DbCoordinator:
     def subscribe(self, callback: EventCallback) -> None:
         self._subscribers.append(callback)
 
-    def _fetch_events_sync(self, after_id: int) -> list[dict]:
+    def _fetch_events_sync(self, cursor: int) -> list[dict]:
+        """Events this instance has not handled yet: everything above the
+        cursor plus late-committed rows inside the re-read window below it.
+
+        Two steps so the common "nothing new" poll stays an index-only scan of
+        a few hundred ids: read the ids of the window, then fetch the full rows
+        (payloads) of the unseen ones only.
+        """
+        low = max(self._event_floor, cursor - _EVENT_REREAD_WINDOW)
         with self._engine().connect() as conn:
+            ids = conn.execute(
+                select(ClusterEvent.id).where(ClusterEvent.id > low).order_by(ClusterEvent.id)
+                .limit(_EVENT_REREAD_WINDOW + _EVENT_BATCH)
+            ).scalars().all()
+            unseen = [int(i) for i in ids if int(i) not in self._seen_event_ids]
+            if not unseen:
+                return []
             rows = conn.execute(
                 select(ClusterEvent.id, ClusterEvent.topic, ClusterEvent.payload, ClusterEvent.origin)
-                .where(ClusterEvent.id > after_id)
+                .where(ClusterEvent.id.in_(unseen))
                 .order_by(ClusterEvent.id)
-                .limit(_EVENT_BATCH)
             ).mappings().all()
         return [dict(r) for r in rows]
 
@@ -720,11 +745,19 @@ class DbCoordinator:
                 rows = await self._run(self._fetch_events_sync, self._last_event_id)
                 failures = 0
                 for row in rows:
-                    self._last_event_id = max(self._last_event_id, int(row["id"]))
+                    event_id = int(row["id"])
+                    self._seen_event_ids.add(event_id)
+                    if event_id < self._last_event_id:
+                        self.events_late += 1   # committed after a higher id had been read
+                    self._last_event_id = max(self._last_event_id, event_id)
                     if row["origin"] == self.instance_id:
                         continue
                     self.events_received += 1
                     self._dispatch(str(row["topic"]), dict(row["payload"] or {}), str(row["origin"]))
+                if rows:
+                    # Bounded memory: ids below the window are never looked at again.
+                    low = self._last_event_id - _EVENT_REREAD_WINDOW
+                    self._seen_event_ids = {i for i in self._seen_event_ids if i > low}
                 if time.monotonic() - self._last_prune > _PRUNE_INTERVAL_S and self._should_prune():
                     self._last_prune = time.monotonic()
                     await self._run(self._prune_sync)
@@ -780,6 +813,7 @@ class DbCoordinator:
             "last_event_id": self._last_event_id,
             "events_received": self.events_received,
             "events_published": self.events_published,
+            "events_late": self.events_late,
             "last_error": self.last_error,
             "pool_refreshes": self.pool_refreshes,
         }
