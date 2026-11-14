@@ -22,7 +22,22 @@ _ASSIGNABLE_ROLES = {"superadmin", "bot"}
 
 
 def _is_superadmin(identity: ApiIdentity) -> bool:
-    return identity.is_system or "superadmin" in identity.roles
+    # Never a scoped key: its scopes bound it, whoever the owner is.
+    return identity.is_superadmin
+
+
+def _require_unscoped(identity: ApiIdentity, action: str) -> None:
+    """Credential management needs a full credential (AZ-04).
+
+    A scope-restricted API key is a deliberately limited credential. If it
+    could mint a key, set a password or change the email it would simply grant
+    itself the owner's full power — scopes would bound nothing.
+    """
+    if identity.is_scoped:
+        raise HTTPException(
+            status_code=403,
+            detail=f"A scope-restricted API key cannot {action}; use a session or an unscoped key",
+        )
 
 
 def _require_superadmin_for(target, identity: ApiIdentity, action: str) -> None:
@@ -100,6 +115,9 @@ class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
+    # Required when a user changes their OWN password through PATCH (an
+    # administrator resetting somebody else's does not need it).
+    current_password: Optional[str] = None
     roles: Optional[List[str]] = None
     groups: Optional[List[str]] = None
 
@@ -144,6 +162,7 @@ def change_password(
     login attempt, so a wrong one answers 400 and too many wrong ones 429."""
     from core.components.auth.logic.login_guard import LoginRejected, client_host
 
+    _require_unscoped(identity, "change a password")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Cannot change another user's password")
     target = _user_service().get_by_username(username)
@@ -291,6 +310,7 @@ def get_user(
 async def update_user(
     username: str,
     payload: UserUpdateRequest,
+    request: Request,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     """Self-service for full_name/email/password (the React dashboard lets any
@@ -298,7 +318,12 @@ async def update_user(
     ``admin:write``, and role changes additionally require the caller to be
     superadmin. "Changed" means the field is present in the payload AND
     differs from the stored value — echoing back an unchanged value never
-    403s."""
+    403s.
+
+    Changing your OWN password needs ``current_password`` (422 without it, 400
+    when it is wrong, 429 after too many wrong ones) — a stolen session must
+    not be enough to take the account over. A scope-restricted API key can
+    change neither password nor email (403)."""
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
 
@@ -347,10 +372,43 @@ async def update_user(
         and payload.email.strip().casefold() != (current.email or "").strip().casefold()
     )
     if payload.password is not None:
+        _require_unscoped(identity, "change a password")
         _require_superadmin_for(current, identity, "reset the password")
     if email_changes:
+        _require_unscoped(identity, "change an email address")
         # The email is what an LDAP/OIDC identity is auto-linked by.
         _require_superadmin_for(current, identity, "change the email")
+
+    if is_self and payload.password is not None:
+        # Self-service: prove knowledge of the current password, as the
+        # dedicated POST /{username}/password endpoint always did. Runs as a
+        # throttled login attempt off the event loop.
+        if not payload.current_password:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Changing your own password requires your current password "
+                    "(field 'current_password', or POST /api/users/{username}/password — "
+                    "in the app: Settings → Profile → Password)"
+                ),
+            )
+        from core.components.auth.logic.auth_service import auth_service
+        from core.components.auth.logic.login_guard import LoginRejected, client_host
+
+        try:
+            confirmed = await asyncio.to_thread(
+                auth_service.verify_local_login,
+                str(current.username), payload.current_password, client_host(request),
+            )
+        except LoginRejected as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        if confirmed is None:
+            # 400, not 401: the session is fine, only the confirmation failed.
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     # Hash off the event loop before opening the DB session (Argon2 is heavy).
     hashed = (
@@ -462,6 +520,9 @@ def create_api_key(
 ):
     """Self-service: any authenticated user may mint their own keys. Creating
     a key for another user requires ``admin:write``."""
+    # A scoped key cannot mint keys at all — so every key in existence is
+    # bounded by the credential that created it (new scopes ⊆ minter's scopes).
+    _require_unscoped(identity, "create API keys")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + key insert are blocking DB calls.
@@ -488,6 +549,9 @@ def revoke_api_key(
 ):
     """Self-service: any authenticated user may revoke their own keys. Revoking
     another user's key requires ``admin:write``."""
+    if identity.is_scoped and not (username == identity.username and key_id == identity.key_id):
+        # A scoped key may retire ITSELF, nothing else.
+        _require_unscoped(identity, "revoke other API keys or sessions")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + revoke are blocking DB calls.

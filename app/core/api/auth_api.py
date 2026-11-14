@@ -498,14 +498,18 @@ def my_access(identity: ApiIdentity = Depends(require_api_auth)):
     from core.components.auth.logic import access_service
     from core.components.auth.logic.user_service import user_service
 
-    is_superadmin = identity.is_system or ("superadmin" in identity.roles)
+    # What THIS credential may do: a scope-restricted key reports its scoped
+    # view (and is never "superadmin"), a session the owner's full view.
+    is_superadmin = identity.is_superadmin
     effective = access_service.get_effective_permissions(identity.username)
+    if identity.is_scoped:
+        effective = frozenset(p for p in effective if identity.allows(p))
 
     user = user_service.get_by_username(identity.username)
     groups = list(getattr(user, "groups", None) or []) if user else []
 
     def _allowed(perm: str) -> bool:
-        return is_superadmin or access_service.has_permission(effective, perm)
+        return identity.allows(perm)
 
     plugins: Dict[str, dict] = {}
     try:

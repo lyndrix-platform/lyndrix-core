@@ -707,7 +707,7 @@ async def set_runtime_config(
     # The system API key is the master credential (an ``is_system`` identity
     # that bypasses every permission check): admin:write alone must not be able
     # to mint it — superadmin or the system key itself only.
-    is_superadmin = identity.is_system or "superadmin" in (identity.roles or [])
+    is_superadmin = identity.is_superadmin   # never a scope-restricted key
     if SYSTEM_API_KEY in updates and not is_superadmin:
         raise HTTPException(status_code=403, detail="Only a superadmin may set the system API key")
 

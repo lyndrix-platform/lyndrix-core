@@ -23,7 +23,7 @@ import secrets
 import time
 from typing import Optional, Set
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from core.api.security import ApiIdentity, optional_api_auth, require_api_auth
@@ -136,6 +136,18 @@ def _connection_allows(username: str | None, permission: str) -> bool:
         return False
 
 
+def _may_join_authenticated_stream(identity: Optional[ApiIdentity]) -> bool:
+    """Whether a header-authenticated caller gets the authenticated topic set.
+
+    A ticket (and the stream opened with it) carries the user name only, so a
+    scope-restricted key would receive everything its owner may see. It is
+    therefore admitted only when its scopes cover general read access.
+    """
+    if identity is None:
+        return False
+    return not identity.is_scoped or identity.allows("api:read")
+
+
 def _mint_stream_ticket(username: str) -> str:
     payload = _b64url_encode(
         json.dumps({"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}).encode("utf-8")
@@ -170,7 +182,15 @@ async def mint_stream_ticket(identity: ApiIdentity = Depends(require_api_auth)):
     Clients call this endpoint (header-authenticated) right before connecting and
     pass the returned ticket as ``/api/events?ticket=…``. Tickets are process-local
     and expire after ``expires_in`` seconds — mint a fresh one per (re)connect.
+
+    A scope-restricted API key gets a ticket only when its scopes include
+    ``api:read`` (403 otherwise): the ticket stands for the whole account.
     """
+    if not _may_join_authenticated_stream(identity):
+        raise HTTPException(
+            status_code=403,
+            detail="This API key's scopes do not include api:read — no authenticated event stream",
+        )
     return {"ticket": _mint_stream_ticket(identity.username), "expires_in": _TICKET_TTL_SECONDS}
 
 
@@ -219,6 +239,8 @@ async def sse_stream(
     Each event payload is a JSON object: ``{"topic": "...", "payload": {...}}``.
     """
     ticket_user = _verify_stream_ticket(ticket) if ticket else None
+    if identity is not None and not _may_join_authenticated_stream(identity):
+        identity = None  # scoped key without api:read → public topics only
     allowed = _AUTH_TOPICS if (identity or ticket_user) else _PUBLIC_TOPICS
     username = identity.username if identity else ticket_user
     q: asyncio.Queue = asyncio.Queue(maxsize=128)

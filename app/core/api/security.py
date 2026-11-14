@@ -97,6 +97,21 @@ class ApiIdentity:
     # When set (non-None), the credential restricts access to this subset of
     # permissions (used by per-user API keys with explicit scopes).
     key_scopes: Optional[List[str]] = None
+    # Row id of the presented per-user key (None for other methods) — lets a
+    # route tell "this very credential" from the owner's other keys.
+    key_id: Optional[int] = None
+
+    @property
+    def is_scoped(self) -> bool:
+        """True for a credential that is limited to ``key_scopes``."""
+        return self.key_scopes is not None
+
+    @property
+    def is_superadmin(self) -> bool:
+        """The unbounded tier: the system key, or an UNSCOPED credential of an
+        account with the ``superadmin`` flag. A scoped key of such an account
+        is bounded by its scopes and never counts as superadmin."""
+        return self.is_system or ("superadmin" in (self.roles or []) and not self.is_scoped)
 
     def effective_permissions(self) -> frozenset:
         """The owner's effective permission set (resolving lazily if needed)."""
@@ -115,29 +130,29 @@ class ApiIdentity:
         Return True if this identity is authorized for ``permission``.
 
         - The master system key bypasses all permission checks.
-        - The ``superadmin`` system flag bypasses permission checks (break-glass).
+        - A scoped per-user key FIRST requires the permission to be within its
+          ``key_scopes`` (per-plugin fallback included) — whoever the owner
+          is. Scopes are the boundary of the credential, so they are applied
+          before the superadmin bypass: a superadmin's "read-only" key is
+          read-only.
+        - The ``superadmin`` system flag then bypasses the owner's permission
+          set (break-glass).
         - Otherwise the precomputed effective set decides, including the
           per-plugin fallback (global api:read/write satisfies plugin:*:api:*).
-        - A scoped per-user key additionally requires the permission to be
-          within its ``key_scopes`` (same fallback semantics).
         """
         if self.is_system:
-            return True
-
-        if "superadmin" in self.roles:
             return True
 
         try:
             from core.components.auth.logic import access_service
 
-            base_allowed = access_service.has_permission(
-                self.effective_permissions(), permission
-            )
-            if self.key_scopes is not None:
-                return base_allowed and access_service.has_permission(
-                    frozenset(self.key_scopes), permission
-                )
-            return base_allowed
+            if self.key_scopes is not None and not access_service.has_permission(
+                frozenset(self.key_scopes), permission
+            ):
+                return False
+            if "superadmin" in self.roles:
+                return True
+            return access_service.has_permission(self.effective_permissions(), permission)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(f"API authz check failed for '{permission}': {exc}")
             return False
@@ -282,6 +297,7 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
         extra_permissions=extra,
         permissions=_resolve_effective(resolved.username),
         key_scopes=resolved.scopes or None,
+        key_id=resolved.id,
     )
 
 

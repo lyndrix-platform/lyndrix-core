@@ -28,13 +28,10 @@ def _visible_plugins(identity: ApiIdentity, candidates: list[str]) -> list[str]:
 
     Fails closed: when the permission set cannot be resolved, nothing is visible.
     """
-    if identity.is_system or "superadmin" in (identity.roles or []):
-        return list(candidates)
     try:
-        from core.components.auth.logic import access_service
-
-        effective = identity.effective_permissions()
-        return [pid for pid in candidates if access_service.has_permission(effective, f"plugin:{pid}")]
+        # identity.allows is the ONE authorization decision: system key,
+        # key scopes (before the superadmin bypass) and the owner's grants.
+        return [pid for pid in candidates if identity.allows(f"plugin:{pid}")]
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"NAV API: visibility derivation failed for '{identity.username}': {exc}")
         return []

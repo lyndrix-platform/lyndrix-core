@@ -80,9 +80,11 @@ def test_admin_cannot_delete_a_superadmin_or_revoke_its_keys(client, auth_db, ad
     assert client.get("/api/auth/me", headers=superadmin).status_code == 200      # still there, key intact
 
 
-def test_superadmin_and_ordinary_targets_are_unaffected(client, admin, superadmin):
-    assert client.patch("/api/users/breakglass", headers=superadmin,
-                        json={"password": "dummy-rotated-pass-not-real", "email": "bg@corp.invalid"}).status_code == 200
+def test_superadmin_and_ordinary_targets_are_unaffected(client, admin, superadmin, passwords):
+    assert client.patch("/api/users/breakglass", headers=superadmin, json={
+        "password": "dummy-rotated-pass-not-real", "current_password": passwords["breakglass"],
+        "email": "bg@corp.invalid",
+    }).status_code == 200
     # Ordinary accounts: admin:write keeps its full reach.
     assert client.patch("/api/users/viewer", headers=admin,
                         json={"password": "dummy-reset-pass-not-real"}).status_code == 200

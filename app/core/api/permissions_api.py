@@ -162,7 +162,8 @@ def _same_username(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def _is_superadmin(identity: ApiIdentity) -> bool:
-    return identity.is_system or "superadmin" in identity.roles
+    # The system key or an UNSCOPED credential of a superadmin account.
+    return identity.is_superadmin
 
 
 # ── Catalog ──────────────────────────────────────────────────────────────────
