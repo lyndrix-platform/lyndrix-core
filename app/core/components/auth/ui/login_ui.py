@@ -2,6 +2,7 @@ from nicegui import ui
 from config import settings
 from core.logger import get_logger
 from core.i18n import t
+from core.components.auth.logic.identity_link_service import IdentityLinkError
 from core.components.auth.logic.providers.registry import provider_registry
 from core.session import update_user_session
 from ui.theme import UIStyles, apply_theme
@@ -38,9 +39,15 @@ def render_login_page():
                     )
                     return
 
-                result = await provider_registry.authenticate(
-                    username, pass_input.value
-                )
+                try:
+                    result = await provider_registry.authenticate(
+                        username, pass_input.value
+                    )
+                except IdentityLinkError as exc:
+                    # Fail closed: correct credentials, but no local profile
+                    # could be bound to the login — no session.
+                    log.error(f"AUTH: login denied, identity linking failed: {exc}")
+                    result = None
                 if result:
                     update_user_session(
                         {

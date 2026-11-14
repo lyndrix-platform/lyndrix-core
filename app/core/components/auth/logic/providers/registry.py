@@ -82,32 +82,40 @@ class AuthProviderRegistry:
         in the chain, attempt local authentication as a last-resort fallback so
         the built-in admin account remains accessible even when external providers
         (LDAP, OIDC) are misconfigured or unreachable.
+
+        Raises ``IdentityLinkError`` when the credentials were accepted but the
+        login could not be bound to a local profile: the caller denies the
+        login (503), it is not a credential failure.
         """
         for provider in self.get_form_providers():
             try:
                 result = await provider.authenticate(username, password)
-                if result:
-                    return await self.link_identity(result)
             except Exception as e:
                 log.error(
                     f"AUTH: Provider '{provider.provider_id}' raised an exception: {e}",
                     exc_info=True,
                 )
+                continue
+            if result:
+                # Outside the try: a linking failure must end the login, not
+                # fall through to the next provider as if the password was wrong.
+                return await self.link_identity(result)
 
         # Fallback: try local provider if it wasn't part of the active chain.
         if "local" not in self._providers:
+            result = None
             try:
                 from .local import LocalProvider
                 fallback = LocalProvider()
                 result = await fallback.authenticate(username, password)
-                if result:
-                    log.warning(
-                        f"AUTH: All configured providers failed; local fallback succeeded "
-                        f"for '{username}'. Consider adding 'local' to LYNDRIX_AUTH_PROVIDERS."
-                    )
-                    return await self.link_identity(result)
             except Exception as e:
                 log.error(f"AUTH: Local fallback raised an exception: {e}", exc_info=True)
+            if result:
+                log.warning(
+                    f"AUTH: All configured providers failed; local fallback succeeded "
+                    f"for '{username}'. Consider adding 'local' to LYNDRIX_AUTH_PROVIDERS."
+                )
+                return await self.link_identity(result)
 
         return None
 
@@ -119,17 +127,25 @@ class AuthProviderRegistry:
         ``identity_link_service.resolve`` — creating/linking the local User +
         UserIdentity rows and rewriting the AuthResult onto the local username,
         system-flag roles and extra_permissions. Sync DB work → worker thread.
+
+        Fails closed: raises ``IdentityLinkError`` when no link could be
+        committed. The provider's own result is never returned in its place —
+        it carries the EXTERNAL username, and a session built from it would
+        belong to whichever local account happens to have that name.
         """
         import asyncio
 
-        try:
-            from core.components.auth.logic import identity_link_service
+        from core.components.auth.logic import identity_link_service
 
+        try:
             linked = await asyncio.to_thread(identity_link_service.resolve, result)
-            return linked or result
-        except Exception as e:  # pragma: no cover - defensive
-            log.warning(f"AUTH: identity linking failed: {e}")
-            return result
+        except identity_link_service.IdentityLinkError:
+            raise
+        except Exception as e:  # pragma: no cover - defensive: resolve() already wraps
+            raise identity_link_service.IdentityLinkError(f"identity linking failed: {e}") from e
+        if linked is None or not linked.linked_user_id:
+            raise identity_link_service.IdentityLinkError("identity linking returned no local profile")
+        return linked
 
 
 # Singleton — imported by auth_service and login_ui

@@ -22,6 +22,11 @@ class AuthResult:
     # OIDC email_verified claim). Gates trusted-email auto-linking — an
     # unverified email never merges accounts (spoofing protection).
     email_verified: bool = False
+    # ``User.id`` of the LOCAL profile this login was bound to. Set only by
+    # ``identity_link_service.resolve`` after the link is committed; a result
+    # without it has not been linked and must never be turned into a session or
+    # token (see ``IdentityLinkError``).
+    linked_user_id: Optional[str] = None
 
 
 class AuthProvider(ABC):

@@ -173,6 +173,15 @@ def _describe_client(request: Request) -> str:
     return f"{browser} on {os_name}" if os_name else browser
 
 
+def _link_failed_response() -> HTTPException:
+    """503 for a login whose identity could not be linked to a local profile."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Login is temporarily unavailable: your account could not be linked to a local profile. Please try again.",
+        headers={"Retry-After": "2"},
+    )
+
+
 @auth_router.post("/login", response_model=LoginResponse, summary="Obtain a session token")
 async def login(payload: LoginRequest, request: Request):
     """
@@ -186,6 +195,7 @@ async def login(payload: LoginRequest, request: Request):
     60s reject with 429 before the provider chain (and its Argon2 cost) ever
     runs — an unthrottled login is a CPU-exhaustion amplifier.
     """
+    from core.components.auth.logic.identity_link_service import IdentityLinkError
     from core.components.auth.logic.providers.registry import provider_registry
     from core.components.auth.logic.api_key_service import api_key_service
 
@@ -198,7 +208,13 @@ async def login(payload: LoginRequest, request: Request):
             headers={"Retry-After": str(retry)},
         )
 
-    result = await provider_registry.authenticate(payload.username, payload.password)
+    try:
+        result = await provider_registry.authenticate(payload.username, payload.password)
+    except IdentityLinkError:
+        # The credentials were fine but no local profile could be bound to the
+        # login. Deny it (no token for an unlinked identity) without counting a
+        # failed attempt; the client may simply retry.
+        raise _link_failed_response()
     if result is None:
         await _login_record_failure(rl_key)
         raise HTTPException(
