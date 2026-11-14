@@ -15,7 +15,12 @@ from .models import ModuleManifest, PluginState, PluginVersionHistory
 from .models import PluginOperation, PluginOperationInstance
 from .context import ModuleContext
 from config import settings
-from core.i18n import register_client_namespace, register_plugin_locales
+from core.i18n import (
+    register_client_namespace,
+    register_plugin_locales,
+    unregister_client_namespace,
+    unregister_plugin_locales,
+)
 
 log = get_logger("Core:ModuleManager")
 
@@ -280,6 +285,9 @@ class ModuleManager:
                 # plugin; the cluster reconcile only treats "row gone" as an
                 # uninstall-on-a-peer when it is True.
                 "persisted": False,
+                # Where this plugin's locale files were registered from (None for
+                # core modules) — unload_module drops exactly that directory.
+                "locales_path": plugin_dir_path if is_plugin else None,
             }
 
             if not is_plugin:
@@ -321,6 +329,8 @@ class ModuleManager:
         if self._find_plugin_id_by_folder(module_name):
             return  # the folder backs a registered plugin — its modules are live
         package = f"{prefix}.{module_name}"
+        # Strings registered before the failure: the next load must re-read them.
+        unregister_plugin_locales(Path(self.base_path) / prefix.replace('.', '/') / module_name)
         self._forget_plugin_models(package)
         stale = [m for m in sys.modules if m == package or m.startswith(package + ".")]
         for name in stale:
@@ -1551,6 +1561,10 @@ class ModuleManager:
         except Exception:
             pass
 
+        # The plugin's strings go with it, so a reload/upgrade re-reads the
+        # locale files instead of serving the previous version's strings.
+        self._forget_plugin_locales(module_id, entry)
+
         # --- VENDORING: Clean up the plugin's private dependency path ---
         if entry["manifest"].type == "PLUGIN":
             try:
@@ -1594,6 +1608,23 @@ class ModuleManager:
             
         log.info(f"UNLOAD: Module '{module_id}' unloaded from memory.")
         return True
+
+    def _forget_plugin_locales(self, module_id: str, entry: dict) -> None:
+        """Drop the locale directory and the client namespace a plugin registered
+        at load time. Never raises — a failure here must not block an unload."""
+        try:
+            locales_path = entry.get("locales_path")
+            if locales_path is not None:
+                unregister_plugin_locales(Path(locales_path))
+            namespace = getattr(entry.get("manifest"), "i18n_namespace", None)
+            shared = any(
+                getattr(other.get("manifest"), "i18n_namespace", None) == namespace
+                for other_id, other in self.registry.items() if other_id != module_id
+            )
+            if namespace and not shared:
+                unregister_client_namespace(namespace)
+        except Exception as e:
+            log.warning(f"UNLOAD: could not drop locales of '{module_id}': {e}")
 
     @staticmethod
     def _forget_plugin_models(base_package_name: str) -> int:
