@@ -12,7 +12,7 @@ from core.api import require_permission
 from ..logic.mount_guardian import (
     MountGuardian, REPAIR_MODES, REPAIR_MODES_SECRET, is_valid_owner,
 )
-from ..providers.docker_provider import DockerProvider
+from ..providers.docker_provider import DockerProvider, validate_cleanup_request
 from ..registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -158,11 +158,17 @@ async def docker_cleanup(
     """
     Clean up stale Docker runner containers (requires permission).
     """
+    # SC-09: a literal, non-empty prefix and a minimum age — an empty prefix
+    # with age 0 would force-remove every container on the Docker host.
+    try:
+        prefix, max_age = validate_cleanup_request(request.prefix, request.max_age_minutes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     try:
         provider = get_docker_provider()
         count, error = await provider.cleanup_stale(
-            prefix=request.prefix,
-            max_age_minutes=request.max_age_minutes,
+            prefix=prefix,
+            max_age_minutes=max_age,
         )
         return {"removed": count, "error": error}
     except Exception as e:

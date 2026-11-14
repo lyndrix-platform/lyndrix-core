@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,29 @@ def own_container_id() -> Optional[str]:
         except Exception:
             continue
     return os.environ.get("HOSTNAME") or None
+
+
+# --- Cleanup guard rails (SC-09) -------------------------------------------------
+# cleanup_stale ends in ``docker rm -f`` for everything whose name starts with the
+# prefix. An empty or pattern-like prefix ("", ".*") with age 0 removed every
+# container on the host — database, Vault and the core itself included.
+# A prefix is a literal name stem that ends in a separator, e.g. "aac-runner-".
+_CLEANUP_PREFIX_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,62}[-_.]")
+MIN_CLEANUP_AGE_MINUTES = 5
+
+
+def validate_cleanup_request(prefix, max_age_minutes) -> tuple[str, int]:
+    """Return ``(prefix, max_age_minutes)`` or raise ``ValueError`` with a clear message."""
+    if not isinstance(prefix, str) or not _CLEANUP_PREFIX_RE.fullmatch(prefix):
+        raise ValueError(
+            "prefix must be a literal container-name prefix of at least 4 characters "
+            "that ends in '-', '_' or '.' (e.g. 'aac-runner-')"
+        )
+    if isinstance(max_age_minutes, bool) or not isinstance(max_age_minutes, int):
+        raise ValueError("max_age_minutes must be an integer")
+    if max_age_minutes < MIN_CLEANUP_AGE_MINUTES:
+        raise ValueError(f"max_age_minutes must be at least {MIN_CLEANUP_AGE_MINUTES}")
+    return prefix, max_age_minutes
 
 
 class DockerProvider(BaseSocketProvider):
@@ -103,19 +127,28 @@ class DockerProvider(BaseSocketProvider):
     async def cleanup_stale(
         self, prefix: str = "aac-runner-", max_age_minutes: int = 60
     ) -> Tuple[int, Optional[str]]:
-        """Clean up stale Docker containers."""
+        """Remove containers named ``<prefix>*`` that are older than ``max_age_minutes``.
+
+        Raises ``ValueError`` for an unsafe prefix or age (see
+        ``validate_cleanup_request``). The core's own container is never removed.
+        """
+        prefix, max_age_minutes = validate_cleanup_request(prefix, max_age_minutes)
         if not self.is_available:
             return 0, "Docker socket or CLI unavailable"
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         removed_count = 0
         errors = []
+        own_id = own_container_id() or ""
+        own_names = {own_id, os.environ.get("HOSTNAME") or "", socket.gethostname() or ""} - {""}
 
         code, stdout, stderr = await self._run_docker(
             "ps",
             "-a",
+            "--no-trunc",
             "--filter",
-            f"name=^{prefix}",
+            # The filter is a regex: the prefix is matched literally.
+            f"name=^{re.escape(prefix)}",
             "--format",
             "{{.ID}}|{{.Names}}|{{.Status}}|{{.Label \"iac_job_id\"}}|{{.Label \"iac_task_name\"}}",
         )
@@ -128,6 +161,13 @@ class DockerProvider(BaseSocketProvider):
                 continue
             container_id = parts[0]
             container_name = parts[1] if len(parts) > 1 else container_id
+            # Defence in depth: whatever the daemon returned, only literal
+            # prefix matches are touched, and never this process's container.
+            if not container_name.lstrip("/").startswith(prefix):
+                continue
+            if self._is_own_container(container_id, container_name, own_id, own_names):
+                self.logger.warning(f"Cleanup skipped the core's own container: {container_name}")
+                continue
             try:
                 created_at = await self._get_container_created_at(container_id)
                 if created_at < cutoff_time:
@@ -139,6 +179,18 @@ class DockerProvider(BaseSocketProvider):
 
         error_msg = "; ".join(errors) if errors else None
         return removed_count, error_msg
+
+    @staticmethod
+    def _is_own_container(container_id: str, container_name: str, own_id: str, own_names: set) -> bool:
+        """True when a ``docker ps`` row is the container this process runs in."""
+        name = container_name.lstrip("/")
+        if name in own_names or container_id in own_names:
+            return True
+        # Full id vs. short id (HOSTNAME defaults to the 12-character short id).
+        return any(
+            len(candidate) >= 12 and (container_id.startswith(candidate) or candidate.startswith(container_id))
+            for candidate in own_names
+        )
 
     async def list_containers(self, prefix: str = "aac-runner-") -> list[dict]:
         """List containers that match a prefix, including runner labels."""
