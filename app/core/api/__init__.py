@@ -96,6 +96,23 @@ acquisition carries a token that only grows::
 
 ``acquired`` gets the token only when it declares a ``token`` parameter.
 
+Instance lifecycle (API 1.14): a peer is ``alive``, ``draining`` (SIGTERM
+received), ``restarting`` (stopped on purpose, expected back within
+``LYNDRIX_RESTART_GRACE_SECONDS``) or ``dead``::
+
+    ctx.instance_state("docker-auto-runner")   # {"state", "known", "roles", "incarnation",
+                                               #  "last_heartbeat", "age_s"}; "unknown" = cannot tell now
+    ctx.role_state("runner")                   # {"role", "state", "instances": {id: state}}
+    ctx.has_live_role("runner")                # False only when the role is known to be gone
+    ctx.incarnation                            # boot nonce of this process (new on every start)
+
+    @ctx.subscribe("cluster:instance_lost")    # LOCAL event, once per dead peer on every live instance:
+    async def _lost(p): ...                    # {instance_id, roles, last_heartbeat, incarnation, graceful}
+
+``ctx.cluster_instances`` entries additionally carry ``state``, ``incarnation``,
+``heartbeat_at`` and ``age_s``; in cluster mode the list is empty while this
+instance has no usable view of the registry.
+
 ``ctx.emit`` is thread-safe since core 1.7: a call from a worker thread
 (``asyncio.to_thread`` code) is handed over to the application loop.
 

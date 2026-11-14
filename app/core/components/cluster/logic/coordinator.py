@@ -15,6 +15,36 @@ from typing import Any, Awaitable, Callable, Optional, Protocol, Union
 # callback(topic, payload, origin_instance_id) — sync or async
 EventCallback = Callable[[str, dict, str], Union[Awaitable[None], None]]
 
+# Lifecycle states of an instance as its peers see it:
+#   alive       heart-beating within the lease TTL
+#   draining    heart-beating, but it announced that it is shutting down
+#   restarting  stopped on purpose a moment ago (tombstone, or it went silent
+#               while draining) and is expected back within the restart grace
+#   dead        no heartbeat for a TTL without having said goodbye, or the
+#               restart grace is over
+# ("unknown" is not a state of the instance but of the observer: its own view
+# of the registry is missing or stale — ClusterService.instance_state.)
+INSTANCE_STATES = ("alive", "draining", "restarting", "dead")
+
+
+class InstanceIdConflict(RuntimeError):
+    """Another running process registered under this instance id after us."""
+
+
+def instance_state(*, age_s: float, ttl: float, grace_s: float, draining: bool,
+                   stopped_for_s: Optional[float]) -> str:
+    """Classify a registry row. ``stopped_for_s`` is the age of its tombstone
+    (None = the row is not a tombstone)."""
+    if stopped_for_s is not None:
+        return "restarting" if stopped_for_s <= grace_s else "dead"
+    if age_s <= ttl:
+        return "draining" if draining else "alive"
+    # Silent after it announced the drain: it was stopping on purpose and was
+    # killed before it could leave a tombstone (container stop timeout).
+    if draining and age_s <= grace_s:
+        return "restarting"
+    return "dead"
+
 
 @dataclass
 class InstanceInfo:
@@ -26,13 +56,24 @@ class InstanceInfo:
     started_at: Optional[datetime]
     heartbeat_at: Optional[datetime]
     age_s: float            # seconds since the last heartbeat (DB clock)
-    alive: bool             # age_s <= lease TTL
+    alive: bool             # heart-beating within the lease TTL (state alive or draining)
     is_self: bool
     meta: dict = field(default_factory=dict)
+    # Lifecycle state (core ≥ 1.12), see INSTANCE_STATES. Derived from ``alive``
+    # when a driver/test does not set it.
+    state: str = ""
+    # Boot nonce of the process that owns the row: a restart under a fixed
+    # instance id shows as a new incarnation. None for rows of core ≤ 1.11.
+    incarnation: Optional[str] = None
+    stopped_at: Optional[datetime] = None   # set while the row is a tombstone of a graceful stop
+
+    def __post_init__(self) -> None:
+        if not self.state:
+            self.state = "alive" if self.alive else "dead"
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        for key in ("started_at", "heartbeat_at"):
+        for key in ("started_at", "heartbeat_at", "stopped_at"):
             value = data.get(key)
             data[key] = value.isoformat() if isinstance(value, datetime) else value
         data["age_s"] = round(self.age_s, 1)

@@ -34,8 +34,29 @@ instances that have the Docker socket and the git working trees the `runner` rol
 
 Each instance heart-beats into `cluster_instances` every `LYNDRIX_LEASE_HEARTBEAT_SECONDS` with
 its roles, versions, readiness and two fingerprints (of `STORAGE_SECRET` and of the loaded plugin
-set) that the preflight compares. An instance whose heartbeat is older than the lease TTL counts
-as dead.
+set) that the preflight compares.
+
+Peers see an instance in one of four states (`GET /api/cluster` → `instances[].state`,
+`ctx.instance_state()`):
+
+| State | Meaning |
+|---|---|
+| `alive` | heart-beating within the lease TTL |
+| `draining` | heart-beating, SIGTERM received: `/api/ready` is 503, it gets no new shards, its leases are handed over |
+| `restarting` | stopped on purpose a moment ago — it left a *tombstone* (the row stays, `stopped_at` set), or it fell silent while draining (killed before it could) — and is expected back within `LYNDRIX_RESTART_GRACE_SECONDS` (90 s) |
+| `dead` | no heartbeat for a TTL without a goodbye, or the restart grace is over. Every live instance emits the local event `cluster:instance_lost` once |
+
+A graceful stop used to delete the row at once: the single runner "vanished" for the whole boot
+time of its replacement and the IaC Orchestrator reported "No runner instance online" after every
+core rollout, while a *crashed* instance stayed visible for a TTL. Now a planned restart keeps the
+role `restarting`: `ctx.has_live_role()` stays true and pinned plugins answer 503 with
+`Retry-After: 5` and `"role_state": "restarting"` in `X-Plugin-Runtime`.
+
+Every process has an **incarnation** (a boot nonce, `cluster_instances.incarnation`): a restart
+under a fixed instance id (`docker-auto-runner`) is a new incarnation with a fresh `started_at`,
+and leases of the previous one are never silently inherited (new fencing token). An instance that
+cannot read the registry (just started, database unreachable) answers `unknown` about its peers —
+never "dead".
 
 ## Leases and the leader
 
@@ -102,9 +123,13 @@ Heartbeat, lease renewal and preflight are three independent loops. The heartbea
 write the registry row and read the peer view at a fixed rate; it never waits for a preflight check
 or for the storage mount (the marker file is written by a dedicated thread, one job at a time).
 
-On SIGTERM with `LYNDRIX_DRAIN_SECONDS > 0`: `/api/ready` flips to 503, the instance waits for the
-load balancer to notice, closes every SSE stream with an `event: reconnect`, releases its leases
-and only then lets uvicorn shut down. A second SIGTERM forces an immediate exit.
+On SIGTERM with `LYNDRIX_DRAIN_SECONDS > 0`, immediately: `/api/ready` flips to 503, one heartbeat
+publishes `draining`, and the leases are handed over (`lost` callbacks, a bounded wait for async
+ones, release, broadcast) — a peer is leader and runs the leased work about a second later, while
+this instance still finishes in-flight requests. Then it waits for the load balancer to notice,
+closes every SSE stream with an `event: reconnect`, leaves its tombstone and lets uvicorn shut
+down. A second SIGTERM forces an immediate exit. Because the hand-over happens first, a container
+runtime that kills the process at the end of the drain no longer leaves leases behind.
 
 ## Shared short-lived state
 

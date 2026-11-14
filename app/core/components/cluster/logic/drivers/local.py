@@ -8,6 +8,7 @@ identically in ``single`` and ``cluster`` mode.
 """
 from __future__ import annotations
 
+import secrets
 import socket
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,8 +27,9 @@ class LocalCoordinator:
     # not fence itself when a renewal is late (e.g. after a stalled event loop).
     self_fencing = False
 
-    def __init__(self, *, instance_id: str, ttl: int) -> None:
+    def __init__(self, *, instance_id: str, ttl: int, incarnation: Optional[str] = None) -> None:
         self.instance_id = instance_id
+        self.incarnation = incarnation or secrets.token_hex(8)
         self.ttl = int(ttl)
         self._started_at = _utcnow()
         self._heartbeat_at = self._started_at
@@ -71,6 +73,8 @@ class LocalCoordinator:
                 alive=True,
                 is_self=True,
                 meta=dict(self._meta),
+                state="draining" if self._meta.get("draining") else "alive",
+                incarnation=self.incarnation,
             )
         ]
 

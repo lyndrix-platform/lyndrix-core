@@ -64,7 +64,7 @@ def test_expired_lease_is_taken_over_and_force_release_works(engine):
     asyncio.run(run())
 
 
-def test_heartbeat_registers_instances_and_stop_deregisters(engine):
+def test_heartbeat_registers_instances_and_stop_leaves_tombstones(engine):
     a, b = _coord(engine, "a"), _coord(engine, "b")
 
     async def run():
@@ -82,7 +82,10 @@ def test_heartbeat_registers_instances_and_stop_deregisters(engine):
         assert len(await b.instances()) == 2
         await a.stop()
         await b.stop()
-        assert await _coord(engine, "c").instances() == []
+        # A graceful stop leaves a tombstone (core ≥ 1.12): not alive, "restarting".
+        gone = await _coord(engine, "c").instances()
+        assert [(i.instance_id, i.alive, i.state) for i in gone] == [("a", False, "restarting"),
+                                                                     ("b", False, "restarting")]
 
     asyncio.run(run())
 

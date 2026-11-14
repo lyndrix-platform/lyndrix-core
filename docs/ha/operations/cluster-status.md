@@ -7,7 +7,9 @@ Settings → **Cluster** (needs `admin:read`) shows, for the instance that answe
 - **This instance**: id, host, roles, leader marker, ready/not ready with reasons, draining,
   uptime, coordinator driver. In single mode a hint explains how to enable cluster mode.
 - **Instances**: every row of `cluster_instances` with roles, core/API version, last heartbeat,
-  alive/stale, ready/draining; the leader carries a crown.
+  alive/stale, ready/draining; the leader carries a crown. The API additionally reports `state`
+  (`alive`, `draining`, `restarting`, `dead`), `incarnation` and `stopped_at` per instance and the
+  totals in `states`.
 - **Leases**: name, holder, time to expiry; *Release* (`admin:write`) hands a lease over — the
   peers acquire it within a second. Use it to move the leader or a plugin's background work.
 - **Plugin placement**: placement and status per plugin, where its lease is held, `remote`

@@ -243,8 +243,17 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     # 6. role coverage
     alive_roles = {r for i in alive for r in i.roles} | set(service.roles)
     pinned = _pinned_roles()
+    # A role whose only instance is restarting gracefully is not missing — it
+    # is on its way back (planned restart within the grace).
+    returning_roles = {r for i in instances if getattr(i, "state", "") == "restarting" for r in i.roles}
     missing = {role: ids for role, ids in pinned.items() if role not in alive_roles}
-    if missing:
+    returning = {role: ids for role, ids in missing.items() if role in returning_roles}
+    if missing and len(returning) == len(missing):
+        add("roles", "warn", "role(s) restarting: " + ", ".join(
+            f"'{role}' (needed by {', '.join(ids)})" for role, ids in sorted(returning.items())),
+            "The instance carrying the role stopped gracefully and is expected back; its plugins answer "
+            "503 with a short Retry-After meanwhile.", recheck=True)
+    elif missing:
         add("roles", "fail", "no live instance has role(s) " + ", ".join(
             f"'{role}' (needed by {', '.join(ids)})" for role, ids in sorted(missing.items())),
             "The plugin is installed but cannot run anywhere: start an instance whose LYNDRIX_INSTANCE_ROLES "

@@ -6,14 +6,15 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | Variable | Default | Tier | Meaning |
 |---|---|---|---|
 | `LYNDRIX_CLUSTER_MODE` | `single` | 1 | `single` \| `cluster`. `cluster` turns on the `db` coordinator, preflight, drain default 10 s |
-| `LYNDRIX_INSTANCE_ID` | `<hostname>-<4 hex>` | 1 | stable id for diagnostics and lease holder names; a new id after a restart is harmless |
+| `LYNDRIX_INSTANCE_ID` | `<hostname>-<4 hex>` | 1 | id for diagnostics and lease holder names; a new id after a restart is harmless, a fixed one is fine (each start is a new *incarnation*). It must be **unique among running processes**: when a second process registers under the same id, the older one stands back (`/api/ready` 503 `instance_id_conflict`, leases dropped) until the other is gone |
 | `LYNDRIX_INSTANCE_ROLES` | single: `api,leader,runner` · cluster: `api,leader` | 1 | roles of this instance (see [Architecture](architecture.md#instances-and-roles)) |
 | `LYNDRIX_COORDINATOR` | single: `local` · cluster: `db` | 1 | coordinator driver; `cluster` + `local` is rejected at startup |
 | `LYNDRIX_LEASE_TTL_SECONDS` | `30` | 1 | a lease not renewed within the TTL is up for grabs — this is the failover time for a dead instance |
 | `LYNDRIX_LEASE_HEARTBEAT_SECONDS` | `10` | 1 | heartbeat / renewal interval; must fit at least twice into the TTL |
 | `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval of `cluster_events` (≥ 100) |
 | `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | exported as uvicorn `FORWARDED_ALLOW_IPS` by `docker/entrypoint.sh`; set to the load balancer address(es) or `*` |
-| `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → `/api/ready` 503 → wait → close SSE → release leases → exit |
+| `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → at once: `/api/ready` 503, `draining` published to the peers, leases handed over (`lost` callbacks first) → wait → close SSE → tombstone → exit |
+| `LYNDRIX_RESTART_GRACE_SECONDS` | `90` | 1 | how long an instance that stopped gracefully counts as `restarting` (not `dead`) for its peers: `ctx.has_live_role()` stays true, pinned plugins answer `Retry-After: 5`. Should cover a container restart |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
 | `DB_HOST` | `db` | 0 | the **single-writer endpoint** (MaxScale/ProxySQL/Service); the preflight warns when it is a Galera node addressed directly |
 | `DB_ALLOW_DIRECT_NODE` | `false` | 2 | silence that warning on purpose |
@@ -67,6 +68,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `database` / `vault` | not connected |
 | `draining` | SIGTERM received, the instance is leaving |
 | `coordinator` | cluster mode: the coordinator has not started yet (it retries with back-off) |
+| `instance_id_conflict` | cluster mode: a process that started later registered under this `LYNDRIX_INSTANCE_ID`; this (older) process stands back until the other stops |
 | `heartbeat` | cluster mode: no heartbeat succeeded for a full lease TTL — the peers already count this instance as dead (no leases, no shards), so it must not receive traffic either. Clears with the next successful beat |
 | `preflight:storage_secret` | this instance's `STORAGE_SECRET` differs from the cluster's |
 

@@ -45,6 +45,7 @@ import calendar
 import functools
 import json
 import random
+import secrets
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -57,7 +58,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from core.bus import bus
 from core.logger import get_logger
 
-from ..coordinator import EventCallback, InstanceInfo, LeaseInfo
+from ..coordinator import EventCallback, InstanceIdConflict, InstanceInfo, LeaseInfo, instance_state
 from ..models import ClusterEvent, ClusterInstance, ClusterKV, ClusterLease
 
 log = get_logger("Core:Cluster:DB")
@@ -78,6 +79,7 @@ _EXECUTOR_THREADS = 16
 # older instances that never mention them keep inserting and updating rows.
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "cluster_leases": {"token": "BIGINT NULL"},
+    "cluster_instances": {"incarnation": "VARCHAR(32) NULL", "stopped_at": "DATETIME NULL"},
 }
 # A metadata lock the ALTER cannot get within this many seconds is not waited
 # for: the pending ALTER would block every other statement on the table.
@@ -116,8 +118,20 @@ class DbCoordinator:
         engine_getter: Optional[Callable[[], Any]] = None,
         should_prune: Optional[Callable[[], bool]] = None,
         now_fn: Optional[Callable[[], datetime]] = None,
+        incarnation: Optional[str] = None,
+        restart_grace_s: float = 90,
+        roles: Optional[list[str]] = None,
     ) -> None:
         self.instance_id = instance_id
+        # Roles written to the registry row (default: LYNDRIX_INSTANCE_ROLES).
+        self._roles = list(roles) if roles is not None else None
+        # Boot nonce of this process: tells a restart under the same instance
+        # id from a continuing instance, and two live processes with one id apart.
+        self.incarnation = incarnation or secrets.token_hex(8)
+        # How long a gracefully stopped instance counts as "restarting".
+        self.restart_grace_s = restart_grace_s
+        self._registered = False     # this process wrote its row at least once
+        self._last_meta: dict = {}
         self.ttl = ttl
         self.heartbeat_s = heartbeat_s
         self.poll_s = max(0.1, int(poll_ms) / 1000.0)
@@ -318,11 +332,29 @@ class DbCoordinator:
             return int(value or 0)
 
     def _deregister_sync(self) -> None:
+        """Graceful stop: free the leases and leave a tombstone.
+
+        The row is NOT deleted. Deleting it made a restarting instance vanish
+        at once ("No runner instance online" until the replacement registered),
+        while a crashed one stayed visible for a TTL. The tombstone says "stopped
+        on purpose at <time>": peers show it as ``restarting`` for the restart
+        grace, then as dead; the leader prunes it like any silent row. A new
+        process under the same id simply takes the row over.
+        """
         def _run():
             with self._engine().begin() as conn:
                 now = self._db_now(conn)
                 self._release_rows(conn, now, ClusterLease.holder == self.instance_id)
-                conn.execute(delete(ClusterInstance).where(ClusterInstance.instance_id == self.instance_id))
+                if not self._registered:
+                    return
+                conn.execute(
+                    update(ClusterInstance)
+                    # Only our own row: after an id conflict it belongs to the other process.
+                    .where(ClusterInstance.instance_id == self.instance_id,
+                           ClusterInstance.incarnation == self.incarnation)
+                    .values(stopped_at=now, heartbeat_at=now,
+                            meta={**self._last_meta, "ready": False, "draining": True, "stopped": True})
+                )
 
         self._retrying(_run)
 
@@ -338,32 +370,69 @@ class DbCoordinator:
         from core.api import __api_version__
         from version import __version__
 
+        me, mine = self.instance_id, self.incarnation
+
         def _run():
             with self._engine().begin() as conn:
                 now = self._db_now(conn)
                 values = {
                     "hostname": socket.gethostname()[:255],
-                    "roles": ",".join(settings.instance_roles)[:100],
+                    "roles": ",".join(self._roles if self._roles is not None else settings.instance_roles)[:100],
                     "core_version": __version__,
                     "api_version": __api_version__,
                     "heartbeat_at": now,
                     "meta": meta,
+                    "incarnation": mine,
+                    "stopped_at": None,      # a heartbeat revives a tombstone
                 }
-                result = conn.execute(
-                    update(ClusterInstance).where(ClusterInstance.instance_id == self.instance_id).values(**values)
-                )
-                if result.rowcount:
-                    return
-                try:
-                    conn.execute(insert(ClusterInstance).values(
-                        instance_id=self.instance_id, started_at=self._started_at or now, **values,
-                    ))
-                except IntegrityError:
-                    conn.execute(
-                        update(ClusterInstance).where(ClusterInstance.instance_id == self.instance_id).values(**values)
-                    )
+                row = conn.execute(
+                    select(ClusterInstance.incarnation, ClusterInstance.started_at,
+                           ClusterInstance.heartbeat_at, ClusterInstance.stopped_at)
+                    .where(ClusterInstance.instance_id == me)
+                ).first()
+                if row is None:
+                    try:
+                        conn.execute(insert(ClusterInstance).values(
+                            instance_id=me, started_at=self._started_at or now, **values))
+                        return
+                    except IntegrityError:
+                        pass  # registered concurrently (same id) — fall through to the takeover
+                elif row[0] != mine:
+                    self._check_id_conflict(row, now)
+                    # A previous process used this id (restart under a fixed id,
+                    # or a row written by core ≤ 1.11): this is a new life of the row.
+                    values["started_at"] = self._started_at or now
+                conn.execute(update(ClusterInstance).where(ClusterInstance.instance_id == me).values(**values))
 
         self._retrying(_run)
+        self._registered = True
+        self._last_meta = meta
+
+    def _check_id_conflict(self, row, now: datetime) -> None:
+        """Our row carries another incarnation. Normal on the first heartbeat of
+        a restarted process — a conflict when it happens after we registered:
+        a second running process uses our instance id. The process that
+        started later keeps the row; the older one must stand back (it would
+        otherwise also "renew" every lease of the newer one — same holder id).
+        """
+        other, other_started, other_beat, other_stopped = row
+        if not self._registered or other is None:
+            return  # first beat of this process, or a core ≤ 1.11 process wrote the row
+        tombstone = other_stopped is not None and (other_beat is None or other_beat <= other_stopped)
+        age = (now - other_beat).total_seconds() if isinstance(other_beat, datetime) else float("inf")
+        newer = (isinstance(other_started, datetime) and isinstance(self._started_at, datetime)
+                 and other_started > self._started_at)
+        if newer and not tombstone and age <= self.ttl:
+            raise InstanceIdConflict(
+                f"instance id '{self.instance_id}' is also used by a process that started later "
+                f"(incarnation {other}, last heartbeat {age:.0f}s ago) — this process stands back; "
+                f"give every running instance its own LYNDRIX_INSTANCE_ID"
+            )
+        log.warning(
+            "COORDINATOR: the registry row of '%s' was written by another process (incarnation %s) — "
+            "taking it back; if two instances share this id, give each its own LYNDRIX_INSTANCE_ID",
+            self.instance_id, other,
+        )
 
     async def instances(self) -> list[InstanceInfo]:
         return await self._run(self._instances_sync)
@@ -376,6 +445,16 @@ class DbCoordinator:
         for row in rows:
             hb = row["heartbeat_at"]
             age = (now - hb).total_seconds() if isinstance(hb, datetime) else float("inf")
+            meta = dict(row["meta"] or {})
+            stopped = row["stopped_at"]
+            # A tombstone is only one while nobody has heart-beaten since: an
+            # instance of core ≤ 1.11 restarting under the same id revives the
+            # row without clearing stopped_at (it does not know the column).
+            tombstone = isinstance(stopped, datetime) and (not isinstance(hb, datetime) or hb <= stopped)
+            state = instance_state(
+                age_s=age, ttl=self.ttl, grace_s=self.restart_grace_s, draining=bool(meta.get("draining")),
+                stopped_for_s=(now - stopped).total_seconds() if tombstone else None,
+            )
             out.append(InstanceInfo(
                 instance_id=row["instance_id"],
                 hostname=row["hostname"],
@@ -385,9 +464,12 @@ class DbCoordinator:
                 started_at=row["started_at"],
                 heartbeat_at=hb,
                 age_s=age,
-                alive=age <= self.ttl,
+                alive=state in ("alive", "draining"),
                 is_self=row["instance_id"] == self.instance_id,
-                meta=dict(row["meta"] or {}),
+                meta=meta,
+                state=state,
+                incarnation=row["incarnation"],
+                stopped_at=stopped if tombstone else None,
             ))
         return out
 
@@ -671,7 +753,9 @@ class DbCoordinator:
             with self._engine().begin() as conn:
                 now = self._db_now(conn)
                 conn.execute(delete(ClusterEvent).where(ClusterEvent.created_at < now - _EVENT_RETENTION))
-                dead_after = timedelta(seconds=max(3 * self.ttl, 120))
+                # Silent rows — crashed instances and tombstones alike — stay
+                # at least for the restart grace (peers still answer "restarting").
+                dead_after = timedelta(seconds=max(3 * self.ttl, 120, self.restart_grace_s + self.ttl))
                 conn.execute(delete(ClusterInstance).where(ClusterInstance.heartbeat_at < now - dead_after))
                 conn.execute(delete(ClusterKV).where(ClusterKV.expires_at.is_not(None), ClusterKV.expires_at < now))
                 conn.execute(delete(ClusterLease).where(

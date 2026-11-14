@@ -268,29 +268,77 @@ class ModuleContext:
     @property
     def cluster_instances(self) -> list[dict]:
         """Every known core instance as ``{"instance_id", "hostname", "roles",
-        "alive", "is_self"}`` (core API ≥ 1.7.1). Lets a plugin whose work is
-        split by role (API everywhere, execution on ``runner`` instances) tell
-        the operator that no executor is online instead of queueing silently.
-        In single mode: a one-element list describing this instance."""
+        "alive", "is_self"}`` (core API ≥ 1.7.1) plus, since API 1.14,
+        ``state`` (alive | draining | restarting | dead), ``incarnation``,
+        ``heartbeat_at`` (ISO, database clock) and ``age_s``. Lets a plugin
+        whose work is split by role (API everywhere, execution on ``runner``
+        instances) tell the operator that no executor is online instead of
+        queueing silently. In single mode: a one-element list describing this
+        instance. In cluster mode the list is **empty** while this instance has
+        no usable view of the registry (just started, database unreachable) —
+        an empty list means "unknown", never "everybody else is dead"."""
         svc = self._cluster()
-        out = [
-            {
+        if getattr(svc, "is_cluster", False) and not getattr(svc, "view_ready", True):
+            return []
+        out = []
+        for i in (getattr(svc, "_instances", None) or []):
+            beat = getattr(i, "heartbeat_at", None)
+            alive = bool(getattr(i, "alive", False))
+            out.append({
                 "instance_id": i.instance_id,
                 "hostname": getattr(i, "hostname", None),
                 "roles": list(getattr(i, "roles", None) or []),
-                "alive": bool(getattr(i, "alive", False)),
+                "alive": alive,
                 "is_self": bool(getattr(i, "is_self", False)),
-            }
-            for i in (getattr(svc, "_instances", None) or [])
-        ]
+                "state": getattr(i, "state", None) or ("alive" if alive else "dead"),
+                "incarnation": getattr(i, "incarnation", None),
+                "heartbeat_at": beat.isoformat() if hasattr(beat, "isoformat") else None,
+                "age_s": getattr(i, "age_s", None),
+            })
         if not out:
             out.append({"instance_id": svc.instance_id, "hostname": None,
-                        "roles": list(svc.roles), "alive": True, "is_self": True})
+                        "roles": list(svc.roles), "alive": True, "is_self": True,
+                        "state": "alive", "incarnation": getattr(svc, "incarnation", None),
+                        "heartbeat_at": None, "age_s": 0.0})
         return out
 
     def has_live_role(self, role: str) -> bool:
-        """``True`` when at least one live instance (this one included) has ``role``."""
-        return any(role in i["roles"] for i in self.cluster_instances if i["alive"])
+        """``True`` when an instance with ``role`` is live (this one included)
+        **or expected back any moment**: it is draining/restarting gracefully
+        within ``LYNDRIX_RESTART_GRACE_SECONDS``, or this instance cannot tell
+        yet (no usable view). ``False`` only when the role is known to be gone
+        — so "no runner online" is not reported during a planned restart. Use
+        :meth:`role_state` for the precise state."""
+        return self.role_state(role)["state"] != "dead"
+
+    def role_state(self, role: str) -> dict:
+        """State of a role across the cluster (API ≥ 1.14): ``{"role", "state",
+        "instances": {instance_id: state}}`` with ``state`` = the best of the
+        instances carrying it — ``alive`` | ``draining`` | ``restarting``
+        (stopped on purpose, expected back within the grace) | ``dead`` |
+        ``unknown`` (this instance has no usable view yet; ask again)."""
+        return self._cluster().role_state(role)
+
+    def instance_state(self, instance_id: str) -> dict:
+        """What the cluster knows about one instance (API ≥ 1.14): ``{"instance_id",
+        "state", "known", "roles", "incarnation", "last_heartbeat", "age_s"}``.
+
+        ``state``: ``alive`` | ``draining`` | ``restarting`` | ``dead`` |
+        ``unknown``. Built for "is the instance that claimed this job still
+        there?" checks: act on ``dead`` only — ``restarting`` is expected back,
+        ``unknown`` means *this* instance cannot tell right now. Compare
+        ``incarnation`` with the one stored at claim time (:attr:`incarnation`)
+        to notice a restart under a fixed instance id. React promptly with
+        ``@ctx.subscribe("cluster:instance_lost")`` (local event, payload
+        ``{instance_id, roles, last_heartbeat, incarnation, graceful}``)."""
+        return self._cluster().instance_state(instance_id)
+
+    @property
+    def incarnation(self) -> str:
+        """Boot nonce of this core process (API ≥ 1.14) — new on every start,
+        also under a fixed ``LYNDRIX_INSTANCE_ID``. Stamp claimed work with it
+        next to :attr:`instance_id`."""
+        return self._cluster().incarnation
 
     def _lease_name(self, name: str) -> str:
         # A singleton plugin is one unit of background work: every on_lease()

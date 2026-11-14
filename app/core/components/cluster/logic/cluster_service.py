@@ -32,14 +32,14 @@ import secrets
 import socket
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from config import settings
 from core.bus import bus
 from core.logger import get_logger
 
 from .bridge import ClusterBridge
-from .coordinator import Coordinator, InstanceInfo
+from .coordinator import Coordinator, InstanceIdConflict, InstanceInfo
 from .drain import DrainController
 from .leases import RELEASED_TOPIC, LeaseKeeper
 from .storage import StorageProbe
@@ -49,6 +49,12 @@ log = get_logger("Core:Cluster")
 LEADER_LEASE = "core:leader"
 CHANGED_TOPIC = "cluster:changed"
 LEADER_TOPIC = "cluster:leader_changed"
+# LOCAL event (never bridged): every live instance emits it once when it
+# declares a peer dead — {instance_id, roles, last_heartbeat, incarnation,
+# graceful}. Not for a graceful restart within the grace; again if the peer
+# comes back and dies later.
+INSTANCE_LOST_TOPIC = "cluster:instance_lost"
+_STATE_RANK = {"alive": 4, "draining": 3, "restarting": 2, "unknown": 1, "dead": 0}
 RESTART_TOPIC = "system:restart_requested"
 _RESTART_STAGGER_S = 5
 _PREFLIGHT_REFRESH_S = 300
@@ -83,25 +89,44 @@ def _describe_error(exc: BaseException) -> str:
 
 
 class ClusterService:
-    def __init__(self) -> None:
-        self.mode: str = settings.LYNDRIX_CLUSTER_MODE
-        self.driver: str = settings.LYNDRIX_COORDINATOR or "local"
-        self.instance_id: str = (settings.LYNDRIX_INSTANCE_ID or _default_instance_id())[:100]
-        self.roles: list[str] = list(settings.instance_roles)
-        self.ttl = int(settings.LYNDRIX_LEASE_TTL_SECONDS)
-        self.heartbeat_s = int(settings.LYNDRIX_LEASE_HEARTBEAT_SECONDS)
-        self.poll_ms = int(settings.LYNDRIX_EVENT_POLL_MS)
-        self.drain_seconds = int(settings.LYNDRIX_DRAIN_SECONDS or 0)
+    def __init__(self, *, instance_id: Optional[str] = None, roles: Optional[list[str]] = None,
+                 mode: Optional[str] = None, driver: Optional[str] = None, ttl: Optional[float] = None,
+                 heartbeat_s: Optional[float] = None, poll_ms: Optional[int] = None,
+                 drain_seconds: Optional[int] = None, restart_grace_s: Optional[float] = None,
+                 coordinator: Optional[Coordinator] = None, clock: Optional[Callable[[], float]] = None,
+                 subscribe: bool = True, attach_bridge: bool = True) -> None:
+        """The process-wide instance (``cluster_service`` below) takes everything
+        from the settings. The keyword arguments exist for tests that run
+        several instances in one process against one database: pass a
+        coordinator per instance, ``subscribe=False`` (the bus handlers are
+        called by the test) and ``attach_bridge=False`` (the global bus has one
+        publisher hook)."""
+        self.mode: str = mode or settings.LYNDRIX_CLUSTER_MODE
+        self.driver: str = driver or settings.LYNDRIX_COORDINATOR or "local"
+        self.instance_id: str = (instance_id or settings.LYNDRIX_INSTANCE_ID or _default_instance_id())[:100]
+        self.roles: list[str] = list(roles if roles is not None else settings.instance_roles)
+        self.ttl = ttl if ttl is not None else int(settings.LYNDRIX_LEASE_TTL_SECONDS)
+        self.heartbeat_s = heartbeat_s if heartbeat_s is not None else int(settings.LYNDRIX_LEASE_HEARTBEAT_SECONDS)
+        self.poll_ms = int(poll_ms if poll_ms is not None else settings.LYNDRIX_EVENT_POLL_MS)
+        self.drain_seconds = int(drain_seconds if drain_seconds is not None else settings.LYNDRIX_DRAIN_SECONDS or 0)
+        self.restart_grace_s = float(
+            restart_grace_s if restart_grace_s is not None else settings.LYNDRIX_RESTART_GRACE_SECONDS)
         self.started_at = _utcnow()
+        # Boot nonce: peers tell a restart under a fixed instance id from a
+        # continuing instance by it (ctx.incarnation, ctx.instance_state()).
+        self.incarnation = secrets.token_hex(8)
+        self._attach_bridge = attach_bridge
 
         # Injectable for tests (heartbeat staleness, lease deadlines, storage probe age).
-        self._clock = time.monotonic
-        self.coordinator: Coordinator = self._build_coordinator()
+        self._clock = clock or time.monotonic
+        self.coordinator: Coordinator = coordinator if coordinator is not None else self._build_coordinator()
+        self.incarnation = getattr(self.coordinator, "incarnation", None) or self.incarnation
         self.leases = LeaseKeeper(self.coordinator, ttl=self.ttl, heartbeat_s=self.heartbeat_s,
                                   clock=lambda: self._clock())
         self.leases.on_change = self._on_lease_change
         self.bridge = ClusterBridge(self.coordinator, self.instance_id)
-        self.drain = DrainController(seconds=self.drain_seconds, on_drain=self._on_drain)
+        self.drain = DrainController(seconds=self.drain_seconds, on_drain=self._on_drain,
+                                     on_drain_start=self.begin_drain)
         # Work assignment / load balancing for plugins (core API >= 1.8): which
         # instances run a named workload, and which share of its keys is ours.
         from .assignment import WorkAssigner
@@ -118,6 +143,17 @@ class ClusterService:
         self.preflight_at: Optional[str] = None
         self._instances: list[InstanceInfo] = []
         self._instances_at = 0.0
+        # clock() of the last SUCCESSFUL refresh of the view (0 = never).
+        self._instances_ok_at = 0.0
+        # What this instance remembers about its peers between refreshes:
+        # id → {"state", "incarnation", "roles", "last_heartbeat", "gone_at",
+        # "graceful", "announced"}. Feeds instance_state() for rows that are no
+        # longer in the table and makes cluster:instance_lost fire exactly once.
+        self._peers: dict[str, dict] = {}
+        # Set while another process uses this instance id (heartbeat refused).
+        self.id_conflict: Optional[str] = None
+        self._drain_task: Optional[asyncio.Task] = None
+        self._stopped = False
         self._hb_task: Optional[asyncio.Task] = None
         self._start_task: Optional[asyncio.Task] = None
         self._hb_failures = 0
@@ -138,10 +174,11 @@ class ClusterService:
         self.storage_last_error: Optional[str] = None
         self.storage_last_ok_at: Optional[datetime] = None
 
-        bus.subscribe("db:connected")(self.on_db_connected)
-        bus.subscribe("system:boot_complete")(self.on_boot_complete)
-        bus.subscribe(RESTART_TOPIC)(self._on_restart_requested)
-        bus.subscribe(RELEASED_TOPIC)(self._on_peer_released_lease)
+        if subscribe:
+            bus.subscribe("db:connected")(self.on_db_connected)
+            bus.subscribe("system:boot_complete")(self.on_boot_complete)
+            bus.subscribe(RESTART_TOPIC)(self._on_restart_requested)
+            bus.subscribe(RELEASED_TOPIC)(self._on_peer_released_lease)
 
     def _on_peer_released_lease(self, payload: Optional[dict] = None) -> None:
         """A peer gave a lease up (bridged event) → try to acquire wanted leases now."""
@@ -159,10 +196,11 @@ class ClusterService:
             return DbCoordinator(
                 instance_id=self.instance_id, ttl=self.ttl, heartbeat_s=self.heartbeat_s,
                 poll_ms=self.poll_ms, should_prune=lambda: self.is_leader,
+                incarnation=self.incarnation, restart_grace_s=self.restart_grace_s, roles=self.roles,
             )
         from .drivers.local import LocalCoordinator
 
-        return LocalCoordinator(instance_id=self.instance_id, ttl=self.ttl)
+        return LocalCoordinator(instance_id=self.instance_id, ttl=self.ttl, incarnation=self.incarnation)
 
     @property
     def is_cluster(self) -> bool:
@@ -217,7 +255,8 @@ class ClusterService:
 
     async def _start_once(self) -> None:
         await self.coordinator.start()
-        self.bridge.attach()
+        if self._attach_bridge:
+            self.bridge.attach()
         await self.leases.start()
         if self.leader_capable:
             self.leases.want(LEADER_LEASE, acquired=self._leader_acquired, lost=self._leader_lost)
@@ -268,19 +307,54 @@ class ClusterService:
             self._preflight_task = bus.create_tracked_task(self._preflight_loop(), name="cluster:preflight")
         await self._heartbeat_once()
 
+    def begin_drain(self) -> None:
+        """SIGTERM arrived (called synchronously by the DrainController).
+
+        Everything that tells the outside world "do not count on me any more"
+        happens NOW, not after the drain sleep: ``/api/ready`` answers 503,
+        one heartbeat publishes ``draining`` (peers stop assigning shards and
+        know this is a planned stop), and the leases are handed over — ``lost``
+        callbacks first, then the release, so a peer runs the leader and worker
+        duties while this instance still finishes its in-flight requests.
+        """
+        if self.draining:
+            return
+        self.draining = True
+        try:
+            self._drain_task = bus.create_tracked_task(self._drain_start(), name="cluster:drain_start")
+        except RuntimeError:
+            self._drain_task = None  # no running loop (sync test code) — stop() does the hand-over
+
+    async def _drain_start(self) -> None:
+        await self._heartbeat_once()
+        try:
+            await self.leases.stop()
+        except Exception:
+            log.warning("CLUSTER: lease hand-over at drain start failed", exc_info=True)
+        self._emit_changed("draining")
+
     async def stop(self, reason: str = "shutdown") -> None:
+        """Leave the cluster: hand the leases over (if the drain start has not
+        done so), detach the bridge, leave a tombstone. Idempotent — uvicorn's
+        shutdown hook calls it again after a drain."""
+        if self._stopped:
+            return
+        self._stopped = True
         self.draining = True
         for task in (self._hb_task, self._start_task, self._preflight_task):
             if task is not None and not task.done():
                 task.cancel()
         self._hb_task = self._start_task = self._preflight_task = None
+        if self._drain_task is not None and not self._drain_task.done():
+            # The hand-over started at SIGTERM is still waiting for lost callbacks.
+            await asyncio.wait([self._drain_task], timeout=LeaseKeeper.LOST_CALLBACK_TIMEOUT_S + 1)
         try:
             await self.leases.stop()
         except Exception:
             log.debug("CLUSTER: lease release on stop failed", exc_info=True)
         self.bridge.detach()
         try:
-            await self.coordinator.stop()
+            await asyncio.wait_for(self.coordinator.stop(), timeout=_IO_TIMEOUT_S)
         except Exception:
             log.debug("CLUSTER: coordinator stop failed", exc_info=True)
         self.started = False
@@ -401,10 +475,32 @@ class ClusterService:
             # let the next beat open a fresh one instead of pre-pinging the
             # remaining dead sockets, each for a full socket timeout.
             self._refresh_coordinator_connections("heartbeat timed out")
+        except InstanceIdConflict as exc:
+            self._record_heartbeat_failure(str(exc)[:300], started)
+            await self._stand_back(str(exc))
         except Exception as exc:
             self._record_heartbeat_failure(str(exc)[:200] or exc.__class__.__name__, started)
         else:
             self._record_heartbeat_success(started)
+            if self.id_conflict is not None:
+                await self._step_forward()
+
+    async def _stand_back(self, reason: str) -> None:
+        """Another running process owns this instance id now: leave the load
+        balancer (readiness ``instance_id_conflict``) and stop acting as lease
+        holder — the rows are that process's to renew."""
+        if self.id_conflict is None:
+            log.critical("CLUSTER: %s", reason)
+            await self.leases.suspend()
+            self._emit_changed("id_conflict")
+        self.id_conflict = reason
+
+    async def _step_forward(self) -> None:
+        log.warning("CLUSTER: instance id conflict is over — '%s' is this process again", self.instance_id)
+        self.id_conflict = None
+        if not self.draining:
+            await self.leases.start()
+        self._emit_changed("id_conflict")
 
     async def _heartbeat_body(self) -> None:
         await self.coordinator.heartbeat(self._meta())
@@ -496,6 +592,7 @@ class ClusterService:
             "reasons": reasons,
             "draining": self.draining,
             "is_leader": self.is_leader,
+            "incarnation": self.incarnation,
             "pid": os.getpid(),
             "secret_fp": self.secret_fingerprint,
             "plugins_fp": self.plugins_fingerprint(),
@@ -506,17 +603,159 @@ class ClusterService:
 
     async def refresh_instances(self) -> list[InstanceInfo]:
         before = {i.instance_id for i in self._instances if i.alive}
+        fresh_before = self.view_ready
         self._instances = await self.coordinator.instances()
         self._instances_at = time.monotonic()
+        self._instances_ok_at = self._clock()
         after = {i.instance_id for i in self._instances if i.alive}
-        if before != after:
-            if self._instances_at and before:  # not the very first fill
+        delta = self._track_peers(fresh_before)
+        if before != after or delta:
+            if self._instances_at and before and before != after:  # not the very first fill
                 log.info("CLUSTER: live instances changed %s → %s", sorted(before), sorted(after))
-            self._emit_changed("instances")
+            self._emit_changed("instances", joined=sorted(after - before), left=sorted(before - after), **delta)
             # Membership changed → contracts (role coverage, secret, versions)
             # may have changed with it; re-check instead of waiting 5 minutes.
             self.request_preflight()
         return self._instances
+
+    @property
+    def view_ready(self) -> bool:
+        """Is this instance's picture of the others trustworthy right now?
+
+        Single mode: always. Cluster mode: the coordinator started and the
+        instance list was read successfully within the last TTL (+ one
+        heartbeat). While it is not, answers about peers are ``unknown`` —
+        never "dead": a fresh pod whose first refresh failed, or an instance
+        cut off from the database, must not conclude that its peers are gone.
+        """
+        if not self.is_cluster:
+            return True
+        if not self.started or not self._instances_ok_at:
+            return False
+        return self._clock() - self._instances_ok_at <= self.ttl + self.heartbeat_s
+
+    def _track_peers(self, view_was_fresh: bool) -> dict:
+        """Fold the fresh instance list into what we remember about the peers;
+        emits ``cluster:instance_lost`` for every peer that is dead now and has
+        not been announced in this life of it. Returns the state changes worth
+        a ``cluster:changed`` (``restarting`` / ``lost`` id lists)."""
+        now = self._clock()
+        rows = {i.instance_id: i for i in self._instances if not i.is_self}
+        restarting: list[str] = []
+        lost: list[str] = []
+        for iid, info in rows.items():
+            peer = self._peers.setdefault(iid, {"announced": None})
+            previous = peer.get("state")
+            peer.update(state=info.state, incarnation=info.incarnation, roles=list(info.roles),
+                        last_heartbeat=info.heartbeat_at, gone_at=None,
+                        graceful=info.state == "restarting" or bool(info.meta.get("draining")))
+            if info.state in ("alive", "draining"):
+                peer["announced"] = None          # alive again → a later death is news again
+            elif info.state == "restarting" and previous != "restarting":
+                restarting.append(iid)
+            elif info.state == "dead" and self._announce_lost(iid, peer):
+                lost.append(iid)
+        for iid in [i for i in self._peers if i not in rows]:
+            peer = self._peers[iid]
+            if peer.get("gone_at") is None:
+                peer["gone_at"] = now
+                if peer.get("state") in ("alive", "draining") and view_was_fresh:
+                    # Alive a moment ago, row gone now: only a graceful stop of
+                    # a core ≤ 1.11 instance deletes its row at once (a crash
+                    # leaves it, the leader prunes silent rows after minutes).
+                    peer.update(state="restarting", graceful=True)
+                    restarting.append(iid)
+            if peer.get("state") == "restarting" and now - peer["gone_at"] > self.restart_grace_s:
+                peer["state"] = "dead"
+            if peer.get("state") != "restarting":
+                if peer.get("state") != "dead" or self._announce_lost(iid, peer):
+                    lost.append(iid)
+                self._peers.pop(iid, None)     # nothing left to remember
+        delta = {}
+        if restarting:
+            delta["restarting"] = sorted(restarting)
+        if lost:
+            delta["lost"] = sorted(set(lost))
+        return delta
+
+    def _announce_lost(self, iid: str, peer: dict) -> bool:
+        marker = peer.get("incarnation") or "-"
+        if peer.get("announced") == marker:
+            return False
+        peer["announced"] = marker
+        beat = peer.get("last_heartbeat")
+        log.warning("CLUSTER: instance %s is dead (last heartbeat %s%s)", iid, beat or "unknown",
+                    ", after a graceful stop" if peer.get("graceful") else "")
+        try:
+            bus.emit(INSTANCE_LOST_TOPIC, {
+                "instance_id": iid, "roles": list(peer.get("roles") or []),
+                "last_heartbeat": beat.isoformat() if isinstance(beat, datetime) else None,
+                "incarnation": peer.get("incarnation"), "graceful": bool(peer.get("graceful")),
+                "observed_by": self.instance_id,
+            })
+        except Exception:
+            log.debug("CLUSTER: instance_lost emit failed", exc_info=True)
+        return True
+
+    def instance_state(self, instance_id: str) -> dict:
+        """What this instance knows about ``instance_id`` (``ctx.instance_state``):
+        ``{"instance_id", "state", "known", "roles", "incarnation",
+        "last_heartbeat", "age_s"}`` with state ``alive`` | ``draining`` |
+        ``restarting`` | ``dead`` | ``unknown``.
+
+        ``unknown`` means *this* instance cannot tell right now (its view of
+        the registry is missing or stale) — ask again later, never treat it as
+        dead. An id that is in neither the table nor memory is ``dead`` with
+        ``known: False`` (rows of dead instances are pruned after a few minutes).
+        """
+        out = {"instance_id": instance_id, "state": "unknown", "known": False, "roles": [],
+               "incarnation": None, "last_heartbeat": None, "age_s": None}
+        if instance_id == self.instance_id:
+            out.update(state="draining" if self.draining else "alive", known=True, roles=list(self.roles),
+                       incarnation=self.incarnation,
+                       last_heartbeat=self.last_heartbeat_ok_at.replace(tzinfo=None).isoformat()
+                       if self.last_heartbeat_ok_at else None)
+            return out
+        if not self.view_ready:
+            return out
+        info = next((i for i in self._instances if i.instance_id == instance_id), None)
+        if info is not None:
+            out.update(state=info.state, known=True, roles=list(info.roles), incarnation=info.incarnation,
+                       last_heartbeat=info.heartbeat_at.isoformat() if isinstance(info.heartbeat_at, datetime) else None,
+                       age_s=round(info.age_s, 1))
+            return out
+        peer = self._peers.get(instance_id)
+        if peer is not None:
+            beat = peer.get("last_heartbeat")
+            out.update(state=peer.get("state") or "dead", known=True, roles=list(peer.get("roles") or []),
+                       incarnation=peer.get("incarnation"),
+                       last_heartbeat=beat.isoformat() if isinstance(beat, datetime) else None)
+            return out
+        out["state"] = "dead"
+        return out
+
+    def role_state(self, role: str) -> dict:
+        """Best state among the instances carrying ``role`` (``ctx.role_state``):
+        ``{"role", "state", "instances": {id: state}}``. ``restarting`` = the
+        role is momentarily gone but expected back (graceful restart within the
+        grace); ``unknown`` = this instance's view is not usable yet."""
+        states: dict[str, str] = {}
+        if role in self.roles:
+            states[self.instance_id] = "draining" if self.draining else "alive"
+        if self.is_cluster and self.view_ready:
+            for info in self._instances:
+                if not info.is_self and role in info.roles:
+                    states[info.instance_id] = info.state
+            for iid, peer in self._peers.items():
+                if iid not in states and role in (peer.get("roles") or []) and peer.get("state") == "restarting":
+                    states[iid] = "restarting"
+        if states:
+            best = max(states.values(), key=lambda state: _STATE_RANK.get(state, 0))
+        else:
+            best = "dead" if self.view_ready else "unknown"
+        if best == "dead" and not self.view_ready:
+            best = "unknown"
+        return {"role": role, "state": best, "instances": states}
 
     def request_preflight(self) -> None:
         """Ask for a preflight run now (membership change, coordinator back,
@@ -595,9 +834,10 @@ class ClusterService:
         if name != LEADER_LEASE:
             self._emit_changed("lease")
 
-    def _emit_changed(self, reason: str) -> None:
+    def _emit_changed(self, reason: str, **details) -> None:
         try:
-            bus.emit(CHANGED_TOPIC, {"reason": reason, "instance_id": self.instance_id, "leader": self.leader_id})
+            bus.emit(CHANGED_TOPIC, {"reason": reason, "instance_id": self.instance_id, "leader": self.leader_id,
+                                     **details})
         except Exception:
             log.debug("CLUSTER: change emit failed", exc_info=True)
 
@@ -632,6 +872,8 @@ class ClusterService:
         if self.is_cluster:
             if not self.started:
                 reasons.append("coordinator")
+            elif self.id_conflict is not None:
+                reasons.append("instance_id_conflict")
             elif self.heartbeat_stale:
                 reasons.append("heartbeat")
         # Only contract failures that make THIS instance unfit for traffic gate
@@ -760,6 +1002,8 @@ class ClusterService:
                 "ready": ready,
                 "reasons": reasons,
                 "draining": self.draining,
+                "incarnation": self.incarnation,
+                "id_conflict": self.id_conflict,
                 "started_at": self.started_at.isoformat(),
                 "uptime_s": round((_utcnow() - self.started_at).total_seconds()),
             },
@@ -775,6 +1019,9 @@ class ClusterService:
             },
             "instances": [i.to_dict() for i in self._instances],
             "alive": len(alive),
+            "states": {state: sum(1 for i in self._instances if i.state == state)
+                       for state in ("alive", "draining", "restarting", "dead")},
+            "view_ready": self.view_ready,
             "leases": {"held": self.leases.held, "wanted": self.leases.wanted},
             "storage": self.storage_status(),
             "work": self.assigner.report(),

@@ -37,8 +37,12 @@ notifications, plugin state changes), so polling is cheap.
   is exactly the race that produces 1020 under MariaDB ≥ 11.6 defaults.
 - A fresh instance starts reading events at `MAX(id)`; the leader prunes events older than an
   hour, dead instance rows and expired keys every five minutes.
-- An instance that stops gracefully deletes its row, releases its leases and broadcasts
-  `cluster:lease_released`, so peers acquire immediately.
+- An instance that stops gracefully releases its leases, broadcasts `cluster:lease_released` (peers
+  acquire immediately) and turns its row into a tombstone (`stopped_at`); peers show it as
+  `restarting` for `LYNDRIX_RESTART_GRACE_SECONDS`, the leader prunes silent rows after
+  max(3 × TTL, 120 s, grace + TTL). `cluster_instances.incarnation` and `.stopped_at` are additive,
+  nullable columns; instances of core ≤ 1.11 ignore them (their graceful stop still deletes the
+  row — newer peers treat a row that vanishes while alive as `restarting`, too).
 - A released lease keeps its row (`holder = NULL`): the row carries the lease's fencing token,
   which must keep growing across releases. The leader drops released rows nobody asked for in
   24 hours. `cluster_leases.token` is an additive, nullable column the first instance of core

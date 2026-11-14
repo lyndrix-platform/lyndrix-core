@@ -226,6 +226,12 @@ class Settings(BaseSettings):
     # hint, leases are released and the process exits. Default: 0 in single
     # mode (today's behaviour), 10 in cluster mode.
     LYNDRIX_DRAIN_SECONDS: Optional[int] = None
+    # How long an instance that stopped gracefully (tombstone) or went silent
+    # while draining counts as "restarting" for its peers before it is "dead":
+    # ctx.has_live_role() stays true and pinned plugins answer a short
+    # Retry-After meanwhile. Should cover a container restart (image pull
+    # excluded); rows are pruned after grace + TTL at the earliest.
+    LYNDRIX_RESTART_GRACE_SECONDS: int = 90
     # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
     # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
     # UI shows any instance's log from any instance; the leader keeps
@@ -400,6 +406,8 @@ class Settings(BaseSettings):
             self.LYNDRIX_DRAIN_SECONDS = 10 if mode == "cluster" else 0
         elif self.LYNDRIX_DRAIN_SECONDS < 0:
             raise ValueError("LYNDRIX_DRAIN_SECONDS must be >= 0")
+        if self.LYNDRIX_RESTART_GRACE_SECONDS < 0:
+            raise ValueError("LYNDRIX_RESTART_GRACE_SECONDS must be >= 0")
         return self
 
     # ------------------------------------------------------------------

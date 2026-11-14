@@ -316,6 +316,23 @@ class LeaseKeeper:
         self._inflight.clear()
         await self._hand_over(list(self._held))
 
+    async def suspend(self) -> None:
+        """Stop contending and declare every holding lost WITHOUT releasing it
+        at the coordinator — for an instance that found out its identity
+        belongs to another process now (duplicate instance id): the rows are
+        that process's to renew. ``start()`` resumes."""
+        self._running, self._stopped = False, True
+        for task in (self._task, self._watchdog_task):
+            if task is not None and not task.done():
+                task.cancel()
+        self._task = self._watchdog_task = None
+        for attempts in self._inflight.values():
+            for attempt in attempts:
+                attempt.cancel()
+        self._inflight.clear()
+        for name in list(self._held):
+            self._lose(name)
+
     async def tick(self) -> None:
         """One acquire/renew pass over every wanted lease (also used by tests).
 
