@@ -8,7 +8,6 @@ from core.logger import get_logger, mask_secrets
 class GlobalEventBus:
     def __init__(self):
         self.subscribers: Dict[str, List[Callable]] = {}
-        self._subscriber_keys: Dict[str, Set[str]] = {}
         self.log = get_logger("Core:EventBus")
         self._active_tasks: Set[asyncio.Task] = set()
         # The application loop and its thread, learned from the first emit() that
@@ -56,57 +55,70 @@ class GlobalEventBus:
             )
         return str(payload)
 
-    def _callback_key(self, callback) -> str:
-        """Stable identity for de-dup, keyed by import path + qualname.
-
-        The same across reloads of a plugin (folder/qualname unchanged), which is
-        exactly why ``unsubscribe`` must free it on unload — otherwise a reloaded
-        plugin's fresh handler is dropped as a "duplicate" and the stale
-        pre-reload closure remains the only live subscriber.
-        """
-        return (
-            f"{getattr(callback, '__module__', 'unknown')}:"
-            f"{getattr(callback, '__qualname__', getattr(callback, '__name__', repr(callback)))}"
-        )
+    @staticmethod
+    def _callback_name(callback) -> str:
+        """Readable name for logs and task names (partials/callable objects have no ``__name__``)."""
+        return getattr(callback, "__name__", None) or type(callback).__name__
 
     def subscribe(self, topic: str):
-        """Decorator: @bus.subscribe('topic') registers a callback."""
+        """Decorator: @bus.subscribe('topic') registers a callback.
+
+        Subscribing the *same* callback twice is a no-op. "Same" means equal:
+        the same function object, or a bound method of the same instance. Two
+        instances' bound methods, closures produced by a factory and lambdas are
+        distinct subscribers and are all delivered — the bus used to de-duplicate
+        by ``module:qualname`` and silently dropped all but the first of them.
+
+        A reloaded module creates new function objects, so the subscriber is
+        responsible for unsubscribing the old ones: ``ModuleContext.dispose()``
+        does it for everything subscribed through ``ctx.subscribe`` and the
+        ModuleManager calls ``unsubscribe_package`` when it unloads a plugin.
+        """
 
         def decorator(callback):
-            if topic not in self.subscribers:
-                self.subscribers[topic] = []
-                self._subscriber_keys[topic] = set()
-
-            callback_key = self._callback_key(callback)
-            if callback_key in self._subscriber_keys[topic]:
+            subs = self.subscribers.setdefault(topic, [])
+            if any(existing == callback for existing in subs):
                 self.log.debug(
-                    f"SUBSCRIBE: Ignored duplicate subscriber for {topic} ({callback.__name__})"
+                    f"SUBSCRIBE: Ignored duplicate subscriber for {topic} ({self._callback_name(callback)})"
                 )
                 return callback
-            self.subscribers[topic].append(callback)
-            self._subscriber_keys[topic].add(callback_key)
-            self.log.debug(f"SUBSCRIBE: Registered for: {topic} ({callback.__name__})")
+            subs.append(callback)
+            self.log.debug(f"SUBSCRIBE: Registered for: {topic} ({self._callback_name(callback)})")
             return callback
 
         return decorator
 
     def unsubscribe(self, topic: str, callback) -> bool:
-        """Remove a previously registered callback and free its de-dup key.
+        """Remove a previously registered callback.
 
-        Called on plugin unload/disable so the old handler stops firing and a
-        subsequent re-subscribe of the reloaded code is not rejected as a
-        duplicate. Removal is by object identity; a reloaded module re-subscribes
-        a brand-new callback object.
+        Called on plugin unload/disable so the old handler stops firing. Matching
+        is by equality, like ``subscribe``: ``bus.unsubscribe(topic, obj.method)``
+        works although every attribute access creates a new bound-method object.
         """
-        removed = False
         subs = self.subscribers.get(topic)
-        if subs:
-            kept = [cb for cb in subs if cb is not callback]
-            removed = len(kept) != len(subs)
+        if not subs:
+            return False
+        kept = [cb for cb in subs if cb != callback]
+        self.subscribers[topic] = kept
+        return len(kept) != len(subs)
+
+    def unsubscribe_package(self, package: str) -> int:
+        """Remove every subscriber defined in ``package`` or one of its submodules.
+
+        Safety net for an unloaded plugin: handlers it subscribed directly on the
+        bus (not through its context) would otherwise keep firing from the purged
+        module — and fire twice once the re-imported code subscribes again.
+        Returns the number of subscribers removed.
+        """
+        def _owned(callback) -> bool:
+            module = str(getattr(callback, "__module__", "") or "")
+            return module == package or module.startswith(package + ".")
+
+        removed = 0
+        for topic, subs in self.subscribers.items():
+            kept = [cb for cb in subs if not _owned(cb)]
+            removed += len(subs) - len(kept)
             self.subscribers[topic] = kept
-        keys = self._subscriber_keys.get(topic)
-        if keys:
-            keys.discard(self._callback_key(callback))
         return removed
 
     def bind_loop(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
@@ -170,18 +182,21 @@ class GlobalEventBus:
             self.log.info(f"EVENT: {topic} | Data: {mask_secrets(payload)}")
 
         if topic in self.subscribers:
-            for callback in self.subscribers[topic]:
+            # Iterate over a copy: a handler may subscribe/unsubscribe while the
+            # event is being dispatched.
+            for callback in list(self.subscribers[topic]):
+                name = self._callback_name(callback)
                 try:
                     if inspect.iscoroutinefunction(callback):
                         task = asyncio.create_task(
-                            callback(payload), name=f"bus:{topic}:{callback.__name__}"
+                            callback(payload), name=f"bus:{topic}:{name}"
                         )
-                        self._track_task(task, topic, callback.__name__)
+                        self._track_task(task, topic, name)
                     else:
                         callback(payload)
                 except Exception as e:
                     self.log.error(
-                        f"ERROR: Callback '{callback.__name__}' for '{topic}' raised: {e}",
+                        f"ERROR: Callback '{name}' for '{topic}' raised: {e}",
                         exc_info=True,
                     )
 

@@ -1,3 +1,5 @@
+import inspect
+
 from core.components.plugins.logic.models import ModuleManifest, NotificationEndpoint
 from .ui.routes import register_plugin_routes
 from .logic.plugin_service import plugin_service
@@ -61,13 +63,23 @@ def _register_lifecycle_notifications(ctx):
     UI client disconnecting during a long install/upgrade — the gap that made
     install confirmations silently vanish ("skipped notify after client teardown")."""
 
-    def _tracked(repo: str) -> bool:
+    async def _tracked(repo: str) -> bool:
         """A cluster-wide operation (core 1.8) tracks this repo: the per-event
-        notification would be a duplicate of the one the operation produces."""
+        notification would be a duplicate of the one the operation produces.
+
+        The lookup is a DB query — in a worker thread, never on the event loop
+        (a slow or black-holed database used to stall requests, SSE and the
+        cluster heartbeat for up to the read timeout). The handlers therefore
+        run a moment after the event; ``tracks`` also counts an operation that
+        closed within the last minute so that delay cannot turn the event of a
+        just-finished operation into a second notification.
+        """
         try:
+            import asyncio
+
             from .logic.operations import operation_tracker
 
-            return operation_tracker.has_running(repo_name=str(repo).replace("-", "_"))
+            return await asyncio.to_thread(operation_tracker.tracks, repo_name=str(repo).replace("-", "_"))
         except Exception:
             return False
 
@@ -106,9 +118,9 @@ def _register_lifecycle_notifications(ctx):
             severity="warning" if done else "error",
         )
 
-    def _on_installed(payload):
+    async def _on_installed(payload):
         repo = (payload or {}).get("repo", "plugin")
-        if _tracked(repo):
+        if await _tracked(repo):
             return
         ctx.notify(
             "plugin_installed",
@@ -119,10 +131,10 @@ def _register_lifecycle_notifications(ctx):
             severity="success",
         )
 
-    def _on_failed(payload):
+    async def _on_failed(payload):
         repo = (payload or {}).get("repo", "plugin")
         error = (payload or {}).get("error", "unknown error")
-        if _tracked(repo):
+        if await _tracked(repo):
             return
         ctx.notify(
             "plugin_install_failed",
@@ -148,10 +160,10 @@ def _register_lifecycle_notifications(ctx):
             severity="error",
         )
 
-    def _on_rolled_back(payload):
+    async def _on_rolled_back(payload):
         repo = (payload or {}).get("repo", "plugin")
         version = (payload or {}).get("version")
-        if _tracked(repo):
+        if await _tracked(repo):
             return
         ctx.notify(
             "plugin_rolled_back",
@@ -182,10 +194,18 @@ def _register_lifecycle_notifications(ctx):
         # payload["_origin"]. The peer already created the notification and
         # notification:new is bridged too — creating it again here would double
         # (×N instances) every toast and bell entry.
-        def _guarded(payload):
-            if (payload or {}).get("_origin"):
-                return
-            return handler(payload)
+        if inspect.iscoroutinefunction(handler):
+            # Keep it a coroutine function: the bus decides by that whether to
+            # run a subscriber as a task or call it inline.
+            async def _guarded(payload):
+                if (payload or {}).get("_origin"):
+                    return
+                await handler(payload)
+        else:
+            def _guarded(payload):
+                if (payload or {}).get("_origin"):
+                    return
+                return handler(payload)
 
         _guarded.__qualname__ = f"{handler.__qualname__}<local_only>"
         _guarded.__module__ = handler.__module__

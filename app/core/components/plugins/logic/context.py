@@ -114,6 +114,10 @@ class ModuleContext:
         # reloaded plugin keeps firing its old handlers and leaks a task per cycle.
         self._subscriptions: list[tuple[str, object]] = []
         self._tasks: list = []
+        # Gateway adapters and theme overrides registered through this context —
+        # dispose() takes them back so nothing of a stopped module stays behind.
+        self._gateway_adapters: list = []
+        self._has_theme_overrides = False
         # Leases registered via on_lease(): (lease name, acquired cb, lost cb).
         self._leases: list[tuple[str, object, object]] = []
         # request()/reply plumbing: one listener per reply topic, futures keyed
@@ -460,9 +464,8 @@ class ModuleContext:
                 lambda: future.done() or future.set_result(payload)
             )
 
-        # The bus de-duplicates subscribers by module + qualname; make the
-        # listener unique per plugin and topic or the second plugin's
-        # listener would be silently dropped as a "duplicate".
+        # A readable, unique name per plugin and topic for logs and task names
+        # (the bus itself tells subscribers apart by identity).
         _on_reply.__qualname__ = f"ModuleContext.request<{self.manifest.id}:{reply_topic}>"
         self.subscribe(reply_topic)(_on_reply)
         self._reply_listeners.add(reply_topic)
@@ -472,10 +475,25 @@ class ModuleContext:
         task_name = name or f"module:{self.manifest.id}"
         task = global_bus.create_tracked_task(coro, name=task_name)
         self._tasks.append(task)
+        # Forget the task once it is done: a plugin that spawns one task per
+        # event otherwise grows this list (each finished Task keeps its
+        # result/exception alive) until the plugin is unloaded.
+        task.add_done_callback(self._forget_task)
         return task
 
-    def dispose(self) -> None:
+    def _forget_task(self, task) -> None:
+        try:
+            self._tasks.remove(task)
+        except ValueError:
+            pass  # dispose() already cleared the list
+
+    def dispose(self, *, only_tasks: list | None = None) -> None:
         """Remove this module's bus subscriptions and cancel its background tasks.
+
+        ``only_tasks`` limits the cancellation to the given tasks. The
+        ModuleManager passes the tasks that existed *before* it ran the
+        module's ``teardown``: stop work the teardown scheduled through
+        ``ctx.create_task`` must not be cancelled before its first step.
 
         Called by the ModuleManager on unload/disable so a reloaded or disabled
         plugin's stale handlers stop firing (freeing their de-dup keys for a fresh
@@ -495,13 +513,14 @@ class ModuleContext:
                 future.cancel()
         self._pending_requests.clear()
 
-        for task in self._tasks:
+        for task in (self._tasks if only_tasks is None else only_tasks):
             try:
                 if not task.done():
                     task.cancel()
             except Exception:
                 self.log.debug("DISPOSE: task cancel failed", exc_info=True)
         self._tasks.clear()
+        self._dispose_registrations()
         # Give leases up so a peer can take the work over right away.
         for name, acquired, lost in self._leases:
             try:
@@ -517,6 +536,32 @@ class ModuleContext:
         # A disabled/unloaded module is not "starting" any more — never leave a
         # blocking status behind that would 503 the next incarnation's routes.
         self.reset_runtime()
+
+    def _dispose_registrations(self) -> None:
+        """Take back what this module registered in core singletons: gateway
+        adapters (and their retry workers) and plugin-scoped theme overrides.
+        setup() registers them again when the module is re-enabled."""
+        if self._gateway_adapters:
+            try:
+                from core.components.messaging.logic.gateway import messaging_gateway
+
+                for adapter in self._gateway_adapters:
+                    provider_id = getattr(adapter, "provider_id", None)
+                    # Only our own registration: the provider id may meanwhile
+                    # belong to an adapter another module registered.
+                    if provider_id and messaging_gateway.get_adapter(provider_id) is adapter:
+                        messaging_gateway.unregister(provider_id)
+            except Exception:
+                self.log.debug("DISPOSE: gateway adapter cleanup failed", exc_info=True)
+            self._gateway_adapters.clear()
+        if self._has_theme_overrides:
+            try:
+                from core.theming import get_theme_engine
+
+                get_theme_engine().unregister_plugin_overrides(self.manifest.id)
+            except Exception:
+                self.log.debug("DISPOSE: theme override cleanup failed", exc_info=True)
+            self._has_theme_overrides = False
 
     def notify(
         self,
@@ -582,6 +627,7 @@ class ModuleContext:
         """
         from core.components.messaging.logic.gateway import messaging_gateway
         messaging_gateway.register(adapter)
+        self._gateway_adapters.append(adapter)
         self.log.info("GATEWAY: Registered adapter '%s'.", adapter.provider_id)
 
     # --- NAVIGATION ENTRIES (core API >= 1.9) ---
@@ -626,6 +672,7 @@ class ModuleContext:
         """
         from core.theming import get_theme_engine
         get_theme_engine().register_plugin_overrides(self.manifest.id, overrides)
+        self._has_theme_overrides = True
         self.log.debug("THEME: Registered %d style override(s).", len(overrides))
 
     def register_routes(self, router: APIRouter, public: bool = False) -> None:

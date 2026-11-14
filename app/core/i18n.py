@@ -60,8 +60,12 @@ _catalog_version: str | None = None
 # the HTTP catalog endpoint serves by default.
 I18NEXT_NAMESPACES: set[str] = {"ui", "settings"}
 
-# Directories that have been scanned already (avoid double-loading).
-_registered_dirs: set[str] = set()
+# Namespaces the core itself serves to clients; never removed by a plugin unload.
+_CORE_CLIENT_NAMESPACES: frozenset[str] = frozenset(I18NEXT_NAMESPACES)
+
+# Directories that have been scanned already (avoid double-loading), in
+# registration order — a rebuild after an unregister replays them in that order.
+_registered_dirs: dict[str, None] = {}
 
 # Deferred config cache.
 _supported: set[str] | None = None
@@ -107,8 +111,14 @@ def _load_dir(directory: Path) -> None:
     key = str(directory)
     if key in _registered_dirs or not directory.is_dir():
         return
-    _registered_dirs.add(key)
-    for path in directory.glob("*.*.json"):
+    _registered_dirs[key] = None
+    _read_dir(directory, _catalogue, _nested)
+    _recompute_version()
+
+
+def _read_dir(directory: Path, catalogue: dict[str, dict[str, str]], nested: dict[str, dict[str, Any]]) -> None:
+    """Merge the locale files of *directory* into the given stores."""
+    for path in sorted(directory.glob("*.*.json")):
         parts = path.stem.split(".")  # e.g. ["core", "en"]
         if len(parts) < 2:
             continue
@@ -117,13 +127,31 @@ def _load_dir(directory: Path) -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             flat = _flatten(data, namespace)
-            _catalogue.setdefault(locale, {}).update(flat)
+            catalogue.setdefault(locale, {}).update(flat)
             # Also keep the original nested tree for HTTP catalog serving.
-            ns_root = _nested.setdefault(locale, {}).setdefault(namespace, {})
+            ns_root = nested.setdefault(locale, {}).setdefault(namespace, {})
             _deep_merge(ns_root, data)
             log.debug(f"i18n: loaded {path.name} ({len(flat)} keys)")
         except Exception as exc:
             log.warning(f"i18n: failed to load {path}: {exc}")
+
+
+def _rebuild() -> None:
+    """Re-read every registered directory into fresh stores and swap them in.
+
+    Used after a directory was dropped: several directories may contribute to
+    one namespace (deep-merged), so removing "the keys of one directory" is not
+    well defined — replaying the remaining ones is. The stores are replaced in
+    one assignment each so a concurrent reader never sees a half-built catalogue.
+    """
+    global _catalogue, _nested
+    catalogue: dict[str, dict[str, str]] = {}
+    nested: dict[str, dict[str, Any]] = {}
+    for dir_key in list(_registered_dirs):
+        directory = Path(dir_key)
+        if directory.is_dir():
+            _read_dir(directory, catalogue, nested)
+    _catalogue, _nested = catalogue, nested
     _recompute_version()
 
 
@@ -150,6 +178,9 @@ def _recompute_version() -> None:
     h = hashlib.sha256()
     for path_str, mtime_ns, size in items:
         h.update(f"{path_str}|{mtime_ns}|{size}\n".encode("utf-8"))
+    # The allowlist decides what a client is served: a namespace opted in (or
+    # out) without any file change must not be answered with a stale 304.
+    h.update(("ns|" + ",".join(sorted(I18NEXT_NAMESPACES)) + "\n").encode("utf-8"))
     _catalog_version = h.hexdigest()[:12]
 
 
@@ -276,6 +307,18 @@ def register_client_namespace(ns: str) -> None:
     _recompute_version()
 
 
+def unregister_client_namespace(ns: str) -> None:
+    """Take a plugin's namespace off the i18next client allowlist again.
+
+    Called by the ModuleManager when the plugin that opted it in is unloaded.
+    The core's own client namespaces are never removed.
+    """
+    if not ns or ns in _CORE_CLIENT_NAMESPACES or ns not in I18NEXT_NAMESPACES:
+        return
+    I18NEXT_NAMESPACES.discard(ns)
+    _recompute_version()
+
+
 def get_catalog_version() -> str:
     """Return the current catalog content fingerprint (recomputed if needed)."""
     if _catalog_version is None:
@@ -319,7 +362,7 @@ def reload_core_locales() -> None:
     (e.g. a new core component ships its own ``{namespace}.{locale}.json``).
     Safe to call multiple times — only new/changed files are added.
     """
-    _registered_dirs.discard(str(_LOCALES_DIR))
+    _registered_dirs.pop(str(_LOCALES_DIR), None)
     _load_dir(_LOCALES_DIR)
 
 
@@ -332,3 +375,19 @@ def register_plugin_locales(plugin_path: Path) -> None:
     to create the files.
     """
     _load_dir(plugin_path / "locales")
+
+
+def unregister_plugin_locales(plugin_path: Path) -> None:
+    """Forget the strings loaded from *plugin_path*/locales/.
+
+    Called by the ModuleManager when a plugin is unloaded (uninstall, reload,
+    upgrade). Without it a reloaded plugin's directory counted as "already
+    scanned": the catalog version changed with the new files' mtimes, clients
+    refetched — and were served the OLD strings under the NEW version until
+    the core restarted.
+    """
+    key = str(plugin_path / "locales")
+    if key not in _registered_dirs:
+        return
+    del _registered_dirs[key]
+    _rebuild()

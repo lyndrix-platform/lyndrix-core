@@ -357,6 +357,17 @@ global_bus.subscribe("db:connected")(my_handler)
 - Every emitted topic must be declared in `permissions.emit`
 - Unauthorized access raises a `PermissionError` immediately — it does not silently fail
 
+**Subscriber identity:**
+
+- Every distinct callback is delivered: bound methods of two instances (`a.on_event`, `b.on_event`),
+  closures produced by a factory and lambdas all receive the event. (Cores before this change
+  de-duplicated by module + qualified name and silently kept only the first of them.)
+- Subscribing the *same* callback twice — the same function object, or the same bound method of the
+  same instance — is a no-op.
+- Subscriptions made through `ctx.subscribe` are removed when the plugin is disabled, unloaded,
+  reloaded or its `setup()` fails, so a later `setup()` never double-subscribes. Handlers subscribed
+  directly on the bus are only removed when the plugin is unloaded — one more reason to use `ctx`.
+
 **Common platform topics:**
 
 | Topic | When it fires |

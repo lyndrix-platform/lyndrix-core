@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 import inspect
 import asyncio
+import threading
 from typing import List
 from sqlalchemy import inspect as sqlalchemy_inspect, text
 from packaging.version import Version, InvalidVersion
@@ -15,7 +16,12 @@ from .models import ModuleManifest, PluginState, PluginVersionHistory
 from .models import PluginOperation, PluginOperationInstance
 from .context import ModuleContext
 from config import settings
-from core.i18n import register_client_namespace, register_plugin_locales
+from core.i18n import (
+    register_client_namespace,
+    register_plugin_locales,
+    unregister_client_namespace,
+    unregister_plugin_locales,
+)
 
 log = get_logger("Core:ModuleManager")
 
@@ -35,8 +41,14 @@ class ModuleManager:
     def __init__(self):
         self.registry = {}
         self._plugin_state_schema_ready = False
+        self._schema_lock = threading.Lock()
         # module_id → (failures, monotonic time of the next allowed install attempt)
         self._reconcile_install_backoff: dict = {}
+        # (module_id, version) → (failures, monotonic time of the next allowed
+        # attempt): versions that were installed here but failed verification.
+        # In-memory on purpose — plugin_states keeps the version the cluster was
+        # asked to run and has exactly one writer (the operator's lead instance).
+        self._reconcile_verify_backoff: dict = {}
         # module_ids whose version upgrade (towards plugin_states) is in flight here
         self._reconcile_upgrading: set = set()
         self._mounted_static_paths: set = set()
@@ -46,13 +58,32 @@ class ModuleManager:
         self._locks: dict = {}
         current_file_path = os.path.abspath(__file__)
         self.base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))))
-        # Subscribe to filesystem change events from the PluginService
+        self._reconcile_task = None
+        # Boot convergence (read by the cluster readiness check through
+        # ``getattr(module_manager, "boot_converged", True)``): False from
+        # process start, True once the first activation pass — saved states,
+        # desired plugins and, in cluster mode, the plugin_states reconcile —
+        # has finished and nothing it started is still loading or setting up.
+        self.boot_converged: bool = False
+        self._boot_pass_claimed = False
+        self._boot_watch_task = None
+        # Cluster mode: did the latest boot-time plugin_states reconcile run through?
+        self._boot_reconcile_ok = True
+
+    def attach_bus(self) -> None:
+        """Subscribe this manager to the lifecycle events it reacts to.
+
+        Called once, for the process-wide ``module_manager``. Not part of
+        ``__init__``: the bus delivers to every distinct subscriber, so a second
+        manager instance (tests build their own) must not start handling the
+        process's install and reconcile events as well.
+        """
+        # Filesystem change events from the PluginService
         bus.subscribe("plugin:files_changed")(self._handle_plugin_change)
         # Cluster: a peer installed/enabled/disabled a plugin → converge on the
         # DB state (plugin_states is the source of truth for every instance).
         bus.subscribe("plugin:desired_changed")(self._on_desired_changed)
         bus.subscribe("system:boot_complete")(self._start_cluster_reconciler)
-        self._reconcile_task = None
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         """Return (creating on first use) the reload lock for a module/folder key."""
@@ -192,6 +223,10 @@ class ModuleManager:
             
             if not hasattr(module, 'manifest'):
                 log.warning(f"VALIDATION_ERROR: Module '{module_name}' missing 'manifest'")
+                # Not registered → forget the import, or a fixed entrypoint would
+                # never be re-read (import_module returns the cached module).
+                if is_plugin:
+                    self._purge_failed_import(prefix, module_name)
                 return False
 
             raw_manifest = module.manifest
@@ -271,6 +306,9 @@ class ModuleManager:
                 # plugin; the cluster reconcile only treats "row gone" as an
                 # uninstall-on-a-peer when it is True.
                 "persisted": False,
+                # Where this plugin's locale files were registered from (None for
+                # core modules) — unload_module drops exactly that directory.
+                "locales_path": plugin_dir_path if is_plugin else None,
             }
 
             if not is_plugin:
@@ -295,7 +333,31 @@ class ModuleManager:
             if path_added and vendor_path_str in sys.path:
                 log.debug(f"VENDORS: Cleaning up failed import path {vendor_path_str}")
                 sys.path.remove(vendor_path_str)
+            if is_plugin:
+                self._purge_failed_import(prefix, module_name)
             return False
+
+    def _purge_failed_import(self, prefix: str, module_name: str) -> None:
+        """Forget a plugin package whose load failed before it was registered.
+
+        Python removes only the module that raised (``…entrypoint``); the package
+        and every submodule it imported before the error stay in ``sys.modules``,
+        and their ORM classes stay on the shared ``Base``. The next import of the
+        folder — typically the auto-revert loading the restored OLD version —
+        would then bind the old entrypoint to the cached NEW submodules (mixed
+        code until restart) or die with "Table … is already defined".
+        """
+        if self._find_plugin_id_by_folder(module_name):
+            return  # the folder backs a registered plugin — its modules are live
+        package = f"{prefix}.{module_name}"
+        # Strings registered before the failure: the next load must re-read them.
+        unregister_plugin_locales(Path(self.base_path) / prefix.replace('.', '/') / module_name)
+        self._forget_plugin_models(package)
+        stale = [m for m in sys.modules if m == package or m.startswith(package + ".")]
+        for name in stale:
+            sys.modules.pop(name, None)
+        if stale:
+            log.info(f"LOAD_ERROR: purged {len(stale)} half-imported module(s) of '{package}'.")
 
     async def _handle_plugin_change(self, payload: dict):
         """Reacts to install/uninstall events from the PluginService."""
@@ -310,7 +372,7 @@ class ModuleManager:
                 await self._handle_plugin_install(payload, module_name)
         elif action == "uninstall":
             module_id = payload.get("id")
-            self.unload_module(module_id)
+            await self.unload_module_async(module_id)
             # plugin_states is the cluster's source of truth: without this the row
             # kept saying "active" and peers (or the next boot) re-installed the plugin.
             # A failed delete must not fail open (peers would silently keep the
@@ -399,6 +461,7 @@ class ModuleManager:
             and await self._verify_after_install(resolved_module_id)
         )
         if verified:
+            self._reconcile_verify_cleared(resolved_module_id)
             # Push the new state to connected UIs. The fresh-install path
             # (load_module) emits no ui:needs_refresh of its own, and the React
             # client invalidates its plugin list + bundle caches only on
@@ -408,6 +471,11 @@ class ModuleManager:
             bus.emit("ui:needs_refresh", {"reason": f"Plugin {resolved_module_id} installed."})
             await self._report_operation(resolved_module_id, module_name, "done", None)
         else:
+            # Remember the version that failed here BEFORE the revert swaps the
+            # files back: the row keeps saying "the cluster runs <failed>", and
+            # without this the reconcile would download, swap, verify and revert
+            # the same version again on every pass.
+            self._reconcile_verify_failed(resolved_module_id, self._read_folder_version(module_name))
             reverted = await self._auto_revert(module_name, resolved_module_id)
             entry = self.registry.get(resolved_module_id) if resolved_module_id else None
             detail = (
@@ -541,8 +609,10 @@ class ModuleManager:
             failed_version = getattr(self.registry[module_id].get("manifest"), "version", None)
         # Drop the broken version from memory before swapping files back.
         if module_id and module_id in self.registry:
-            self.unload_module(module_id)
-        if not plugin_service.restore_previous(module_name):
+            await self.unload_module_async(module_id)
+        # Folder swap + rmtree of the failed tree (seconds with a large vendor/)
+        # — off the event loop.
+        if not await asyncio.to_thread(plugin_service.restore_previous, module_name):
             log.error(f"AUTO-REVERT: restore failed for '{module_name}'.")
             return False
         importlib.invalidate_caches()
@@ -557,16 +627,24 @@ class ModuleManager:
             self.registry[restored_id]["reverted_from"] = failed_version
         if restored_id and db_instance.is_connected:
             await self._activate_saved_plugins()
-        plugin_service._record_history(
+        # Sync DB write (plus a checkfirst DDL round trip) — off the event loop.
+        await asyncio.to_thread(
+            plugin_service._record_history,
             restored_id, module_name, prev_version, action="upgrade", outcome="reverted",
         )
-        return True
+        # Announce the revert. These used to sit behind the ``return`` and never
+        # fired: no UI refresh, and installs without a tracked operation (desired
+        # plugins, cluster reconcile) reverted without any notification.
         bus.emit("plugin:rolled_back",
                  {"repo": module_name, "module_id": restored_id, "version": prev_version})
         bus.emit("plugin:install_failed",
                  {"repo": module_name, "error": "verification_failed_auto_reverted"})
+        if restored_id:
+            # The React client invalidates its plugin list/bundle caches on this topic.
+            bus.emit("plugin:state_changed", {"plugin_id": restored_id, "action": "reverted"})
         bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_name} auto-reverted."})
         log.info(f"AUTO-REVERT: '{module_name}' restored to previous version {prev_version}.")
+        return True
 
     def _mount_plugin_statics(self, module_id: str):
         """Mount a plugin's built UI bundle directory for React UI serving.
@@ -644,6 +722,10 @@ class ModuleManager:
         if entry.get("status") in ("active", "remote"):
             return
 
+        # Being disabled/unloaded right now (teardown is awaited): hands off.
+        if entry.get("stopping"):
+            return
+
         # Degraded plugins (critical manifest issues) must not be activated.
         if entry.get("status") == "degraded":
             log.warning(
@@ -673,10 +755,18 @@ class ModuleManager:
 
         if hasattr(module, 'setup'):
             if inspect.iscoroutinefunction(module.setup):
-                bus.create_tracked_task(
-                    self._safe_async_setup(module, ctx, module_id),
-                    name=f"module_setup:{module_id}"
-                )
+                # An async setup() is still running: status stays "initializing"
+                # until it finishes, and every further activation pass (the
+                # restore loop, the pass after each install event) must not
+                # start it a second time.
+                running = entry.get("setup_task")
+                if running is not None and not running.done():
+                    return
+                coro = self._safe_async_setup(module, ctx, module_id)
+                # Owned by the context so dispose() (disable/unload/reload)
+                # cancels a setup that is still in flight.
+                create_task = getattr(ctx, "create_task", None) or bus.create_tracked_task
+                entry["setup_task"] = create_task(coro, name=f"module_setup:{module_id}")
             else:
                 try:
                     module.setup(ctx)
@@ -686,8 +776,7 @@ class ModuleManager:
                     log.error(f"RUNTIME_ERROR: Sync setup failed for '{module_id}': {e}")
                     entry["status"] = "failed"
                     entry["error_message"] = str(e)
-                    if hasattr(ctx, "reset_runtime"):
-                        ctx.reset_runtime()
+                    self._discard_partial_setup(module_id, ctx)
                     try:
                         bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
                     except Exception as emit_err:
@@ -769,19 +858,54 @@ class ModuleManager:
         except Exception as e:
             log.error(f"DB_ERROR: Failed to persist plugin state for '{module_id}': {e}")
 
+    @staticmethod
+    def _discard_partial_setup(module_id: str, ctx) -> None:
+        """Undo what a failed ``setup()`` registered before it raised.
+
+        A failed module must not keep half of its handlers, tasks and leases
+        alive, and the next activation pass runs ``setup()`` again: without
+        this every retry would subscribe the handlers once more (closures are
+        new objects each run, and the bus delivers to each of them).
+        ``dispose()`` also resets a blocking runtime status.
+        """
+        try:
+            if hasattr(ctx, "dispose"):
+                ctx.dispose()
+            elif hasattr(ctx, "reset_runtime"):
+                ctx.reset_runtime()
+        except Exception as exc:
+            log.warning(f"SETUP: cleanup after the failed setup of '{module_id}' raised: {exc}")
+
+    def _owns_setup(self, module_id: str, ctx) -> bool:
+        """Does the running task still own the setup of ``module_id``?
+
+        False once the entry was disabled, unloaded or replaced by a reload
+        while ``setup()`` was awaiting — a finishing stale task must not flip
+        the status of (or mount statics for) a disabled entry or the new
+        incarnation.
+        """
+        entry = self.registry.get(module_id)
+        if not entry or entry.get("context") is not ctx or entry.get("status") != "initializing":
+            return False
+        return entry.get("setup_task") in (None, asyncio.current_task())
+
     async def _safe_async_setup(self, module, ctx, module_id):
         try:
             await module.setup(ctx)
-            if module_id in self.registry:
-                self.registry[module_id]["status"] = "active"
-                self._mount_plugin_statics(module_id)
+            if not self._owns_setup(module_id, ctx):
+                log.info(f"SETUP: async setup of '{module_id}' finished after it was disabled/reloaded — ignored.")
+                return
+            self.registry[module_id]["status"] = "active"
+            self._mount_plugin_statics(module_id)
+            # Plugins parked as "blocked" because they depend on this one.
+            self._activate_unblocked()
         except Exception as e:
             log.error(f"RUNTIME_ERROR: Async setup failed for '{module_id}': {e}")
-            if module_id in self.registry:
-                self.registry[module_id]["status"] = "failed"
-                self.registry[module_id]["error_message"] = str(e)
-                if hasattr(ctx, "reset_runtime"):
-                    ctx.reset_runtime()
+            if not self._owns_setup(module_id, ctx):
+                return
+            self.registry[module_id]["status"] = "failed"
+            self.registry[module_id]["error_message"] = str(e)
+            self._discard_partial_setup(module_id, ctx)
             # Emit on the global bus directly (bypass plugin permissions in ctx).
             try:
                 bus.emit("plugin:setup_failed", {"plugin_id": module_id, "error": str(e)})
@@ -820,6 +944,123 @@ class ModuleManager:
             log.error("PLUGIN_MANAGER: SessionLocal missing during DB activation.")
             return
 
+        # The first pass that gets this far is THE boot pass: when it is through
+        # (including the convergence at its end) the instance has its plugins.
+        # Passes nested inside it (one per install it triggers) do not count.
+        is_boot_pass = not self.boot_converged and not self._boot_pass_claimed
+        if is_boot_pass:
+            self._boot_pass_claimed = True
+        try:
+            await self._run_activation_pass()
+        except BaseException:
+            if is_boot_pass:
+                self._boot_pass_claimed = False  # the next pass (DB reconnect) tries again
+            raise
+        if is_boot_pass:
+            self._boot_watch_task = bus.create_tracked_task(
+                self._watch_boot_convergence(), name="module_manager:boot_convergence",
+            )
+
+    async def _run_activation_pass(self) -> None:
+        # 1. All blocking DB work of the pass (bootstrap DDL under the cluster
+        #    lock — up to 55 s behind a booting peer —, row inserts, the retried
+        #    row sync with its back-off sleeps) runs in ONE worker thread. It gets
+        #    a snapshot of the registry, so the thread never reads the live dict.
+        loaded = [
+            (module_id, entry["manifest"], entry.get("reverted_from"))
+            for module_id, entry in list(self.registry.items())
+            if entry["manifest"].type != "CORE"
+        ]
+        row_states = await asyncio.to_thread(self._restore_row_states, loaded)
+
+        # 2. Apply the desired state (setup runs here, outside any transaction).
+        for module_id, entry in list(self.registry.items()):
+            if entry["manifest"].type == "CORE" or module_id not in row_states:
+                continue
+            manifest = entry["manifest"]
+            entry["persisted"] = True
+            if entry.get("stopping"):
+                continue  # mid-disable/unload — that operation decides its state
+            if row_states[module_id]:
+                if not self._check_dependencies_met(manifest):
+                    entry["status"] = "blocked"
+                    log.warning(
+                        f"DB_RESTORE: Plugin '{module_id}' is enabled but waiting for dependencies."
+                    )
+                elif entry.get("status") != "active":
+                    log.info(f"DB_RESTORE: Activating plugin '{module_id}'")
+                    self._execute_setup(module_id)
+            elif self._is_running(entry):
+                # The row says "disabled" but setup() ran here (a peer disabled
+                # the plugin, or the row changed while this instance was away).
+                # Flipping the status alone left its tasks, subscriptions, leases
+                # and routes alive behind a "disabled" label — stop it properly
+                # (teardown awaited, see _stop_module_async).
+                log.info(f"DB_RESTORE: Plugin '{module_id}' is disabled in plugin_states — stopping it.")
+                await self.set_module_active(module_id, False, persist=False)
+            else:
+                if entry.get("status") != "disabled":
+                    log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
+                    entry["status"] = "disabled"
+
+        self._activate_unblocked()
+
+        await self._converge_after_restore()
+
+    def _boot_pending(self) -> list:
+        """What the boot pass started and has not finished: plugins still
+        ``initializing`` (async ``setup()``, or loaded and waiting for their
+        activation) and installs/upgrades in flight. A plugin whose install
+        failed into back-off, or that ended ``failed``/``degraded``/``blocked``,
+        is NOT pending — a dead repo must not keep the instance unready."""
+        pending = [
+            module_id for module_id, entry in self.registry.items()
+            if entry["manifest"].type == "PLUGIN" and entry.get("status") == "initializing"
+        ]
+        pending += [
+            key for key, lock in self._locks.items()
+            if key.startswith("install:") and lock.locked()
+        ]
+        pending += [f"upgrade:{module_id}" for module_id in self._reconcile_upgrading]
+        return pending
+
+    async def _watch_boot_convergence(self, poll_s: float = 0.5, retry_s: float = 15.0) -> None:
+        """Set ``boot_converged`` once nothing of the boot pass is pending."""
+        # Cluster: a boot reconcile that failed (database hiccup) installed
+        # nothing — this instance does not have its plugins yet. Retry it here
+        # instead of declaring convergence and waiting for the periodic pass.
+        while settings.LYNDRIX_CLUSTER_MODE == "cluster" and not self._boot_reconcile_ok:
+            await asyncio.sleep(retry_s)
+            self._boot_reconcile_ok = await self._boot_reconcile("boot-retry")
+        # Installs the pass triggered load in their own bus tasks: let those
+        # start (and take their install lock) before the first look.
+        await asyncio.sleep(0)
+        while True:
+            pending = self._boot_pending()
+            if not pending:
+                break
+            log.debug(f"PLUGIN_MANAGER: boot convergence waits for {pending}")
+            await asyncio.sleep(poll_s)
+        self.boot_converged = True
+        log.info(f"PLUGIN_MANAGER: boot convergence reached — {len(self.registry)} module(s) loaded.")
+
+    @staticmethod
+    def _is_running(entry: dict) -> bool:
+        """Did ``setup()`` run (or is it running) for this entry? True for
+        ``active``/``remote`` and for an async setup still in flight — not for
+        a freshly loaded entry that merely waits for its first activation."""
+        if entry.get("status") in ("active", "remote"):
+            return True
+        setup_task = entry.get("setup_task")
+        return setup_task is not None and not setup_task.done()
+
+    def _restore_row_states(self, loaded: list) -> dict:
+        """Bring ``plugin_states`` in line with the plugins loaded here and return
+        ``{module_id: is_active}``. Blocking — runs in a worker thread.
+
+        ``loaded`` is a snapshot ``[(module_id, manifest, reverted_from), …]`` of
+        the non-core registry entries.
+        """
         self._ensure_plugin_state_schema()
 
         # Custom plugin repositories live in their own table; create it on the
@@ -830,17 +1071,12 @@ class ModuleManager:
         except Exception as exc:
             log.warning(f"PLUGIN_MANAGER: custom repo schema bootstrap failed: {exc}")
 
-        enabled_plugin_ids = []
-
         # Rows for plugins seen for the first time are inserted one per
         # transaction up front: two instances booting together may both find a
         # row missing — the loser's IntegrityError must not abort the whole pass.
         from sqlalchemy.exc import IntegrityError
 
-        for module_id, entry in list(self.registry.items()):
-            if entry["manifest"].type == "CORE":
-                continue
-            manifest = entry["manifest"]
+        for module_id, manifest, _reverted_from in loaded:
             with db_instance.SessionLocal() as session:
                 if session.query(PluginState).filter(PluginState.module_id == module_id).first() is not None:
                     continue
@@ -858,19 +1094,16 @@ class ModuleManager:
                     session.rollback()
                     log.info(f"DB_RESTORE: plugin_states row for '{module_id}' was created by another instance.")
 
-        # 1. Row sync in one short, retried transaction (no side effects inside):
-        #    record the version this instance loaded, read back the desired state.
+        # Row sync in one short, retried transaction (no side effects inside):
+        # record the version this instance loaded, read back the desired state.
         def _sync_rows() -> dict:
             states: dict = {}
             with self._state_session() as session:
-                for module_id, entry in list(self.registry.items()):
-                    if entry["manifest"].type == "CORE":
-                        continue
-                    manifest = entry["manifest"]
+                for module_id, manifest, reverted_from in loaded:
                     db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
                     if not db_state:  # pragma: no cover - inserted above; defensive
                         continue
-                    self._sync_row_version(db_state, manifest, entry)
+                    self._sync_row_version(db_state, manifest, {"reverted_from": reverted_from})
                     if manifest.repo_url and db_state.repo_url != manifest.repo_url:
                         db_state.repo_url = manifest.repo_url
                     if not db_state.desired_version:
@@ -879,53 +1112,29 @@ class ModuleManager:
                 session.commit()
             return states
 
-        row_states = self._retry_state_write(_sync_rows)
+        return self._retry_state_write(_sync_rows)
 
-        # 2. Apply the desired state (setup runs here, outside any transaction).
-        for module_id, entry in list(self.registry.items()):
-            if entry["manifest"].type == "CORE" or module_id not in row_states:
-                continue
-            manifest = entry["manifest"]
-            entry["persisted"] = True
-            if row_states[module_id]:
-                enabled_plugin_ids.append(module_id)
-                if not self._check_dependencies_met(manifest):
-                    entry["status"] = "blocked"
-                    log.warning(
-                        f"DB_RESTORE: Plugin '{module_id}' is enabled but waiting for dependencies."
-                    )
-                elif entry.get("status") != "active":
-                    log.info(f"DB_RESTORE: Activating plugin '{module_id}'")
-                    self._execute_setup(module_id)
-            else:
-                if entry.get("status") != "disabled":
-                    log.info(f"DB_RESTORE: Plugin '{module_id}' remains disabled.")
-                    entry["status"] = "disabled"
+    def _activate_unblocked(self) -> None:
+        """Set up every plugin parked as ``blocked`` whose dependencies became
+        active, repeating until no further plugin can start.
 
-        pending_enabled = set(enabled_plugin_ids)
-        while pending_enabled:
+        Only ``blocked`` entries are retried. ``degraded`` (critical manifest
+        issue), ``failed`` and ``initializing`` (async setup in flight) are left
+        alone: resetting those to "initializing" used to slip a degraded plugin
+        past the guard in ``_execute_setup`` and ran an async ``setup()`` twice.
+        """
+        progressed = True
+        while progressed:
             progressed = False
-            for module_id in list(pending_enabled):
-                entry = self.registry.get(module_id)
-                if not entry or entry.get("status") == "active":
-                    pending_enabled.discard(module_id)
+            for module_id, entry in list(self.registry.items()):
+                if entry.get("status") != "blocked":
                     continue
-
-                manifest = entry["manifest"]
-                if not self._check_dependencies_met(manifest):
-                    entry["status"] = "blocked"
+                if not self._check_dependencies_met(entry["manifest"]):
                     continue
-
                 log.info(f"DB_RESTORE: Activating dependency-ready plugin '{module_id}'")
                 entry["status"] = "initializing"
                 self._execute_setup(module_id)
-                pending_enabled.discard(module_id)
                 progressed = True
-
-            if not progressed:
-                break
-
-        await self._converge_after_restore()
 
     async def _converge_after_restore(self) -> None:
         """Bring this instance to the desired plugin set after the saved states
@@ -940,10 +1149,17 @@ class ModuleManager:
         await self.reconcile_desired_plugins()
         if settings.LYNDRIX_CLUSTER_MODE != "cluster":
             return
+        self._boot_reconcile_ok = await self._boot_reconcile("boot")
+
+    async def _boot_reconcile(self, trigger: str) -> bool:
+        """One plugin_states reconcile; False when it failed or could not run
+        (database away) — never raises, startup must go on."""
         try:
-            await self.reconcile_cluster_state(trigger="boot")
+            summary = await self.reconcile_cluster_state(trigger=trigger)
+            return not (isinstance(summary, dict) and summary.get("skipped"))
         except Exception:
-            log.error("RECONCILE: boot-time cluster reconcile failed", exc_info=True)
+            log.error(f"RECONCILE: {trigger} cluster reconcile failed", exc_info=True)
+            return False
 
     def toggle_module(self, module_id: str, active: bool, *, persist: bool = True):
         """Toggles the module state in RAM and persists it to the DB.
@@ -951,86 +1167,244 @@ class ModuleManager:
         ``persist=False`` applies a state another instance already wrote to
         ``plugin_states`` (cluster reconcile) without writing it again or
         re-broadcasting ``plugin:desired_changed``.
+
+        Synchronous and therefore BLOCKING when it persists (DB round trips,
+        retry sleeps, possibly the bootstrap lock), and it cannot wait for an
+        async ``teardown``: code running on the event loop must use
+        ``await set_module_active(...)`` instead. Kept for sync callers and
+        backwards compatibility.
         """
         if module_id not in self.registry:
             return False
-
-        self._ensure_plugin_state_schema()
-
-        # 1. Persist to DB
-        if persist and db_instance.SessionLocal:
-            def _tx():
-                with self._state_session() as session:
-                    db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
-                    if not db_state:
-                        db_state = PluginState(module_id=module_id, is_active=active)
-                        session.add(db_state)
-                    else:
-                        db_state.is_active = active
-                    session.commit()
-
-            try:
-                self._retry_state_write(_tx)
-            except Exception as e:
-                log.error(f"DB_ERROR: Failed to save toggle state: {e}")
-                return False
-
-        # 2. Update RAM status and execute lifecycle hooks
-        entry = self.registry[module_id]
-        was_remote = entry.get("status") == "remote"
-
+        if persist and not self._persist_toggle(module_id, active):
+            return False
         if active:
-            manifest = entry["manifest"]
-            if not self._check_dependencies_met(manifest):
-                entry["status"] = "blocked"
-                log.warning(
-                    f"MODULE: Plugin '{module_id}' was enabled but is waiting for dependencies."
-                )
-            else:
-                entry["status"] = "initializing"
-                self._execute_setup(module_id)
-                log.info(f"MODULE: 🟢 '{module_id}' is now ACTIVE")
-            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
+            self._enable(module_id)
         else:
-            entry["status"] = "disabled"
-            log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
-            # "Soft" unload: remove UI and call teardown, but keep module in memory.
-            self._teardown_ui(module_id)
-            if was_remote:
-                # setup() never ran here — only the 503 stub has to go.
-                from core.api.router_registry import router_registry
-
-                router_registry.unmount(module_id)
-            entry = self.registry.get(module_id)
-            if entry and not was_remote and hasattr(entry["module"], 'teardown'):
-                log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")
-                teardown_func = entry["module"].teardown
-                if inspect.iscoroutinefunction(teardown_func):
-                    bus.create_tracked_task(
-                        teardown_func(entry["context"]),
-                        name=f"module_teardown:{module_id}"
-                    )
-                else:
-                    teardown_func(entry["context"])
-
-            # Stop the disabled plugin's bus subscriptions + background tasks and
-            # drop its static mount. dispose() clears the context's tracking lists,
-            # so a later re-enable (which re-runs setup on the same context)
-            # re-subscribes cleanly instead of being blocked as a duplicate.
-            ctx = entry.get("context") if entry else None
-            if ctx is not None and hasattr(ctx, "dispose"):
-                try:
-                    ctx.dispose()
-                except Exception as e:
-                    log.warning(f"DISABLE: dispose failed for '{module_id}': {e}")
-            self._unmount_plugin_statics(module_id)
-
-            bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
-
+            entry, was_remote = self._disable_begin(module_id)
+            self._stop_module(module_id, entry, teardown=not was_remote, label="DISABLE")
+            self._disable_end(module_id, entry)
         if persist:
             bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
-
         return True
+
+    async def set_module_active(self, module_id: str, active: bool, *, persist: bool = True) -> bool:
+        """Async ``toggle_module``: the ``plugin_states`` write runs in a worker
+        thread, the lifecycle part on the loop — and a disable waits (bounded)
+        for the plugin's ``teardown`` before its tasks are cancelled and its
+        leases released (see ``_stop_module_async``).
+
+        Toggles and unloads of one module are serialized, so an enable issued
+        while the disable is still tearing down starts from a stopped plugin.
+        """
+        async with self._lifecycle_lock(module_id):
+            if module_id not in self.registry:
+                return False
+            if persist and not await asyncio.to_thread(self._persist_toggle, module_id, active):
+                return False
+            if module_id not in self.registry:
+                return False  # unloaded while the row was being written
+            if active:
+                self._enable(module_id)
+            else:
+                entry, was_remote = self._disable_begin(module_id)
+                try:
+                    await self._stop_module_async(module_id, entry, teardown=not was_remote, label="DISABLE")
+                finally:
+                    self._disable_end(module_id, entry)
+        if persist:
+            bus.emit("plugin:desired_changed", {"plugin_id": module_id, "action": "enabled" if active else "disabled"})
+        return True
+
+    def _lifecycle_lock(self, module_id: str) -> asyncio.Lock:
+        """Serializes enable/disable/unload of one module. Separate from the
+        reload lock, which is held across the activation pass (and with it the
+        cluster reconcile, which may toggle the very same module)."""
+        return self._lock_for(f"lifecycle:{module_id}")
+
+    def _persist_toggle(self, module_id: str, active: bool) -> bool:
+        """Write ``is_active`` to the plugin's row (blocking). False = not saved."""
+        if not db_instance.SessionLocal:
+            return True  # no database (boot, tests): the in-memory state is all there is
+        self._ensure_plugin_state_schema()
+
+        def _tx():
+            with self._state_session() as session:
+                db_state = session.query(PluginState).filter(PluginState.module_id == module_id).first()
+                if not db_state:
+                    db_state = PluginState(module_id=module_id, is_active=active)
+                    session.add(db_state)
+                else:
+                    db_state.is_active = active
+                session.commit()
+
+        try:
+            self._retry_state_write(_tx)
+            return True
+        except Exception as e:
+            log.error(f"DB_ERROR: Failed to save toggle state: {e}")
+            return False
+
+    def _enable(self, module_id: str) -> None:
+        """In-memory part of an enable: run ``setup()`` (or park as blocked)."""
+        entry = self.registry[module_id]
+        if not self._check_dependencies_met(entry["manifest"]):
+            entry["status"] = "blocked"
+            log.warning(
+                f"MODULE: Plugin '{module_id}' was enabled but is waiting for dependencies."
+            )
+        else:
+            entry["status"] = "initializing"
+            self._execute_setup(module_id)
+            log.info(f"MODULE: 🟢 '{module_id}' is now ACTIVE")
+            # Plugins parked as "blocked" because they depend on this one start
+            # now, not at some later activation pass. (An async setup() does
+            # the same when it completes.)
+            self._activate_unblocked()
+        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} activated."})
+
+    def _disable_begin(self, module_id: str) -> tuple:
+        """First half of a disable: mark the entry and stop serving its UI/API.
+        Returns ``(entry, was_remote)``; the caller stops the module next."""
+        entry = self.registry[module_id]
+        was_remote = entry.get("status") == "remote"
+        entry["status"] = "disabled"
+        # Hands off for every other pass while teardown is awaited (_execute_setup
+        # refuses a stopping entry).
+        entry["stopping"] = True
+        # A still-running async setup() is cancelled by dispose() and no longer
+        # owns this entry (see _owns_setup).
+        entry.pop("setup_task", None)
+        log.info(f"MODULE: 🔴 '{module_id}' is now DISABLED")
+        # "Soft" unload: remove UI and call teardown, but keep module in memory.
+        self._teardown_ui(module_id)
+        # The plugin's REST API goes with it (for a "remote" plugin that is
+        # the 503 stub). Without this the routes kept answering 200 against
+        # a service whose tasks and subscriptions were already torn down;
+        # re-enabling re-registers them through setup() → register_routes.
+        try:
+            from core.api.router_registry import router_registry
+
+            router_registry.unmount(module_id)
+        except Exception as e:
+            log.warning(f"DISABLE: could not unmount routes for '{module_id}': {e}")
+        return entry, was_remote
+
+    def _disable_end(self, module_id: str, entry: dict) -> None:
+        entry.pop("stopping", None)
+        self._unmount_plugin_statics(module_id)
+        bus.emit("ui:needs_refresh", {"reason": f"Plugin {module_id} deactivated."})
+
+    # ------------------------------------------------------------------
+    # Stopping a module: teardown → dispose (tasks, subscriptions, leases)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _teardown_timeout() -> float:
+        """Seconds an unload/disable waits for a plugin's teardown work
+        (``LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT``, default 15)."""
+        # TODO(agent): declare LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT (float, default 15)
+        # on Settings in config.py (owned by another branch); until then the
+        # environment variable is read directly.
+        raw = getattr(settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", None)
+        if raw is None:
+            raw = os.environ.get("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT")
+        try:
+            return max(0.0, float(raw)) if raw not in (None, "") else 15.0
+        except (TypeError, ValueError):
+            return 15.0
+
+    def _call_teardown(self, module_id: str, entry: dict, label: str):
+        """Run the module's ``teardown`` hook. Returns the task of an async hook
+        (already scheduled), else ``None``. Never raises."""
+        teardown = getattr(entry.get("module"), "teardown", None)
+        if not callable(teardown):
+            return None
+        log.info(f"TEARDOWN: Executing teardown function for '{module_id}'")
+        try:
+            result = teardown(entry.get("context"))
+        except Exception as e:
+            log.warning(f"{label}: teardown of '{module_id}' raised: {e}")
+            return None
+        if asyncio.isfuture(result):
+            return result  # teardown returned a task it scheduled itself
+        if inspect.iscoroutine(result):
+            return bus.create_tracked_task(result, name=f"module_teardown:{module_id}")
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(result)
+        return None
+
+    @staticmethod
+    def _dispose_context(module_id: str, ctx, snapshot: list, label: str) -> None:
+        """Dispose the context, cancelling only the tasks that existed before
+        teardown ran — never the stop work teardown scheduled."""
+        if ctx is None or not hasattr(ctx, "dispose"):
+            return
+        try:
+            ctx.dispose(only_tasks=snapshot)
+        except Exception as e:
+            log.warning(f"{label}: dispose failed for '{module_id}': {e}")
+
+    def _stop_module(self, module_id: str, entry: dict, *, teardown: bool, label: str) -> None:
+        """Sync stop (legacy callers without a running coroutine): teardown is
+        called, an async hook and the tasks it scheduled run on unawaited —
+        the leases are released right away. Prefer ``_stop_module_async``."""
+        ctx = entry.get("context")
+        snapshot = list(getattr(ctx, "_tasks", None) or [])
+        if teardown:
+            self._call_teardown(module_id, entry, label)
+        self._dispose_context(module_id, ctx, snapshot, label)
+
+    async def _stop_module_async(self, module_id: str, entry: dict, *, teardown: bool, label: str) -> None:
+        """Stop a module in an order a plugin can rely on:
+
+        1. ``teardown(ctx)`` runs; an async hook and every task it created
+           through ``ctx.create_task`` are awaited, bounded by
+           ``LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT`` (stragglers are cancelled);
+        2. ``dispose()`` cancels the tasks that existed before teardown,
+           removes the subscriptions and only then releases the leases — a
+           peer never takes the work over while the old incarnation still
+           drains (``lost`` is not fired on dispose, as before);
+        3. the caller purges modules/ORM classes afterwards (unload only).
+
+        It used to be teardown-scheduled → dispose at once: a stop task created
+        in teardown was cancelled before its first step, and an async teardown
+        was still running when the lease had already moved on.
+        """
+        ctx = entry.get("context")
+        snapshot = list(getattr(ctx, "_tasks", None) or [])
+        waiting: set = set()
+        if teardown:
+            task = self._call_teardown(module_id, entry, label)
+            if task is not None:
+                waiting.add(task)
+        try:
+            await self._await_teardown_work(module_id, ctx, snapshot, waiting, label)
+        finally:
+            self._dispose_context(module_id, ctx, snapshot, label)
+
+    async def _await_teardown_work(self, module_id: str, ctx, snapshot: list, waiting: set, label: str) -> None:
+        loop = asyncio.get_running_loop()
+        timeout = self._teardown_timeout()
+        deadline = loop.time() + timeout
+        known = set(snapshot)
+        while True:
+            # Tasks created since the snapshot = work the teardown scheduled
+            # (and whatever that work schedules in turn).
+            waiting |= {t for t in (getattr(ctx, "_tasks", None) or []) if t not in known}
+            pending = {t for t in waiting if not t.done()}
+            if not pending:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                log.warning(
+                    f"{label}: teardown of '{module_id}' did not finish within {timeout:g}s — "
+                    f"cancelling {len(pending)} task(s) and continuing."
+                )
+                for task in pending:
+                    task.cancel()
+                return
+            await asyncio.wait(pending, timeout=remaining)
 
     # ------------------------------------------------------------------
     # Cluster: converge this instance on plugin_states (docs/ha/building-blocks/plugins.md)
@@ -1077,6 +1451,46 @@ class ModuleManager:
             f"RECONCILE: install of '{module_id}' failed {failures}× — next attempt in {delay // 60} min. "
             f"If the plugin no longer exists, remove its plugin_states row."
         )
+
+    @staticmethod
+    def _verify_backoff_key(module_id: str, version) -> tuple:
+        return (module_id, str(version or "").strip().lstrip("vV"))
+
+    def _reconcile_verify_allowed(self, module_id: str, version) -> bool:
+        """False while ``version`` of the plugin is backed off after it failed
+        verification on this instance."""
+        entry = self._reconcile_verify_backoff.get(self._verify_backoff_key(module_id, version))
+        if entry is None:
+            return True
+        import time as _time
+
+        failures, next_attempt = entry
+        if _time.monotonic() >= next_attempt:
+            return True
+        log.debug(
+            f"RECONCILE: '{module_id}' {version} failed verification here {failures}× — backed off."
+        )
+        return False
+
+    def _reconcile_verify_failed(self, module_id, version) -> None:
+        """Back off (10 min → 24 h) from a version that failed verification here."""
+        if not module_id or not version:
+            return
+        import time as _time
+
+        key = self._verify_backoff_key(module_id, version)
+        failures = self._reconcile_verify_backoff.get(key, (0, 0.0))[0] + 1
+        delay = min(_RECONCILE_INSTALL_BACKOFF_BASE_S * (2 ** (failures - 1)), _RECONCILE_INSTALL_BACKOFF_MAX_S)
+        self._reconcile_verify_backoff[key] = (failures, _time.monotonic() + delay)
+        log.warning(
+            f"RECONCILE: '{module_id}' {version} failed verification on this instance {failures}× — "
+            f"the cluster reconcile retries it in {delay // 60} min at the earliest."
+        )
+
+    def _reconcile_verify_cleared(self, module_id) -> None:
+        """A version of the plugin verified fine here: forget earlier failures."""
+        for key in [k for k in self._reconcile_verify_backoff if k[0] == module_id]:
+            self._reconcile_verify_backoff.pop(key, None)
 
     def _drop_legacy_plugin_states(self) -> None:
         """Delete plugin_states rows of plugins that became core components."""
@@ -1190,10 +1604,10 @@ class ModuleManager:
                     continue  # the upgrade path reloads + activates via plugin:files_changed
                 active_here = entry.get("status") in ("active", "initializing", "blocked", "remote")
                 if row["is_active"] and not active_here:
-                    if self.toggle_module(mid, True, persist=False):
+                    if await self.set_module_active(mid, True, persist=False):
                         summary["enabled"].append(mid)
                 elif not row["is_active"] and active_here:
-                    if self.toggle_module(mid, False, persist=False):
+                    if await self.set_module_active(mid, False, persist=False):
                         summary["disabled"].append(mid)
 
             # Uninstalled elsewhere: loaded here, this instance has seen its
@@ -1215,9 +1629,9 @@ class ModuleManager:
                         await plugin_service.uninstall_plugin(mid, folder)  # removes files, emits files_changed → unload
                     except Exception as exc:
                         log.warning(f"RECONCILE: uninstall of '{mid}' failed ({exc}) — unloading only.")
-                        self.unload_module(mid)
+                        await self.unload_module_async(mid)
                 else:
-                    self.unload_module(mid)
+                    await self.unload_module_async(mid)
                 summary["unloaded"].append(mid)
 
         await self._report_already_current()
@@ -1249,8 +1663,49 @@ class ModuleManager:
                     continue
                 if have.lstrip("vV") == want.lstrip("vV") and entry.get("status") in ("active", "remote"):
                     await self._report_operation(op["plugin_id"], op.get("repo_name"), "done", "already at this version")
+                    continue
+                # The operation asks for a version that failed verification here
+                # and is backed off: the reconcile will not install it now, so
+                # nothing would report and the operation would sit "running"
+                # until the timeout sweep. Say so at once — unless this instance
+                # is working on the plugin right now (it reports by itself).
+                reason = self._backed_off_reason(op["plugin_id"], want)
+                if reason and not self._plugin_busy(op["plugin_id"], entry, op.get("repo_name")):
+                    await self._report_operation(op["plugin_id"], op.get("repo_name"), "failed", reason)
         except Exception:
             log.debug("OPS: already-current report failed", exc_info=True)
+
+    def _backed_off_reason(self, module_id: str, version: str) -> str | None:
+        """Operator-facing text when ``version`` of the plugin is backed off on
+        this instance after a failed verification, else ``None``."""
+        if self._reconcile_verify_allowed(module_id, version):
+            return None
+        import time as _time
+
+        failures, next_attempt = self._reconcile_verify_backoff[self._verify_backoff_key(module_id, version)]
+        minutes = max(1, int((next_attempt - _time.monotonic()) // 60) + 1)
+        return (
+            f"{version} failed verification on this instance {failures}× and was reverted — "
+            f"not retried for another {minutes} min (restart the instance or install a fixed version)"
+        )
+
+    def _plugin_busy(self, module_id: str, entry: dict, repo_name: str | None) -> bool:
+        """An install/upgrade of the plugin is in flight on this instance."""
+        if module_id in self._reconcile_upgrading:
+            return True
+        module_file = getattr(entry.get("module"), "__file__", None)
+        folder = Path(module_file).parent.name if module_file else repo_name
+        if self._install_in_flight(folder) or self._install_in_flight(repo_name):
+            return True
+        try:
+            from .plugin_service import plugin_service
+
+            # Held from the download to the file swap (before the load handler runs).
+            return any(
+                name and plugin_service._install_lock(name).locked() for name in {folder, repo_name}
+            )
+        except Exception:
+            return False
 
     async def _reconcile_version(self, mid: str, entry: dict, row: dict, plugin_service, trigger: str, summary: dict) -> bool:
         """Bring this instance's artifact to ``plugin_states.installed_version`` when
@@ -1262,6 +1717,15 @@ class ModuleManager:
         if not want or not have or want.lstrip("vV") == have.lstrip("vV"):
             return False
         if mid in self._reconcile_upgrading or not self._reconcile_install_allowed(mid):
+            return False
+        # This instance already tried ``want`` and reverted it (verification
+        # failed): do not download → swap → verify → revert it again on every
+        # pass. ``reverted_from`` covers a revert whose back-off was not recorded.
+        key = self._verify_backoff_key(mid, want)
+        if self._verify_backoff_key(mid, entry.get("reverted_from")) == key \
+                and key not in self._reconcile_verify_backoff:
+            self._reconcile_verify_failed(mid, want)
+        if not self._reconcile_verify_allowed(mid, want):
             return False
         module_file = getattr(entry.get("module"), "__file__", None)
         if module_file and self._install_in_flight(Path(module_file).parent.name):
@@ -1379,37 +1843,47 @@ class ModuleManager:
                 log.error(f"TEARDOWN_ERROR: Failed to remove UI for '{module_id}': {e}")
 
     def unload_module(self, module_id: str):
+        """Sync unload. Cannot wait for an async ``teardown`` — coroutines use
+        ``await unload_module_async(...)``."""
         if module_id not in self.registry:
             return False
 
         self._teardown_ui(module_id)
         entry = self.registry[module_id]
+        # Run the plugin's own teardown first: background work the plugin
+        # started itself (asyncio.create_task, schedulers) otherwise survives
+        # the swap and keeps running against disposed ORM classes.
+        self._stop_module(module_id, entry, teardown=entry.get("status") != "remote", label="UNLOAD")
+        return self._finish_unload(module_id, entry)
 
-        # Run the plugin's own teardown first (reload/upgrade/uninstall used to
-        # skip it — only disable called it): background work the plugin started
-        # itself (asyncio.create_task, schedulers) otherwise survives the swap
-        # and keeps running against disposed ORM classes. Async hooks run as a
-        # tracked task; the new incarnation may start meanwhile — hooks must
-        # tolerate that (stop flags, bounded waits).
-        module = entry.get("module")
-        if entry.get("status") not in ("remote",) and callable(getattr(module, "teardown", None)):
+    async def unload_module_async(self, module_id: str) -> bool:
+        """Unload with the teardown awaited (bounded) before the context is
+        disposed, the leases are released and the modules are purged — see
+        ``_stop_module_async``. Used by reload, install/upgrade, uninstall,
+        auto-revert and the cluster reconcile."""
+        async with self._lifecycle_lock(module_id):
+            entry = self.registry.get(module_id)
+            if entry is None:
+                return False
+            # Stop serving first: no request may reach handlers of a plugin
+            # that is tearing down, and no other pass may set it up again.
+            entry["stopping"] = True
+            self._teardown_ui(module_id)
             try:
-                result = module.teardown(entry.get("context"))
-                if inspect.isawaitable(result):
-                    bus.create_tracked_task(result, name=f"module_teardown:{module_id}")
+                from core.api.router_registry import router_registry
+                router_registry.unmount(module_id)
             except Exception as e:
-                log.warning(f"UNLOAD: teardown of '{module_id}' raised: {e}")
+                log.warning(f"UNLOAD: could not unmount routes for '{module_id}': {e}")
+            await self._stop_module_async(
+                module_id, entry, teardown=entry.get("status") != "remote", label="UNLOAD",
+            )
+            if self.registry.get(module_id) is not entry:
+                return False  # replaced/removed while teardown was awaited
+            return self._finish_unload(module_id, entry)
 
-        # Dispose bus subscriptions + background tasks owned by this module so a
-        # reloaded/uninstalled plugin's stale handlers stop firing (and its
-        # de-dup keys are freed so the re-imported code can re-subscribe).
-        ctx = entry.get("context")
-        if ctx is not None and hasattr(ctx, "dispose"):
-            try:
-                ctx.dispose()
-            except Exception as e:
-                log.warning(f"UNLOAD: dispose failed for '{module_id}': {e}")
-
+    def _finish_unload(self, module_id: str, entry: dict) -> bool:
+        """Everything after the module was stopped: mounts, registrations,
+        ``sys.path``, ORM classes and the modules themselves."""
         # Remove any mounted React bundle route.
         self._unmount_plugin_statics(module_id)
 
@@ -1422,6 +1896,10 @@ class ModuleManager:
             notification_router.forget_plugin(module_id)
         except Exception:
             pass
+
+        # The plugin's strings go with it, so a reload/upgrade re-reads the
+        # locale files instead of serving the previous version's strings.
+        self._forget_plugin_locales(module_id, entry)
 
         # --- VENDORING: Clean up the plugin's private dependency path ---
         if entry["manifest"].type == "PLUGIN":
@@ -1447,7 +1925,18 @@ class ModuleManager:
 
         # --- ROBUST UNLOAD: Purge all submodules of the plugin from memory ---
         base_package_name = ".".join(entry["module"].__name__.split('.')[:-1])
-        modules_to_delete = [m for m in sys.modules if m.startswith(base_package_name)]
+        # "." boundary: `plugins.monitoring` must not take `plugins.monitoring_agent`
+        # (a running sibling) with it.
+        modules_to_delete = [
+            m for m in sys.modules
+            if m == base_package_name or m.startswith(base_package_name + ".")
+        ]
+        # Handlers the plugin subscribed directly on the bus (not through its
+        # context) go as well — the purged module must not keep answering events.
+        if entry["manifest"].type == "PLUGIN":
+            stale_handlers = bus.unsubscribe_package(base_package_name)
+            if stale_handlers:
+                log.info(f"UNLOAD: removed {stale_handlers} direct bus subscriber(s) of '{module_id}'.")
         # The plugin's SQLAlchemy models stay registered on the shared Base after
         # the module objects are gone; a re-import of the same folder (reload,
         # auto-revert, cluster reconcile) then fails with "Table '…' is already
@@ -1461,6 +1950,23 @@ class ModuleManager:
             
         log.info(f"UNLOAD: Module '{module_id}' unloaded from memory.")
         return True
+
+    def _forget_plugin_locales(self, module_id: str, entry: dict) -> None:
+        """Drop the locale directory and the client namespace a plugin registered
+        at load time. Never raises — a failure here must not block an unload."""
+        try:
+            locales_path = entry.get("locales_path")
+            if locales_path is not None:
+                unregister_plugin_locales(Path(locales_path))
+            namespace = getattr(entry.get("manifest"), "i18n_namespace", None)
+            shared = any(
+                getattr(other.get("manifest"), "i18n_namespace", None) == namespace
+                for other_id, other in self.registry.items() if other_id != module_id
+            )
+            if namespace and not shared:
+                unregister_client_namespace(namespace)
+        except Exception as e:
+            log.warning(f"UNLOAD: could not drop locales of '{module_id}': {e}")
 
     @staticmethod
     def _forget_plugin_models(base_package_name: str) -> int:
@@ -1520,7 +2026,9 @@ class ModuleManager:
             if not module_folder:
                 module_folder = entry["module"].__name__.split('.')[-2]
 
-            self.unload_module(module_id)
+            # Awaits the old incarnation's teardown (bounded) before the modules
+            # are purged and the new code is imported.
+            await self.unload_module_async(module_id)
             importlib.invalidate_caches()
             await asyncio.sleep(0.1) # Brief pause to let things settle
 
@@ -1638,7 +2146,7 @@ class ModuleManager:
             await self._reconcile_desired_plugins_locked(desired)
 
     async def _reconcile_desired_plugins_locked(self, desired: list):
-        self._ensure_plugin_state_schema()
+        await asyncio.to_thread(self._ensure_plugin_state_schema)
 
         from .plugin_service import plugin_service
 
@@ -1656,27 +2164,12 @@ class ModuleManager:
             safe_name = repo.replace("-", "_")
             plugin_path = plugin_service.plugin_dir / safe_name
 
-            # Check DB state for auto_update preference. Copy the values out of
-            # the session: after commit() the row is expired and reading it
-            # outside the ``with`` raised DetachedInstanceError (seen on first
-            # boot with pinned plugins, which aborted the install handler).
-            should_update = settings.LYNDRIX_PLUGINS_AUTO_UPDATE
-            state_found = False
-            state_installed: str | None = None
-            if db_instance.SessionLocal:
-                with db_instance.SessionLocal() as session:
-                    state = session.query(PluginState).filter(
-                        (PluginState.repo_url == url) |
-                        (PluginState.module_id.like(f"%{safe_name}%"))
-                    ).first()
-                    if state:
-                        state_found = True
-                        state_installed = state.installed_version
-                        if state.auto_update is not None:
-                            should_update = state.auto_update
-                        state.repo_url = url
-                        state.desired_version = version
-                        session.commit()
+            # Row lookup + update is sync DB work — off the event loop. The
+            # loaded plugin id is resolved here (registry access stays on the loop).
+            state_found, state_installed, row_auto_update = await asyncio.to_thread(
+                self._apply_desired_spec, url, version, safe_name, self._find_plugin_id_by_folder(safe_name),
+            )
+            should_update = settings.LYNDRIX_PLUGINS_AUTO_UPDATE if row_auto_update is None else row_auto_update
 
             # Tags are "v1.4.0", manifests say "1.4.0" — compare without the prefix
             # or a pinned plugin would be re-downloaded on every boot.
@@ -1699,11 +2192,62 @@ class ModuleManager:
 
         log.info("RECONCILE: Desired plugin check complete.")
 
+    def _apply_desired_spec(self, url: str, version: str, safe_name: str, loaded_id: str | None):
+        """Record a ``LYNDRIX_PLUGINS_DESIRED`` pin on the plugin's own row.
+
+        Returns ``(row found, installed_version, auto_update)`` — plain values,
+        the ORM row never leaves the session. Blocking; call via ``to_thread``.
+
+        The row is matched exactly: by the plugin id (loaded module, else the
+        manifest id read from the folder on disk) or by the normalised repo URL.
+        The former ``module_id LIKE '%<repo_name>%'`` was a substring match in
+        which ``_`` is a wildcard — the pin of ``…plugin-ai`` could rewrite
+        ``repo_url``/``desired_version`` of ``lyndrix.plugin.ai_assistant``, and
+        the cluster reconcile then installed the wrong repo for that id.
+        """
+        if not db_instance.SessionLocal:
+            return False, None, None
+        from .plugin_service import plugin_service
+
+        plugin_id = loaded_id or self._read_plugin_manifest_id(safe_name)
+        url_key = plugin_service._norm_url_key(url)
+
+        def _tx():
+            with self._state_session() as session:
+                rows = session.query(PluginState).all()
+                state = next((r for r in rows if plugin_id and r.module_id == plugin_id), None)
+                if state is None:
+                    state = next(
+                        (r for r in rows if r.repo_url and plugin_service._norm_url_key(r.repo_url) == url_key),
+                        None,
+                    )
+                if state is None:
+                    return False, None, None
+                found = (True, state.installed_version, state.auto_update)
+                state.repo_url = url
+                state.desired_version = version
+                session.commit()
+                return found
+
+        try:
+            return self._retry_state_write(_tx)
+        except Exception as exc:
+            log.warning(f"RECONCILE: could not record the desired state of '{safe_name}': {exc}")
+            return False, None, None
+
     def _ensure_plugin_state_schema(self):
         """Apply additive schema upgrades for plugin_states on existing installs."""
         if self._plugin_state_schema_ready or not db_instance.engine:
             return
+        # Reached from several worker threads at boot (row restore, lead install,
+        # desired-plugin pass): one of them runs the DDL, the others wait.
+        with self._schema_lock:
+            if self._plugin_state_schema_ready:
+                return
+            self._bootstrap_plugin_state_schema()
+            self._plugin_state_schema_ready = True
 
+    def _bootstrap_plugin_state_schema(self) -> None:
         required_columns = {
             "installed_version": "VARCHAR(50) NULL",
             "desired_version": "VARCHAR(50) NULL",
@@ -1743,6 +2287,5 @@ class ModuleManager:
                                 raise
             self._drop_legacy_plugin_states()
 
-        self._plugin_state_schema_ready = True
-
 module_manager = ModuleManager()
+module_manager.attach_bus()

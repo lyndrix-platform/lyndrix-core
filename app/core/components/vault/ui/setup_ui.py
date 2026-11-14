@@ -1,4 +1,4 @@
-from nicegui import ui
+from nicegui import context, ui
 from core.bus import bus
 from core.i18n import t
 from ui.theme import apply_theme, UIStyles
@@ -44,3 +44,15 @@ def render_setup_wizard():
     @bus.subscribe("vault:init_failed")
     def on_init_failed(payload):
         status_label.set_text(t("auth.setup.init_failed"))
+
+    # One subscriber per page render: remove it when the client goes away, or
+    # every closed tab leaves a handler behind that updates a dead label.
+    _unsubscribe_with_client("vault:init_failed", on_init_failed)
+
+
+def _unsubscribe_with_client(topic: str, handler) -> None:
+    """Unsubscribe ``handler`` from the bus when the current NiceGUI client is
+    deleted (falls back to its disconnect on NiceGUI versions without on_delete)."""
+    client = context.client
+    register = getattr(client, "on_delete", None) or client.on_disconnect
+    register(lambda: bus.unsubscribe(topic, handler))
