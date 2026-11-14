@@ -15,7 +15,6 @@ from typing import List, Optional
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
 from .models import CustomPluginRepository
-from . import git_providers
 
 log = get_logger("Core:CustomRepoService")
 
@@ -153,8 +152,12 @@ class CustomRepositoryService:
         if not normalized:
             raise ValueError("Repository URL is required.")
 
-        # Validate + derive metadata from the URL.
-        ref = git_providers.parse_repo(normalized)
+        # Validate + derive metadata from the URL — through the same parser and
+        # host allowlist as install/upgrade (SC-10). Without it any host could
+        # be stored and shown in the marketplace (install rejected it later).
+        from .plugin_service import plugin_service
+
+        ref = plugin_service.validate_repo_url(normalized)
         provider = ref.provider
         display_name = (name or "").strip() or ref.repo.replace("-", " ").title()
 

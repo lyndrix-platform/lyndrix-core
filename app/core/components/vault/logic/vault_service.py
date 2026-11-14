@@ -5,7 +5,9 @@ from core.bus import bus
 from core.logger import get_logger
 from config import settings
 
-from .crypto import decrypt_vault_keys, validate_master_key, WeakMasterKeyError, KEY_FILE
+from .crypto import (
+    decrypt_vault_keys, validate_master_key, WeakMasterKeyError, KEY_FILE, harden_key_storage,
+)
 from .vault_init import VaultInitializer
 
 log = get_logger("Core:VaultService")
@@ -169,6 +171,8 @@ class VaultService:
 
     async def check_vault_health(self, payload: dict | None = None) -> None:
         log.info("CHECK: Checking Vault status...")
+        # Key files written by older releases may still be group/world readable.
+        await asyncio.to_thread(harden_key_storage)
         try:
             if not await asyncio.to_thread(self.client.sys.is_initialized):
                 self._set_ui_state("needs_init")

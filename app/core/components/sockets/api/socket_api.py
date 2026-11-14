@@ -9,8 +9,10 @@ from typing import Optional
 
 from config import settings
 from core.api import require_permission
-from ..logic.mount_guardian import MountGuardian
-from ..providers.docker_provider import DockerProvider
+from ..logic.mount_guardian import (
+    MountGuardian, REPAIR_MODES, REPAIR_MODES_SECRET, is_valid_owner,
+)
+from ..providers.docker_provider import DockerProvider, validate_cleanup_request
 from ..registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -156,11 +158,17 @@ async def docker_cleanup(
     """
     Clean up stale Docker runner containers (requires permission).
     """
+    # SC-09: a literal, non-empty prefix and a minimum age — an empty prefix
+    # with age 0 would force-remove every container on the Docker host.
+    try:
+        prefix, max_age = validate_cleanup_request(request.prefix, request.max_age_minutes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     try:
         provider = get_docker_provider()
         count, error = await provider.cleanup_stale(
-            prefix=request.prefix,
-            max_age_minutes=request.max_age_minutes,
+            prefix=prefix,
+            max_age_minutes=max_age,
         )
         return {"removed": count, "error": error}
     except Exception as e:
@@ -190,6 +198,12 @@ async def repair_mount_permissions(
             detail="mode must be octal permission digits, e.g. '755'",
         )
 
+    if not is_valid_owner(request.user):
+        raise HTTPException(
+            status_code=422,
+            detail="user must be an account name or a numeric uid[:gid]",
+        )
+
     # Validate the target against the managed-mount allowlist (resolve symlinks
     # and reject path traversal outside an allowed root).
     from pathlib import Path
@@ -206,9 +220,21 @@ async def repair_mount_permissions(
             detail="target_dir is not within an allowed managed mount",
         )
 
+    # SC-15: only a small set of modes — never world-writable, and owner-only for
+    # the directory that stores the Vault key blob.
+    security_root = Path(settings.SECURITY_DIR).resolve()
+    in_security_dir = target == security_root or target.is_relative_to(security_root)
+    allowed_modes = REPAIR_MODES_SECRET if in_security_dir else REPAIR_MODES
+    if mode_octal not in allowed_modes:
+        raise HTTPException(
+            status_code=422,
+            detail="mode not allowed for this directory; use one of: "
+            + ", ".join(oct(m)[2:] for m in sorted(allowed_modes)),
+        )
+
     try:
         guardian = get_mount_guardian()
-        # repair_permissions shells out to sudo chown/chmod (blocking); run it in
+        # repair_permissions shells out to chown/chmod (blocking); run it in
         # a worker thread so the event loop stays responsive.
         error = await asyncio.to_thread(
             guardian.repair_permissions,

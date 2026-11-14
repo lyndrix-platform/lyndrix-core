@@ -28,6 +28,12 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `VAULT_NODES` | — | 2 | comma-separated list of every Vault node; today only health-checked by the preflight |
 | `LYNDRIX_MASTER_KEY` + `SECURITY_DIR/vault_keys.enc` | — | 0 | unchanged; in HA the key file is a shared secret on every instance |
 | `STORAGE_SECRET` | — | 0 | unchanged; **must be identical on every instance** (preflight compares fingerprints; a mismatch keeps the instance out of rotation) |
+| `LYNDRIX_PLUGIN_REPO_HOSTS` | `github.com` | 0 | comma-separated git hosts the plugin installer may talk to (install / upgrade / version list / custom repositories) |
+| `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST` | — = the single non-GitHub host in `LYNDRIX_PLUGIN_REPO_HOSTS` | 2 | the one host the global GitLab token (`GITLAB_TOKEN` / Vault `gitlab_token`) is sent to — over https only, never across a redirect. With several GitLab hosts on the allowlist and this unset, the token is not used at all |
+| `LYNDRIX_PLUGIN_PIP_INDEX_URL` | — = PyPI | 2 | package index for plugin requirement installs (internal mirror). pip runs `--isolated` with a minimal environment, so `PIP_INDEX_URL` / `pip.conf` of the container are ignored on purpose |
+| `LYNDRIX_PLUGIN_PIP_CACHE_DIR` | — | 2 | optional shared wheel cache for the followers of a cluster; only on storage nobody but the cores can write ([plugins](building-blocks/plugins.md)) |
+| `LYNDRIX_PLUGIN_MAX_ARCHIVE_MB` · `LYNDRIX_PLUGIN_MAX_EXTRACTED_MB` · `LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES` | `200` · `1024` · `20000` | 2 | limits for a plugin archive: streamed download size, sum of the extracted files, number of entries — an install beyond them fails |
+| `LYNDRIX_THEME_MAX_ZIP_MB` | `50` | 2 | upper bound for an uploaded theme ZIP (upload and extracted size); `tokens.json` / `components.json` are capped at 2 MB, images at 8 MB each |
 
 Planned but not shipped (documented so the names are reserved): `LYNDRIX_MIGRATE_MODE`,
 `LYNDRIX_PLUGIN_ARTIFACTS`, `LYNDRIX_STORAGE_DRIVER` / `LYNDRIX_STORAGE_S3_*`, `VAULT_UNSEAL_MODE`,

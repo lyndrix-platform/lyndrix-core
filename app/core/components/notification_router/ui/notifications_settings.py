@@ -17,6 +17,7 @@ from nicegui import ui
 
 from core.api import UIStyles
 from core.i18n import t
+from ui.secret_fields import field_prefill, is_configured, secret_hint, values_to_save
 
 from ..logic.endpoint_registry import endpoint_registry
 from ..logic.precedence import (
@@ -263,11 +264,18 @@ def _render_provider_row(adapter) -> None:
                             ui.icon("lock", size="11px")
                             ui.label(t("notification_router.locked_by_env")).classes("text-[10px]")
                 else:
-                    widget = ui.input(
-                        value=cf.current_value or "",
-                        password=cf.sensitive,
-                        placeholder=cf.placeholder or "",
-                    ).props("outlined dark dense").classes("w-64")
+                    # A stored secret is never prefilled (SC-08) — only whether
+                    # one exists is shown; blank on save keeps it.
+                    with ui.column().classes("gap-0 shrink-0"):
+                        widget = ui.input(
+                            value=field_prefill(cf),
+                            password=cf.sensitive,
+                            placeholder=cf.placeholder or "",
+                        ).props("outlined dark dense").classes("w-64")
+                        if cf.sensitive:
+                            ui.label(secret_hint(is_configured(cf.current_value))).classes(
+                                UIStyles.TEXT_HINT + " text-[10px]"
+                            )
                     input_widgets[cf.key] = widget
 
         # Save button reads .value at click time — no fragile event binding needed.
@@ -279,10 +287,10 @@ def _render_provider_row(adapter) -> None:
                 _widgets=input_widgets,
             ) -> None:
                 all_ok = True
-                for cf in _fields:
-                    w = _widgets.get(cf.key)
-                    val = w.value if w else ""
-                    if not _adapter.save_config(cf.key, val):
+                entered = {key: w.value for key, w in _widgets.items()}
+                # Blank secret fields are skipped: keep the stored value.
+                for key, val in values_to_save(_fields, entered).items():
+                    if not _adapter.save_config(key, val):
                         all_ok = False
                 if all_ok:
                     ui.notify(

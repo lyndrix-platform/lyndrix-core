@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     # followers of a cluster, but anyone who can write that directory could poison
     # the next install on every instance — enable only on trusted storage.
     LYNDRIX_PLUGIN_PIP_CACHE_DIR: str = ""
+    # Package index for plugin requirement installs (e.g. an internal mirror).
+    # Empty = PyPI. pip runs with --isolated and a minimal environment, so
+    # PIP_INDEX_URL / pip.conf of the core container are deliberately ignored.
+    LYNDRIX_PLUGIN_PIP_INDEX_URL: str = ""
+    # Size limits for plugin archives (SC-13). Generous on purpose — the largest
+    # first-party plugin is ~15 MB / ~200 files — they only stop a runaway
+    # download or a zip bomb from filling memory and the plugin volume.
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_MB: int = 200       # downloaded archive
+    LYNDRIX_PLUGIN_MAX_EXTRACTED_MB: int = 1024    # sum of the extracted files
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES: int = 20000  # entries in the archive
+    # Upper bound for an uploaded theme ZIP (tokens/components JSON + images).
+    LYNDRIX_THEME_MAX_ZIP_MB: int = 50
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"
@@ -110,6 +122,11 @@ class Settings(BaseSettings):
     # the core stops waiting for it and continues (the plugin lifecycle reads
     # this; a hanging teardown must not block the operation forever).
     LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: int = 15
+    # Host the global GitLab token (GITLAB_TOKEN / Vault gitlab_token) belongs to.
+    # A token is only ever sent to its own host, over https. Empty = the single
+    # non-GitHub host in LYNDRIX_PLUGIN_REPO_HOSTS; with several GitLab hosts on
+    # the allowlist this must be set, otherwise the token is not used at all.
+    LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST: str = ""
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
