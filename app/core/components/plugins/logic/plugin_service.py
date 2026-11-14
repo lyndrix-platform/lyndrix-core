@@ -724,29 +724,48 @@ class PluginService:
         return base, git_providers.auth_header(ref.provider, token)
 
     @staticmethod
-    async def _get_archive(client, url: str, ref: "git_providers.RepoRef", auth: dict,
-                           max_redirects: int = 5):
-        """GET an archive URL, following redirects by hand (SC-07).
+    def _limit_bytes(setting: str, default_mb: int) -> int:
+        """A size limit setting (MB) in bytes; a non-positive value falls back to the default."""
+        try:
+            megabytes = int(getattr(settings, setting, default_mb) or default_mb)
+        except (TypeError, ValueError):
+            megabytes = default_mb
+        return (megabytes if megabytes > 0 else default_mb) * 1024 * 1024
 
-        Same-origin redirects keep the auth header. A redirect to one of the
-        provider's known download hosts (GitHub → codeload.github.com) is
-        followed without it. Anything else is refused: the token must not
+    @classmethod
+    async def _get_archive(cls, client, url: str, ref: "git_providers.RepoRef", auth: dict,
+                           dest: Path, max_redirects: int = 5):
+        """Download an archive URL into ``dest``, following redirects by hand.
+
+        Redirects (SC-07): same-origin keeps the auth header. A redirect to one
+        of the provider's known download hosts (GitHub → codeload.github.com)
+        is followed without it. Anything else is refused: the token must not
         follow a 3xx to another host and the installer must not be steered to
         an arbitrary one.
+
+        Size (SC-13): the body is streamed to disk and cut off at
+        ``LYNDRIX_PLUGIN_MAX_ARCHIVE_MB`` instead of being held in memory in
+        full. Only a 200 response is written; for every other status the
+        (closed) response is returned so the caller can try its fallbacks.
         """
+        max_bytes = cls._limit_bytes("LYNDRIX_PLUGIN_MAX_ARCHIVE_MB", 200)
         origin = url
         headers = dict(auth)
         for _ in range(max_redirects + 1):
-            response = await client.get(url, headers=headers, follow_redirects=False)
-            if response.status_code not in (301, 302, 303, 307, 308):
-                return response
-            location = response.headers.get("location")
-            if not location:
-                return response
+            request = client.build_request("GET", url, headers=headers)
+            response = await client.send(request, stream=True, follow_redirects=False)
+            try:
+                if response.status_code == 200:
+                    await cls._stream_to_file(response, dest, max_bytes)
+                    return response
+                location = response.headers.get("location")
+                if response.status_code not in (301, 302, 303, 307, 308) or not location:
+                    return response
+            finally:
+                await response.aclose()
+
             target = str(response.url.join(location))
-            if git_providers.same_origin(origin, target):
-                pass  # same host: the token stays where it belongs
-            else:
+            if not git_providers.same_origin(origin, target):
                 target_parts = httpx.URL(target)
                 allowed = git_providers.ARCHIVE_REDIRECT_HOSTS.get(ref.provider, frozenset())
                 if target_parts.scheme != "https" or (target_parts.host or "").lower() not in allowed:
@@ -754,9 +773,55 @@ class PluginService:
                         f"archive download was redirected to an unexpected host "
                         f"('{target_parts.host}') — refused"
                     )
-                headers = {}
+                headers = {}  # signed download URL: no token beyond the origin
             url = target
         raise PluginInstallError("archive download: too many redirects")
+
+    @staticmethod
+    async def _stream_to_file(response, dest: Path, max_bytes: int) -> None:
+        """Write a streamed response body to ``dest``; abort beyond ``max_bytes``."""
+        too_large = PluginInstallError(
+            f"plugin archive is larger than {max_bytes // (1024 * 1024)} MB "
+            f"(LYNDRIX_PLUGIN_MAX_ARCHIVE_MB)"
+        )
+        declared = response.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise too_large
+        written = 0
+        # Blocking file IO stays off the event loop, chunk by chunk.
+        handle = await asyncio.to_thread(open, dest, "wb")
+        try:
+            async for chunk in response.aiter_bytes(chunk_size=256 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise too_large
+                await asyncio.to_thread(handle.write, chunk)
+        finally:
+            await asyncio.to_thread(handle.close)
+
+    @classmethod
+    def _check_archive_limits(cls, zip_ref: zipfile.ZipFile) -> None:
+        """Refuse a zip bomb before a single file is extracted (SC-13).
+
+        ``zipfile`` never writes more than an entry's declared size, so checking
+        the declared sizes bounds what extraction can put on disk.
+        """
+        entries = zip_ref.infolist()
+        try:
+            max_files = int(getattr(settings, "LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES", 20000) or 20000)
+        except (TypeError, ValueError):
+            max_files = 20000
+        if len(entries) > max_files:
+            raise PluginInstallError(
+                f"plugin archive has {len(entries)} entries, more than the allowed "
+                f"{max_files} (LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES)"
+            )
+        max_extracted = cls._limit_bytes("LYNDRIX_PLUGIN_MAX_EXTRACTED_MB", 1024)
+        if sum(entry.file_size for entry in entries) > max_extracted:
+            raise PluginInstallError(
+                f"plugin archive would extract to more than "
+                f"{max_extracted // (1024 * 1024)} MB (LYNDRIX_PLUGIN_MAX_EXTRACTED_MB)"
+            )
 
     def _allowed_repo_hosts(self) -> list[str]:
         """Configured git host allowlist (``LYNDRIX_PLUGIN_REPO_HOSTS``)."""
@@ -957,7 +1022,7 @@ class PluginService:
                 zip_url = git_providers.archive_url(ref, ref_name, is_tag=not is_latest)
 
                 log.info(f"DOWNLOAD: Fetching source from {zip_url}")
-                response = await self._get_archive(client, zip_url, ref, auth)
+                response = await self._get_archive(client, zip_url, ref, auth, zip_path)
 
                 # GitHub fallback: many repos default to 'master' instead of 'main'.
                 if (
@@ -968,7 +1033,7 @@ class PluginService:
                 ):
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
                     zip_url = git_providers.archive_url(ref, "master", is_tag=False)
-                    response = await self._get_archive(client, zip_url, ref, auth)
+                    response = await self._get_archive(client, zip_url, ref, auth, zip_path)
 
                 # Tag-form fallback: plugin_states stores the manifest version
                 # ("1.1.2") while many repos only tag "v1.1.2" (or the other way
@@ -978,15 +1043,13 @@ class PluginService:
                     for alt in self._alternate_tag_forms(version):
                         alt_url = git_providers.archive_url(ref, alt, is_tag=True)
                         log.info(f"DOWNLOAD: tag '{version}' not found, trying '{alt}'...")
-                        response = await self._get_archive(client, alt_url, ref, auth)
+                        response = await self._get_archive(client, alt_url, ref, auth, zip_path)
                         if response.status_code != 404:
                             zip_url = alt_url
                             break
 
+                # A 200 body has already been streamed into zip_path (size-capped).
                 response.raise_for_status()
-
-                # File write is blocking; keep it off the event loop.
-                await asyncio.to_thread(zip_path.write_bytes, response.content)
 
             # 3. Safe Extraction into Staging (ZIP Slip protected)
             log.info("FILESYSTEM: Extracting archive into hidden staging area...")
@@ -998,6 +1061,7 @@ class PluginService:
                     # This is a larger architectural change (signing keys + source
                     # allowlist + dependency sandboxing) deferred out of this pass;
                     # the ZIP-slip and requirements checks below are the interim guards.
+                    self._check_archive_limits(zip_ref)
                     staging_resolved = staging_base.resolve()
                     root_folder = zip_ref.namelist()[0].split('/')[0]
                     # Validate all paths stay within staging_base. Use is_relative_to

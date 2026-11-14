@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # Empty = PyPI. pip runs with --isolated and a minimal environment, so
     # PIP_INDEX_URL / pip.conf of the core container are deliberately ignored.
     LYNDRIX_PLUGIN_PIP_INDEX_URL: str = ""
+    # Size limits for plugin archives (SC-13). Generous on purpose — the largest
+    # first-party plugin is ~15 MB / ~200 files — they only stop a runaway
+    # download or a zip bomb from filling memory and the plugin volume.
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_MB: int = 200       # downloaded archive
+    LYNDRIX_PLUGIN_MAX_EXTRACTED_MB: int = 1024    # sum of the extracted files
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES: int = 20000  # entries in the archive
+    # Upper bound for an uploaded theme ZIP (tokens/components JSON + images).
+    LYNDRIX_THEME_MAX_ZIP_MB: int = 50
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"

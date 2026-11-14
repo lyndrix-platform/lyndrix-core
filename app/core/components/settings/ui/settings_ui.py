@@ -238,8 +238,16 @@ def _render_theme_management_card() -> None:
 
                 def _handle_upload(e):
                     try:
-                        data = e.content.read()
+                        from core.components.settings.logic import themes_service
+                        limit = themes_service.max_theme_zip_bytes()
+                        data = e.content.read(limit + 1)
                         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                            # Same size limits as the REST upload (SC-13).
+                            try:
+                                themes_service.check_zip_limits(zf, len(data))
+                            except themes_service.ThemeRejected as rejected:
+                                ui.notify(str(rejected), type='negative')
+                                return
                             names = zf.namelist()
                             if 'tokens.json' not in names or 'components.json' not in names:
                                 ui.notify(
@@ -253,7 +261,6 @@ def _render_theme_management_card() -> None:
                                 return
                             # Same gate as the REST upload: unsafe values are
                             # refused before anything is written (SC-02).
-                            from core.components.settings.logic import themes_service
                             try:
                                 themes_service.check_uploaded_pack(
                                     theme_id, zf.read('tokens.json'), zf.read('components.json'))

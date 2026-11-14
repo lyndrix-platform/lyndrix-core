@@ -176,9 +176,22 @@ async def upload_theme(
     if theme_id == "default":
         raise HTTPException(status_code=400, detail="Cannot overwrite the default theme")
 
-    data = await file.read()
+    from core.components.settings.logic import themes_service
+
+    # Read at most one byte beyond the limit: enough to know it is too large
+    # without buffering an arbitrarily big upload (SC-13).
+    limit = themes_service.max_theme_zip_bytes()
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(
+            status_code=413, detail=f"Theme ZIP is larger than {limit // (1024 * 1024)} MB"
+        )
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            try:
+                themes_service.check_zip_limits(zf, len(data))
+            except themes_service.ThemeRejected as exc:
+                raise HTTPException(status_code=413, detail=str(exc))
             names = zf.namelist()
             if "tokens.json" not in names or "components.json" not in names:
                 raise HTTPException(
