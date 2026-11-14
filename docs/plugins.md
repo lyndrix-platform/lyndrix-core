@@ -324,7 +324,8 @@ Effects of a **blocking** `starting`/`maintenance` status:
   `X-Plugin-Runtime` header (JSON status) — public routes included;
 - the React shell shows a warm-up panel with message, progress and elapsed time instead of the
   plugin UI and mounts the UI by itself when `ready` arrives;
-- `/api/health` does not call the plugin's `health()` while it is `starting`.
+- `/api/health` does not call the plugin's `health()` while it is `starting` or in a blocking
+  `maintenance` (it reports `unknown` with `details.reason`).
 
 A non-blocking status only adds a banner above the plugin UI. The status is broadcast as
 `plugin:runtime_status` (a core-owned topic, no manifest permission needed), exposed as
