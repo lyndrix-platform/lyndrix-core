@@ -170,8 +170,17 @@ class LeaseKeeper:
         """One acquire/renew pass over every wanted lease (also used by tests)."""
         async with self._lock:
             for name, entry in list(self._wanted.items()):
+                # A renewal that does not answer within the TTL is a missed
+                # renewal: by then a peer may hold the lease. Stop waiting (the
+                # worker thread ends on its own once the socket times out) so the
+                # fencing below runs on time instead of after the TCP timeout.
                 try:
-                    ok: Optional[bool] = await self._coordinator.try_acquire(name, entry.ttl)
+                    ok: Optional[bool] = await asyncio.wait_for(
+                        self._coordinator.try_acquire(name, entry.ttl), timeout=entry.ttl
+                    )
+                except asyncio.TimeoutError:
+                    ok = None
+                    log.warning("LEASE: try_acquire('%s') did not answer within %ss — coordinator hanging", name, entry.ttl)
                 except Exception as exc:
                     ok = None
                     log.debug("LEASE: try_acquire('%s') failed: %s", name, exc)

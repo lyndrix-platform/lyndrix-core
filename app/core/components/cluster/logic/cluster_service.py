@@ -93,6 +93,10 @@ class ClusterService:
         self._hb_task: Optional[asyncio.Task] = None
         self._start_task: Optional[asyncio.Task] = None
         self._hb_failures = 0
+        self._hb_last_ok_mono = 0.0
+        self.last_heartbeat_ok_at: Optional[datetime] = None
+        self.last_heartbeat_error: Optional[str] = None
+        self.last_heartbeat_duration_s: Optional[float] = None
         self._preflight_running = False
 
         bus.subscribe("db:connected")(self.on_db_connected)
@@ -294,18 +298,85 @@ class ClusterService:
             pass
         return out
 
+    @property
+    def heartbeat_timeout_s(self) -> float:
+        """A beat that has not finished within the lease TTL is a missed beat —
+        the peers already count this instance as dead by then."""
+        return float(max(self.ttl, self.heartbeat_s))
+
     async def _heartbeat_once(self) -> None:
+        """One heartbeat: register, drop the storage marker, refresh peers/leader.
+
+        Bounded by :attr:`heartbeat_timeout_s`: a hung database socket (peer
+        vanished, kernel still retransmitting) used to park the heartbeat task —
+        and with it every later beat — until the TCP timeout (~16 min). Now the
+        beat is abandoned after the TTL (the worker thread finishes on its own
+        once pymysql's ``read_timeout`` fires), the failure is logged with its
+        duration, and the next beat runs on a fresh pooled connection.
+        """
+        started = time.monotonic()
         try:
-            await self.coordinator.heartbeat(self._meta())
-            if self.is_cluster:
-                await asyncio.to_thread(self._write_storage_marker)
-            await self.refresh_instances()
-            await self._refresh_leader()
-            self._hb_failures = 0
+            await asyncio.wait_for(self._heartbeat_body(), timeout=self.heartbeat_timeout_s)
+        except asyncio.TimeoutError:
+            self._record_heartbeat_failure(f"timed out after {self.heartbeat_timeout_s:.0f}s", started)
         except Exception as exc:
-            self._hb_failures += 1
-            if self._hb_failures in (1, 10, 100):
-                log.warning("CLUSTER: heartbeat failed (%s×): %s", self._hb_failures, exc)
+            self._record_heartbeat_failure(str(exc)[:200] or exc.__class__.__name__, started)
+        else:
+            self._record_heartbeat_success(started)
+
+    async def _heartbeat_body(self) -> None:
+        await self.coordinator.heartbeat(self._meta())
+        if self.is_cluster:
+            await asyncio.to_thread(self._write_storage_marker)
+        await self.refresh_instances()
+        await self._refresh_leader()
+
+    def _record_heartbeat_success(self, started: float) -> None:
+        elapsed = time.monotonic() - started
+        self.last_heartbeat_duration_s = elapsed
+        if self._hb_failures:
+            gap = time.monotonic() - self._hb_last_ok_mono if self._hb_last_ok_mono else 0.0
+            log.warning(
+                "CLUSTER: heartbeat recovered after %s failure(s), %.0fs without a successful beat (lease ttl %ss)",
+                self._hb_failures, gap, self.ttl,
+            )
+        elif elapsed > self.heartbeat_s:
+            # Slow but successful: the DB answered later than the interval —
+            # the early warning before beats start timing out.
+            log.warning("CLUSTER: heartbeat took %.1fs (interval %ss) — database latency", elapsed, self.heartbeat_s)
+        self._hb_failures = 0
+        self._hb_last_ok_mono = time.monotonic()
+        self.last_heartbeat_ok_at = _utcnow()
+        self.last_heartbeat_error = None
+
+    def _record_heartbeat_failure(self, error: str, started: float) -> None:
+        elapsed = time.monotonic() - started
+        self._hb_failures += 1
+        self.last_heartbeat_error = error
+        self.last_heartbeat_duration_s = elapsed
+        since_ok = time.monotonic() - self._hb_last_ok_mono if self._hb_last_ok_mono else None
+        # Every one of the first three failures, then about once a minute —
+        # enough to see the outage start, last and end in the log without a
+        # line per beat.
+        every = max(1, 60 // max(1, self.heartbeat_s))
+        if self._hb_failures <= 3 or self._hb_failures % every == 0:
+            log.warning(
+                "CLUSTER: heartbeat failed (%s×, %.1fs, %s since the last successful beat; peers see this instance "
+                "dead after %ss): %s",
+                self._hb_failures, elapsed, f"{since_ok:.0f}s" if since_ok is not None else "never succeeded",
+                self.ttl, error,
+            )
+
+    def heartbeat_status(self) -> dict:
+        """Heartbeat telemetry for ``GET /api/cluster`` (Cluster page) and the logs."""
+        return {
+            "interval_s": self.heartbeat_s,
+            "timeout_s": self.heartbeat_timeout_s,
+            "failures": self._hb_failures,
+            "last_ok_at": self.last_heartbeat_ok_at.isoformat() if self.last_heartbeat_ok_at else None,
+            "last_duration_s": round(self.last_heartbeat_duration_s, 2) if self.last_heartbeat_duration_s is not None else None,
+            "last_error": self.last_heartbeat_error,
+        }
 
     def _meta(self) -> dict:
         ready, reasons = self.readiness()
@@ -532,6 +603,7 @@ class ClusterService:
                 "heartbeat_s": self.heartbeat_s,
                 "poll_ms": self.poll_ms,
                 "bridge": {"attached": self.bridge.attached, "published": self.bridge.published, "relayed": self.bridge.relayed},
+                "heartbeat": self.heartbeat_status(),
             },
             "instances": [i.to_dict() for i in self._instances],
             "alive": len(alive),
