@@ -1,10 +1,11 @@
 import asyncio
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.api.security import ApiIdentity, require_api_auth, require_permission
+from core.components.auth.logic.models import email_is_trusted
 from core.logger import get_logger
 
 log = get_logger("Core:UsersAPI")
@@ -21,7 +22,67 @@ _ASSIGNABLE_ROLES = {"superadmin", "bot"}
 
 
 def _is_superadmin(identity: ApiIdentity) -> bool:
-    return identity.is_system or "superadmin" in identity.roles
+    # Never a scoped key: its scopes bound it, whoever the owner is.
+    return identity.is_superadmin
+
+
+def _require_unscoped(identity: ApiIdentity, action: str) -> None:
+    """Credential management needs a full credential (AZ-04).
+
+    A scope-restricted API key is a deliberately limited credential. If it
+    could mint a key, set a password or change the email it would simply grant
+    itself the owner's full power — scopes would bound nothing.
+    """
+    if identity.is_scoped:
+        raise HTTPException(
+            status_code=403,
+            detail=f"A scope-restricted API key cannot {action}; use a session or an unscoped key",
+        )
+
+
+def _require_superadmin_for(target, identity: ApiIdentity, action: str) -> None:
+    """Credentials of a superadmin account are superadmin business (AZ-07).
+
+    ``superadmin`` is the one unbounded tier. An ``admin:write`` holder who could
+    mint a key for such an account, reset its password, point its email (the
+    identity auto-link target) somewhere else or delete it would BE that tier.
+    ``target`` is the stored user row; a superadmin acting on their own account
+    passes because they are one.
+    """
+    if "superadmin" in (getattr(target, "roles", None) or []) and not _is_superadmin(identity):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only a superadmin may {action} of a superadmin account",
+        )
+
+
+def _require_local_password(target, identity: ApiIdentity, is_self: bool) -> None:
+    """An account without a local password cannot give itself one (AZ-05).
+
+    SSO/LDAP-only profiles are meant to be governed by the directory: a local
+    password set through self-service would keep working after the account is
+    disabled there, and sidestep the provider's MFA. An administrator may
+    still set one deliberately.
+    """
+    if is_self and not getattr(target, "hashed_password", None) and not identity.is_system:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This account signs in through an external provider and has no local "
+                "password; ask an administrator to set one"
+            ),
+        )
+
+
+def _revoke_other_sessions(username: str, identity: ApiIdentity) -> int:
+    """After a password change: sign out the account's login sessions, except
+    the one that made the change. Named API keys are deliberately kept."""
+    keep = identity.key_id if _same_username(username, identity.username) else None
+    try:
+        return _api_key_service().revoke_sessions(username, except_key_id=keep)
+    except Exception as exc:  # the password IS changed — report, do not fail the request
+        log.error(f"API: Could not revoke sessions of '{username}' after a password change: {exc}")
+        return 0
 
 
 def _registry_role_exists(role_id: str) -> bool:
@@ -61,6 +122,9 @@ class UserOut(BaseModel):
     username: str
     full_name: Optional[str] = None
     email: Optional[str] = None
+    # False = the owner typed the address in themselves: it is shown, but never
+    # used to auto-link an LDAP/OIDC identity to this account.
+    email_trusted: bool = False
     roles: List[str] = Field(default_factory=list)
     groups: List[str] = Field(default_factory=list)
     extra_permissions: List[str] = Field(default_factory=list)
@@ -80,6 +144,9 @@ class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
+    # Required when a user changes their OWN password through PATCH (an
+    # administrator resetting somebody else's does not need it).
+    current_password: Optional[str] = None
     roles: Optional[List[str]] = None
     groups: Optional[List[str]] = None
 
@@ -115,22 +182,40 @@ def _user_service():
 def change_password(
     username: str,
     payload: PasswordChangeRequest,
+    request: Request,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     """Self-service for your own account; changing another user's password
     requires the ``admin:write`` permission. The current password is always
-    verified by the service before the change is applied."""
+    verified by the service before the change is applied — as a throttled
+    login attempt, so a wrong one answers 400 and too many wrong ones 429."""
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
+
+    _require_unscoped(identity, "change a password")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Cannot change another user's password")
+    target = _user_service().get_by_username(username)
+    if target is not None:
+        _require_superadmin_for(target, identity, "change the password")
+        _require_local_password(target, identity, _same_username(target.username, identity.username))
 
-    ok, msg = _user_service().change_password(
-        username, payload.current_password, payload.new_password
-    )
+    try:
+        ok, msg = _user_service().change_password(
+            username, payload.current_password, payload.new_password,
+            client_ip=client_host(request), raise_rejected=True,
+        )
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
+    revoked = _revoke_other_sessions(str(target.username) if target is not None else username, identity)
     log.info(f"API: Password changed for '{username}' by '{identity.username}'.")
-    return {"status": "ok", "message": msg}
+    return {"status": "ok", "message": msg, "revoked_sessions": revoked}
 
 
 def _api_key_service():
@@ -148,6 +233,7 @@ def _to_user_out(user) -> UserOut:
         username=str(user.username),
         full_name=str(user.full_name or "") or None,
         email=str(user.email or "") or None,
+        email_trusted=email_is_trusted(user),
         roles=list(user.roles or []),
         groups=list(user.groups or []),
         extra_permissions=list(user.extra_permissions or []),
@@ -209,17 +295,23 @@ async def create_user(
     # never blocks every other client (same rule as change_password).
     hashed = await asyncio.to_thread(hash_password, payload.password)
 
+    new_email = (payload.email or "").strip() or None
+
     def _persist():
         with _db().SessionLocal() as s:
             user = User(
                 username=uname,
                 hashed_password=hashed,
                 full_name=(payload.full_name or "").strip() or None,
-                email=(payload.email or "").strip() or None,
+                email=new_email,
+                email_trusted=bool(new_email),  # set by an administrator
                 roles=requested_roles,
                 groups=sorted(set(payload.groups)),
                 extra_permissions=[],
             )
+            # A new account never inherits keys/preferences an earlier account
+            # of this name left behind.
+            _api_key_service().purge_for_username(s, uname)
             s.add(user)
             s.commit()
             s.refresh(user)
@@ -252,6 +344,7 @@ def get_user(
 async def update_user(
     username: str,
     payload: UserUpdateRequest,
+    request: Request,
     identity: ApiIdentity = Depends(require_api_auth),
 ):
     """Self-service for full_name/email/password (the React dashboard lets any
@@ -259,9 +352,20 @@ async def update_user(
     ``admin:write``, and role changes additionally require the caller to be
     superadmin. "Changed" means the field is present in the payload AND
     differs from the stored value — echoing back an unchanged value never
-    403s."""
+    403s.
+
+    Changing your OWN password needs ``current_password`` (422 without it, 400
+    when it is wrong, 429 after too many wrong ones) — a stolen session must
+    not be enough to take the account over. A scope-restricted API key can
+    change neither password nor email (403)."""
     from core.components.auth.logic.models import User
     from core.components.auth.logic.hashing import hash_password
+
+    # Authorization BEFORE the lookup: without admin rights the answer for any
+    # other name is 403, whether or not such a user exists (404 here would let
+    # every account enumerate usernames).
+    if not _same_username(username, identity.username) and not identity.allows("admin:write"):
+        raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
 
     current = await asyncio.to_thread(_user_service().get_by_username, username)
     if not current:
@@ -303,12 +407,61 @@ async def update_user(
     if payload.password is not None and len(payload.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
+    email_changes = (
+        payload.email is not None
+        and payload.email.strip().casefold() != (current.email or "").strip().casefold()
+    )
+    if payload.password is not None:
+        _require_unscoped(identity, "change a password")
+        _require_superadmin_for(current, identity, "reset the password")
+    if email_changes:
+        _require_unscoped(identity, "change an email address")
+        # The email is what an LDAP/OIDC identity is auto-linked by.
+        _require_superadmin_for(current, identity, "change the email")
+
+    if payload.password is not None:
+        _require_local_password(current, identity, is_self)
+
+    if is_self and payload.password is not None:
+        # Self-service: prove knowledge of the current password, as the
+        # dedicated POST /{username}/password endpoint always did. Runs as a
+        # throttled login attempt off the event loop.
+        if not payload.current_password:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Changing your own password requires your current password "
+                    "(field 'current_password', or POST /api/users/{username}/password — "
+                    "in the app: Settings → Profile → Password)"
+                ),
+            )
+        from core.components.auth.logic.auth_service import auth_service
+        from core.components.auth.logic.login_guard import LoginRejected, client_host
+
+        try:
+            confirmed = await asyncio.to_thread(
+                auth_service.verify_local_login,
+                str(current.username), payload.current_password, client_host(request),
+            )
+        except LoginRejected as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        if confirmed is None:
+            # 400, not 401: the session is fine, only the confirmation failed.
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+
     # Hash off the event loop before opening the DB session (Argon2 is heavy).
     hashed = (
         await asyncio.to_thread(hash_password, payload.password)
         if payload.password is not None
         else None
     )
+    # An administrator may already set any other account's email, so their own
+    # counts as an admin edit too; everyone else's own edit is self-service.
+    email_set_by_admin = identity.allows("admin:write")
 
     def _persist():
         with _db().SessionLocal() as s:
@@ -319,7 +472,15 @@ async def update_user(
             if payload.full_name is not None:
                 user.full_name = payload.full_name.strip() or None
             if payload.email is not None:
-                user.email = payload.email.strip() or None
+                new_email = payload.email.strip() or None
+                # Echoing the stored address back (the profile form always
+                # sends it) is not a change and keeps its provenance.
+                if (new_email or "").casefold() != (user.email or "").strip().casefold():
+                    # Trusted only when set with administrative authority; an
+                    # address the owner types in is unverified and must never
+                    # become a target for identity auto-linking (AZ-02).
+                    user.email_trusted = bool(new_email) and email_set_by_admin
+                user.email = new_email
             if hashed is not None:
                 user.hashed_password = hashed
             if payload.roles is not None:
@@ -343,8 +504,15 @@ async def update_user(
 
         access_service.invalidate_cache(username)
 
+    response = {"status": "ok", "user": out.model_dump()}
+    if hashed is not None:
+        # A new password ends the sessions opened with the old one.
+        response["revoked_sessions"] = await asyncio.to_thread(
+            _revoke_other_sessions, str(current.username), identity
+        )
+
     log.info(f"API: User '{username}' updated by '{identity.username}'.")
-    return {"status": "ok", "user": out.model_dump()}
+    return response
 
 
 @users_router.delete("/{username}", summary="Delete a user")
@@ -363,15 +531,42 @@ def delete_user(
     # self and blocked.
     if _same_username(target.username, identity.username):
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    _require_superadmin_for(target, identity, "delete the account")
 
+    from core.components.auth.logic import access_service
+    from core.components.auth.logic.models import UserIdentity
+
+    # One transaction: the account goes together with everything that could
+    # still act as it or would be inherited by a later account of this name —
+    # API keys and login sessions, linked external identities, preferences.
     with _db().SessionLocal() as s:
         user = s.query(User).filter(User.username == username).first()
         if user:
+            _api_key_service().purge_for_username(s, str(user.username))
+            s.query(UserIdentity).filter(UserIdentity.user_id == user.id).delete(synchronize_session=False)
             s.delete(user)
             s.commit()
+    access_service.invalidate_cache(str(target.username))
+    _forget_personal_notifications(str(target.username))
 
     log.info(f"API: User '{username}' deleted by '{identity.username}'.")
     return {"status": "ok", "deleted": username}
+
+
+def _forget_personal_notifications(username: str) -> None:
+    """Best effort: drop the notifications addressed to a deleted account and
+    its read/dismissed state, so a later account of that name starts empty."""
+    try:
+        from core.components.notifications.model.models import NotificationRow, NotificationUserState
+
+        with _db().SessionLocal() as s:
+            s.query(NotificationUserState).filter(NotificationUserState.user_id == username).delete(
+                synchronize_session=False)
+            s.query(NotificationRow).filter(NotificationRow.user_id == username).delete(
+                synchronize_session=False)
+            s.commit()
+    except Exception as exc:  # table not created yet, DB hiccup — never fail the delete over it
+        log.debug(f"API: Notification cleanup for deleted user '{username}' skipped: {exc}")
 
 
 # ── Per-user API key management ─────────────────────────────────────────────
@@ -401,11 +596,24 @@ def create_api_key(
 ):
     """Self-service: any authenticated user may mint their own keys. Creating
     a key for another user requires ``admin:write``."""
+    # A scoped key cannot mint keys at all — so every key in existence is
+    # bounded by the credential that created it (new scopes ⊆ minter's scopes).
+    _require_unscoped(identity, "create API keys")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + key insert are blocking DB calls.
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    _require_superadmin_for(target, identity, "create API keys")
+    from core.components.auth.logic.api_key_service import SESSION_LABEL_PREFIX, is_session_label
+
+    if is_session_label(payload.label):
+        # The prefix marks login sessions (expiry, sign-out on password change).
+        raise HTTPException(
+            status_code=422,
+            detail=f"The label prefix '{SESSION_LABEL_PREFIX}' is reserved for login sessions; choose another name",
+        )
 
     raw_key, info = _api_key_service().create(username, label=payload.label, scopes=payload.scopes)
     log.info(f"API: API key '{info.label}' created for '{username}' by '{identity.username}'.")
@@ -425,11 +633,16 @@ def revoke_api_key(
 ):
     """Self-service: any authenticated user may revoke their own keys. Revoking
     another user's key requires ``admin:write``."""
+    if identity.is_scoped and not (username == identity.username and key_id == identity.key_id):
+        # A scoped key may retire ITSELF, nothing else.
+        _require_unscoped(identity, "revoke other API keys or sessions")
     if username != identity.username and not identity.allows("admin:write"):
         raise HTTPException(status_code=403, detail="Missing required permission: admin:write")
     # Sync (threadpool): the lookup + revoke are blocking DB calls.
-    if not _user_service().get_by_username(username):
+    target = _user_service().get_by_username(username)
+    if not target:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    _require_superadmin_for(target, identity, "revoke API keys or sessions")
     ok = _api_key_service().delete(key_id, username=username)
     if not ok:
         raise HTTPException(status_code=404, detail=f"API key {key_id} not found for '{username}'")

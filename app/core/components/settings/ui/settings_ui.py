@@ -329,6 +329,12 @@ async def render_settings_page():
 
     _secrets = await asyncio.to_thread(_load_secret_flags)
 
+    def _may_set_system_key() -> bool:
+        """The system API key is a superadmin matter (AZ-07); the service
+        refuses it for everybody else. Other secrets ignore this flag."""
+        from core.session import get_user_value
+        return 'superadmin' in (get_user_value('roles', []) or [])
+
     def _save_secret(key: str, widget, hint_label, saved_message: str) -> None:
         """Store a newly entered secret; a blank input keeps the current one."""
         new_value = entered_secret(widget.value)
@@ -336,7 +342,11 @@ async def render_settings_page():
             ui.notify('Nothing entered — the stored value was kept.', type='info')
             return
         try:
-            system_config_service.apply({key: new_value}, persist=True, apply_runtime=False)
+            system_config_service.apply({key: new_value}, persist=True, apply_runtime=False,
+                                        allow_system_api_key=_may_set_system_key())
+        except PermissionError as e:
+            ui.notify(str(e), type='negative')
+            return
         except RuntimeError:
             ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
             return
@@ -350,7 +360,11 @@ async def render_settings_page():
     def _remove_secret(key: str, widget, hint_label, removed_message: str) -> None:
         """Explicitly delete a stored secret (blank no longer means "clear")."""
         try:
-            system_config_service.apply({}, persist=True, apply_runtime=False, remove_keys=[key])
+            system_config_service.apply({}, persist=True, apply_runtime=False, remove_keys=[key],
+                                        allow_system_api_key=_may_set_system_key())
+        except PermissionError as e:
+            ui.notify(str(e), type='negative')
+            return
         except RuntimeError:
             ui.notify(t('core.settings.system.vault_not_connected'), type='warning')
             return

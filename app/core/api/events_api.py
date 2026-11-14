@@ -26,10 +26,11 @@ import hmac
 import json
 import secrets
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any, Optional, Set
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from core.api.security import ApiIdentity, authenticate_request, optional_api_auth, require_api_auth
@@ -42,6 +43,41 @@ log = get_logger("Core:EventsAPI")
 events_router = APIRouter(tags=["Events"])
 
 _SSE_QUEUES: Set[asyncio.Queue] = set()
+
+# Who opened which stream ("user:<name>" / "addr:<client address>"), for the
+# per-user connection cap. Weak keys and counted against _SSE_QUEUES, so an
+# entry can never outlive its stream and keep somebody locked out.
+_SSE_OWNERS: "weakref.WeakKeyDictionary[asyncio.Queue, str]" = weakref.WeakKeyDictionary()
+# Streams without a login (boot/login/unseal pages) share a client address
+# behind NAT or an untrusted proxy — their cap is this many times the user cap.
+_ANONYMOUS_CAP_FACTOR = 5
+
+
+def _admit_stream(owner: str, *, anonymous: bool) -> None:
+    """Refuse another stream for ``owner`` beyond the cap (429).
+
+    Every open stream holds a queue, a task and a socket; without a cap one
+    account (or one unauthenticated client) could open them without bound.
+    The shell uses one stream per tab and retries with backoff, falling back
+    to polling meanwhile.
+    """
+    try:
+        from config import settings
+
+        cap = int(getattr(settings, "LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER", 0) or 0)
+    except Exception:  # pragma: no cover - defensive
+        cap = 0
+    if cap <= 0:
+        return
+    if anonymous:
+        cap *= _ANONYMOUS_CAP_FACTOR
+    open_streams = sum(1 for q, who in list(_SSE_OWNERS.items()) if who == owner and q in _SSE_QUEUES)
+    if open_streams >= cap:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many open event streams for this account. Close a tab or try again shortly.",
+            headers={"Retry-After": "30"},
+        )
 
 # Topics sent to authenticated clients.
 _AUTH_TOPICS = frozenset({
@@ -304,6 +340,18 @@ async def _refresh_audience(cred: _Credential) -> _Audience:
         return _UNKNOWN
 
 
+def _may_join_authenticated_stream(identity: Optional[ApiIdentity]) -> bool:
+    """Whether a header-authenticated caller gets the authenticated topic set.
+
+    A ticket (and the stream opened with it) carries the user name only, so a
+    scope-restricted key would receive everything its owner may see. It is
+    therefore admitted only when its scopes cover general read access.
+    """
+    if identity is None:
+        return False
+    return not identity.is_scoped or identity.allows("api:read")
+
+
 def _mint_stream_ticket(username: str, *, is_system: bool = False, key_id: Optional[int] = None) -> str:
     claims: dict[str, Any] = {"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}
     if is_system:
@@ -357,7 +405,15 @@ async def mint_stream_ticket(request: Request, identity: ApiIdentity = Depends(r
     Clients call this endpoint (header-authenticated) right before connecting and
     pass the returned ticket as ``/api/events?ticket=…``. Tickets are process-local
     and expire after ``expires_in`` seconds — mint a fresh one per (re)connect.
+
+    A scope-restricted API key gets a ticket only when its scopes include
+    ``api:read`` (403 otherwise): the ticket stands for the whole account.
     """
+    if not _may_join_authenticated_stream(identity):
+        raise HTTPException(
+            status_code=403,
+            detail="This API key's scopes do not include api:read — no authenticated event stream",
+        )
     key_id: Optional[int] = None
     if identity.method == "user_api_key":
         try:
@@ -417,6 +473,8 @@ async def sse_stream(
 
     Each event payload is a JSON object: ``{"topic": "...", "payload": {...}}``.
     """
+    if identity is not None and not _may_join_authenticated_stream(identity):
+        identity = None  # scoped key without api:read → public topics only
     claims = _verify_stream_ticket_claims(ticket) if ticket else None
     cred: Optional[_Credential] = None
     if identity is not None:
@@ -440,8 +498,18 @@ async def sse_stream(
     allowed = _AUTH_TOPICS if cred else _PUBLIC_TOPICS
     username = cred.username if cred else None
 
+    # Per-user (or per-address, for anonymous streams) cap on open streams (AZ-11).
+    if username:
+        owner = f"user:{username}"
+    else:
+        from core.components.vault.logic.rate_limit import normalize_client_address
+
+        owner = f"addr:{normalize_client_address(request.client.host if request.client else None)}"
+    _admit_stream(owner, anonymous=not username)
+
     q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
     _SSE_QUEUES.add(q)
+    _SSE_OWNERS[q] = owner
 
     return StreamingResponse(
         _stream(request, q, allowed, username, cred, audience),

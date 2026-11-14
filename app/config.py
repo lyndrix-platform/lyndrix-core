@@ -146,6 +146,27 @@ class Settings(BaseSettings):
     # Resolution order: this env var > Vault > disabled.
     LYNDRIX_SYSTEM_API_KEY: Optional[str] = None
 
+    # --- PASSWORD LOGIN ---
+    # HTTP Basic (``Authorization: Basic``) against the LOCAL accounts on API
+    # routes. On by default so existing automation keeps working; set to false
+    # once every client uses an API key or a session token. Basic is throttled
+    # like the login form and is never evaluated on the routes that answer
+    # without authentication (/api/health, /api/auth/whoami, /api/events).
+    LYNDRIX_API_BASIC_AUTH: bool = True
+    # Password verifications (Argon2id, 64 MiB each) one process runs at the
+    # same time. More of them wait a few seconds for a free slot and are then
+    # answered 503 + Retry-After — memory stays bounded under a login flood.
+    LYNDRIX_LOGIN_VERIFY_CONCURRENCY: int = 4
+    # Absolute lifetime of a login session (the token a web/SSO login returns)
+    # in hours; after that the token answers 401 and the user signs in again.
+    # 0 = never expires. Named API keys a user creates are NOT affected.
+    LYNDRIX_SESSION_MAX_AGE_HOURS: int = 720
+    # Open event streams (GET /api/events, one per browser tab) a single user
+    # may hold on one instance; further ones get 429 and the shell falls back
+    # to polling until one closes. Streams without a login are limited per
+    # client address at five times this value. 0 = unlimited.
+    LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER: int = 20
+
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
     LYNDRIX_LDAP_URL: Optional[str] = None

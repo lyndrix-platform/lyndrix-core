@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
@@ -39,6 +39,7 @@ from core.api import (
     require_permission,
     system_api_key_configured,
 )
+from core.api.security import basic_auth_enabled
 from core.api.permissions_api import permissions_router
 from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
@@ -81,9 +82,13 @@ app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",
     version=__version__,
+    # The interactive docs and the schema are served by the gated routes below.
     docs_url=None,
     redoc_url=None,
+    openapi_url=None,
 )
+
+_OPENAPI_URL = "/openapi.json"
 
 app.add_middleware(
     CORSMiddleware,
@@ -131,11 +136,6 @@ def _custom_openapi():
                 "scheme": "bearer",
                 "description": "Send the API key as a Bearer token.",
             },
-            "BasicAuth": {
-                "type": "http",
-                "scheme": "basic",
-                "description": "Dashboard username and password (local IAM).",
-            },
         }
     )
     # Offered globally so the Authorize button applies the chosen credential to
@@ -143,8 +143,15 @@ def _custom_openapi():
     schema["security"] = [
         {"ApiKeyHeader": []},
         {"BearerAuth": []},
-        {"BasicAuth": []},
     ]
+    if basic_auth_enabled():
+        # Only advertised while LYNDRIX_API_BASIC_AUTH is on.
+        components["securitySchemes"]["BasicAuth"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "Username and password of a LOCAL account (throttled; prefer an API key).",
+        }
+        schema["security"].append({"BasicAuth": []})
     app.openapi_schema = schema
     return schema
 
@@ -152,11 +159,29 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
+def _api_docs_access(request: Request) -> None:
+    """Who may read the API map (OpenAPI schema, Swagger UI, ReDoc).
+
+    It lists every core and plugin route with its parameters — reconnaissance
+    material. Open while ``ENV_TYPE=dev``; otherwise it needs ``admin:read``
+    (send an API key / session token header, e.g. with curl — a browser cannot
+    attach one to a page load).
+    """
+    if settings.ENV_TYPE == "dev":
+        return
+    require_permission("admin:read")(request)
+
+
+@app.get(_OPENAPI_URL, include_in_schema=False)
+async def openapi_schema(_: None = Depends(_api_docs_access)):
+    return JSONResponse(app.openapi())
+
+
 @app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
+async def custom_swagger_ui_html(_: None = Depends(_api_docs_access)):
     """Swagger UI with the Lyndrix dark theme and an Authorize button."""
     response = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — Docs",
         swagger_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
         swagger_ui_parameters={"persistAuthorization": True, "tryItOutEnabled": True},
@@ -170,9 +195,9 @@ async def custom_swagger_ui_html():
 
 
 @app.get("/redoc", include_in_schema=False)
-async def custom_redoc_html():
+async def custom_redoc_html(_: None = Depends(_api_docs_access)):
     return get_redoc_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — ReDoc",
         redoc_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
     )
@@ -221,6 +246,32 @@ def _public_config_snapshot() -> dict:
         for s in EDITABLE_SETTINGS
     ]
     return sanitized
+
+
+# What every signed-in user's shell needs from the configuration: branding,
+# locale and theme defaults. Everything else in the snapshot (database and
+# Vault hosts, bootstrap account names, LDAP/OIDC mappings, plugin sources) is
+# for administrators.
+_USER_CONFIG_FIELDS = (
+    "APP_NAME",
+    "APP_TITLE",
+    "DEFAULT_LOCALE",
+    "SUPPORTED_LOCALES",
+    "DEFAULT_THEME_ID",
+    "THEME_ENGINE_ENABLED",
+)
+
+
+def _user_config_snapshot() -> dict:
+    """The configuration view of a caller without ``admin:read``.
+
+    Same shape as the full snapshot (``env_locked`` / ``editable_settings``
+    are present but empty) so a shell reads both the same way.
+    """
+    view = {name: getattr(settings, name, None) for name in _USER_CONFIG_FIELDS}
+    view["env_locked"] = []
+    view["editable_settings"] = []
+    return view
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -608,13 +659,16 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_permission(
     """Expose runtime settings from config.py with secrets redacted.
 
     Requires authentication and the ``api:read`` permission (system API key,
-    HTTP Basic, per-user API key, or dashboard session).
+    HTTP Basic, per-user API key, or dashboard session). Callers with
+    ``admin:read`` get the full snapshot; everybody else only the branding,
+    locale and theme fields a shell needs (``restricted: true``).
     """
-    snapshot = _public_config_snapshot()
+    full = identity.allows("admin:read")
     return {
         "status": "ok",
         "authenticated_as": identity.username,
-        "config": snapshot,
+        "config": _public_config_snapshot() if full else _user_config_snapshot(),
+        "restricted": not full,
     }
 
 
@@ -637,16 +691,31 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
+    from core.components.settings.logic.system_config_service import (
+        SYSTEM_API_KEY,
+        system_config_service,
+    )
+
+    # The system API key is the master credential (an ``is_system`` identity
+    # that bypasses every permission check): admin:write alone must not be able
+    # to mint it — superadmin or the system key itself only.
+    is_superadmin = identity.is_superadmin   # never a scope-restricted key
+    if SYSTEM_API_KEY in updates and not is_superadmin:
+        raise HTTPException(status_code=403, detail="Only a superadmin may set the system API key")
+
     # Reject env-locked keys up-front: an OS env var always wins on the next boot,
     # so persisting it to Vault would silently no-op and confuse the operator.
-    locked = [key for key in updates if settings.is_env_locked(key)]
+    # (Only editable settings can be locked; anything else is refused with 422
+    # by the service, whether or not an environment variable of that name exists.)
+    editable_fields = {spec.field for spec in EDITABLE_SETTINGS}
+    locked = [key for key in updates if key in editable_fields and settings.is_env_locked(key)]
+    if SYSTEM_API_KEY in updates and (os.getenv("LYNDRIX_SYSTEM_API_KEY") or "").strip():
+        locked.append(SYSTEM_API_KEY)
     if locked:
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": sorted(locked)},
         )
-
-    from core.components.settings.logic.system_config_service import system_config_service
 
     try:
         # Vault read-modify-write (sync hvac) → off the event loop.
@@ -655,7 +724,10 @@ async def set_runtime_config(
             updates,
             persist=payload.persist_in_vault,
             apply_runtime=payload.apply_runtime,
+            allow_system_api_key=is_superadmin,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         # Structured pydantic errors or an unsupported-keys message.
         raise HTTPException(status_code=422, detail=exc.args[0]) from exc
@@ -729,7 +801,12 @@ async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
 
     Returns whether the request is authenticated, by which method, and whether
     the system API key mechanism is enabled on this instance. Useful for clients
-    to verify their credentials without hitting a protected endpoint.
+    to verify an API key or session token without hitting a protected endpoint.
+
+    HTTP Basic credentials are NOT evaluated here (the caller counts as
+    anonymous): this route never answers 401, so checking a password on it
+    would be a password oracle. Verify Basic credentials against a protected
+    route such as ``GET /api/auth/me``.
     """
     return {
         "authenticated": identity is not None,
@@ -782,6 +859,11 @@ async def _on_settings_changed_remote(payload=None):
     """A peer saved settings → re-read Vault here (bridged ``settings:changed``)."""
     if not (payload or {}).get("_origin"):
         return  # our own save already applied the values in-process
+    if "system_api_key" in set(payload.get("keys") or []) | set(payload.get("removed") or []):
+        # A peer rotated/cleared the system API key: stop serving the cached one.
+        from core.api.security import invalidate_system_api_key_cache
+
+        invalidate_system_api_key_cache()
     await _hydrate_settings_from_vault()
     log.info(f"CONFIG: settings re-hydrated after a change on instance {payload.get('_origin')}.")
 

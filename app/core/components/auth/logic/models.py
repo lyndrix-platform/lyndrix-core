@@ -23,9 +23,27 @@ class User(Base):
     hashed_password = Column(String(255), nullable=True)
     full_name = Column(String(100))
     email = Column(String(100), nullable=True, index=True)
+    # Provenance of ``email``: True = set by an administrator or vouched for by
+    # an auth provider, False = typed in by the account owner (self-service),
+    # NULL = row written before this column existed / by an older core version
+    # (grandfathered as trusted). Only a trusted email is a target for
+    # email-based identity auto-linking — read it through ``email_is_trusted``.
+    # The ORM default is the safe side: a row THIS code creates without saying
+    # so (also a plugin building ``User(...)``) is untrusted. NULL can only
+    # come from SQL that does not know the column, i.e. from an older core.
+    email_trusted = Column(Boolean, nullable=True, default=False)
     roles = Column(JSON, default=list)               # system flags only ("superadmin", "bot")
     groups = Column(JSON, default=list)              # explicit group memberships (sole source)
     extra_permissions = Column(JSON, default=list)   # direct permission grants (no group needed)
+
+
+def email_is_trusted(user) -> bool:
+    """Whether ``user.email`` may be used to auto-link an external identity.
+
+    Only an explicit ``False`` (self-service change) withdraws trust; NULL is a
+    legacy row and keeps the behaviour it had before the column existed.
+    """
+    return bool((getattr(user, "email", None) or "").strip()) and getattr(user, "email_trusted", None) is not False
 
 
 class UserIdentity(Base):

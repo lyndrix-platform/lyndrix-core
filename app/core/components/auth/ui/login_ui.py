@@ -2,11 +2,21 @@ from nicegui import ui
 from config import settings
 from core.logger import get_logger
 from core.i18n import t
+from core.components.auth.logic.identity_link_service import IdentityLinkError
+from core.components.auth.logic.login_guard import LoginRejected
 from core.components.auth.logic.providers.registry import provider_registry
 from core.session import update_user_session
 from ui.theme import UIStyles, apply_theme
 
 log = get_logger("UI:Login")
+
+
+def _client_ip() -> str | None:
+    """Address of the browser behind the current NiceGUI client (None if unknown)."""
+    try:
+        return ui.context.client.ip or None
+    except Exception:
+        return None
 
 
 def render_login_page():
@@ -38,9 +48,26 @@ def render_login_page():
                     )
                     return
 
-                result = await provider_registry.authenticate(
-                    username, pass_input.value
-                )
+                try:
+                    # Same throttled choke point as POST /api/auth/login and
+                    # HTTP Basic, keyed on this browser's address.
+                    result = await provider_registry.authenticate(
+                        username, pass_input.value, client_ip=_client_ip()
+                    )
+                except LoginRejected as exc:
+                    # Not evaluated (too many failures / server busy): say so
+                    # instead of claiming the password was wrong.
+                    pass_input.set_value("")
+                    ui.notify(
+                        t("auth.login.throttled", seconds=exc.retry_after),
+                        type="warning",
+                    )
+                    return
+                except IdentityLinkError as exc:
+                    # Fail closed: correct credentials, but no local profile
+                    # could be bound to the login — no session.
+                    log.error(f"AUTH: login denied, identity linking failed: {exc}")
+                    result = None
                 if result:
                     update_user_session(
                         {

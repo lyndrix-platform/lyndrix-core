@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hmac
 from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 
-from core.api.security import ApiIdentity, require_api_auth
+from core.api.security import ApiIdentity, constant_time_equals, require_api_auth
 from core.logger import get_logger
 from .logic.notification_service import notification_service
 
@@ -27,7 +26,8 @@ async def _require_webhook_token(presented: str) -> None:
             status_code=503,
             detail="Webhook token not configured; ingress disabled",
         )
-    if not hmac.compare_digest((presented or "").strip(), str(configured)):
+    # Bytes-safe comparison: a non-ASCII header value must be a 401, not a 500.
+    if not constant_time_equals((presented or "").strip(), str(configured)):
         raise HTTPException(status_code=401, detail="Invalid webhook token")
 
 

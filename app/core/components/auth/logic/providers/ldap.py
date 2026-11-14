@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional, List, Dict
 
 from core.logger import get_logger
-from .base import AuthProvider, AuthResult
+from .base import AuthProvider, AuthProviderUnavailable, AuthResult
 
 log = get_logger("Auth:LDAPProvider")
 
@@ -84,10 +84,19 @@ class LDAPProvider(AuthProvider):
 
         Executed in a worker thread by ``authenticate`` so the blocking network
         I/O never runs on the event loop. Returns a dict of directory attributes
-        on success, or ``None`` on any auth/connection failure.
+        on success and ``None`` when the directory REJECTS the login (unknown
+        user, wrong password). Raises ``AuthProviderUnavailable`` when the
+        directory could not be asked (unreachable, service bind refused,
+        timeout): that is no verdict on the user's password and must not be
+        counted as a failed attempt by the login throttle.
         """
         import ldap3
         import ldap3.utils.conv
+
+        if not password:
+            # ldap3 refuses an empty password with an exception; it is simply a
+            # wrong password (and would be an anonymous bind on some servers).
+            return None
 
         # Prevent LDAP injection in the search filter
         safe_username = ldap3.utils.conv.escape_filter_chars(username)
@@ -148,8 +157,10 @@ class LDAPProvider(AuthProvider):
             user_conn.unbind()
 
         except ldap3.core.exceptions.LDAPException as e:
+            # bind() answers False for a wrong password; an exception here is a
+            # connection/service-account problem — the user was not judged.
             log.error(f"AUTH:LDAP: Connection/search error: {e}", exc_info=True)
-            return None
+            raise AuthProviderUnavailable(f"LDAP directory could not be queried: {e}") from e
 
         # Step 3: extract directory attributes (still inside the worker thread).
         display_name_val = (

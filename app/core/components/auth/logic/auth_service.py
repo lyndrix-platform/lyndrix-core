@@ -54,6 +54,26 @@ _DEFAULT_GROUPS: list[tuple[str, str, list]] = [
 _warn_logger = logging.getLogger("Core:AuthService")
 
 
+def _warn_about_ldap_transport(url: str, tls_verify: bool) -> None:
+    """Say it in the log when LDAP passwords are not protected in transit.
+
+    A warning only: refusing ``ldap://`` would break existing deployments.
+    TODO(agent): support StartTLS and require it (or ldaps://) outside dev.
+    """
+    scheme = (url or "").strip().lower()
+    if scheme.startswith("ldap://"):
+        log.warning(
+            "SECURITY: LDAP is configured with ldap:// — the service account's and every user's "
+            "password cross the network UNENCRYPTED (StartTLS is not used). Switch LYNDRIX_LDAP_URL "
+            "to ldaps://."
+        )
+    elif scheme.startswith("ldaps://") and not tls_verify:
+        log.warning(
+            "SECURITY: LDAP TLS certificate verification is OFF (LYNDRIX_LDAP_TLS_VERIFY=false) — "
+            "the directory is not authenticated, passwords can be intercepted."
+        )
+
+
 class AuthService:
     def __init__(self):
         bus.subscribe("db:connected")(self.initialize_iam)
@@ -168,9 +188,16 @@ class AuthService:
             ("users", "extra_permissions",  "JSON NULL"),
             ("groups", "ldap_mappings",     "JSON NULL"),
             ("groups", "roles",             "JSON NULL"),
+            # Email provenance (AZ-02). Nullable WITHOUT a default on purpose:
+            # existing rows — and rows an older core still writes during a
+            # rolling update — stay NULL, which reads as "trusted" (the
+            # behaviour before the column existed). See models.email_is_trusted.
+            ("users", "email_trusted",      "BOOLEAN NULL"),
         ]
         with db_instance.engine.connect() as conn:
             for table, column, col_def in migrations:
+                if self._column_exists(conn, table, column):
+                    continue  # the normal case on every boot after the first: no DDL at all
                 try:
                     conn.execute(
                         text(
@@ -180,12 +207,26 @@ class AuthService:
                     conn.commit()
                     log.info(f"MIGRATE: Added column `{table}.{column}`.")
                 except Exception as e:
-                    err = str(e)
-                    if "Duplicate column name" in err or "already exists" in err:
-                        pass  # column already present — nothing to do
+                    conn.rollback()
+                    err = str(e).lower()
+                    # MariaDB 1060 / SQLite "duplicate column name": a peer
+                    # instance added it between our check and the ALTER.
+                    if "duplicate column name" in err or "already exists" in err:
+                        pass
                     else:
                         log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
         self._migrate_users_id_type()
+
+    @staticmethod
+    def _column_exists(conn, table: str, column: str) -> bool:
+        """True when ``table.column`` is present (False when that cannot be told —
+        the ALTER then runs and reports a duplicate column itself)."""
+        try:
+            from sqlalchemy import inspect
+
+            return column in {c["name"] for c in inspect(conn).get_columns(table)}
+        except Exception:
+            return False
 
     def _migrate_users_id_type(self):
         """Databases created before 1.1 have ``users.id`` as INT AUTO_INCREMENT while the
@@ -227,6 +268,7 @@ class AuthService:
         if "ldap" in active:
             kwargs = auth_config_service.build_ldap_kwargs(vault_data)
             if kwargs["url"]:
+                _warn_about_ldap_transport(kwargs["url"], kwargs.get("tls_verify", True))
                 provider_registry.register(LDAPProvider(**kwargs))
             else:
                 log.warning("AUTH: 'ldap' in provider chain but no URL configured — skipped.")
@@ -291,10 +333,15 @@ class AuthService:
                     username=username,
                     full_name=full_name,
                     email=email,
+                    email_trusted=True,  # operator-provided (environment), not self-service
                     hashed_password=hash_password(password),
                     roles=roles,
                     groups=list(groups or []),
                 )
+                # Never inherit keys/preferences of an earlier account of this name.
+                from .api_key_service import api_key_service
+
+                api_key_service.purge_for_username(session, username)
                 session.add(new_user)
                 session.commit()
                 log.info(f"SUCCESS: User '{username}' created.")
@@ -310,6 +357,13 @@ class AuthService:
                 user.hashed_password = hash_password(password)
                 session.commit()
                 log.info(f"UPDATE: Password for '{username}' updated from environment.")
+                # Like every password change: sessions opened with the old one end.
+                try:
+                    from .api_key_service import api_key_service
+
+                    api_key_service.revoke_sessions(username)
+                except Exception as exc:  # never block the boot over it
+                    log.warning(f"UPDATE: Could not revoke sessions of '{username}': {exc}")
             # Backfill default group membership for pre-2.0 seeded accounts so
             # a non-reset dev DB still lands in the group path (never removes
             # anything an admin assigned).
@@ -321,9 +375,18 @@ class AuthService:
                     session.commit()
                     log.info(f"UPDATE: Added '{username}' to default group(s) {missing}.")
 
-    def authenticate_user(self, username: str, password: str):
-        """Verifies credentials and returns the User object or None."""
-        log.info(f"AUTH: Login attempt for user: {username}")
+    def verify_local_login(self, username: str, password: str, client_ip: str | None = None):
+        """Check ``username``/``password`` against the LOCAL accounts (blocking).
+
+        The entry point for every local password check that is not the login
+        form: HTTP Basic on API routes and "confirm your current password".
+        Runs as one throttled attempt through ``login_guard`` and returns the
+        ``User`` row, or ``None`` for wrong credentials.
+
+        Raises ``LoginThrottled`` / ``LoginBusy`` (``login_guard.LoginRejected``)
+        when the attempt was not evaluated — answer 429/503, never 401.
+        """
+        from . import login_guard
 
         if not db_instance.SessionLocal:
             log.error("AUTH: Login impossible: Database session unavailable.")
@@ -331,16 +394,32 @@ class AuthService:
 
         with db_instance.SessionLocal() as session:
             user = session.query(User).filter(User.username == username).first()
+        stored_hash = user.hashed_password if user is not None else None
 
-            if not user:
-                log.warning(f"AUTH: Login failed: User '{username}' does not exist.")
-                return None
+        def _check():
+            return user if login_guard.verify_login_password(stored_hash, password) else None
 
-            if verify_password(str(user.hashed_password), password):
-                log.info(f"SUCCESS: Login successful: {username} ({user.full_name})")
-                return user
+        verified = login_guard.guarded_verify(
+            username, password, client_ip, _check,
+            local_username=str(user.username) if user is not None else None,
+        )
+        if verified is None:
+            # repr(): the name is attacker-chosen text and must not forge log lines.
+            log.warning(f"AUTH: Login failed for {username!r} (unknown account or wrong password).")
+        return verified
 
-            log.warning(f"AUTH: Login failed: Incorrect password for '{username}'.")
+    def authenticate_user(self, username: str, password: str, client_ip: str | None = None):
+        """Verifies credentials and returns the User object or None.
+
+        Plugin-facing wrapper around ``verify_local_login`` that keeps the old
+        contract: it never raises, a throttled or busy attempt is ``None``.
+        """
+        from .login_guard import LoginRejected
+
+        try:
+            return self.verify_local_login(username, password, client_ip)
+        except LoginRejected as exc:
+            log.warning(f"AUTH: Login for {username!r} not evaluated: {exc.detail}")
             return None
 
 

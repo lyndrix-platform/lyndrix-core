@@ -1,6 +1,5 @@
 """Runtime sidebar entries (core API 1.9): NavRegistry, ctx.register_nav_entries,
 dispose() cleanup and the /api/nav visibility filter."""
-from types import SimpleNamespace
 
 import pytest
 
@@ -84,9 +83,13 @@ def test_context_registers_and_dispose_clears(changes):
 
 
 def test_visibility_filter_keeps_everything_for_superadmin_and_system():
-    ident = SimpleNamespace(is_system=True, roles=[], username="svc")
+    # Real identities: the filter asks ApiIdentity.allows (system key, key
+    # scopes before the superadmin bypass, the owner's grants) — AZ-04.
+    from core.api.security import ApiIdentity
+
+    ident = ApiIdentity(method="api_key", username="svc", is_system=True)
     assert _visible_plugins(ident, ["a", "b"]) == ["a", "b"]
-    ident = SimpleNamespace(is_system=False, roles=["superadmin"], username="root")
+    ident = ApiIdentity(method="user_api_key", username="root", roles=["superadmin"], permissions=frozenset())
     assert _visible_plugins(ident, ["a"]) == ["a"]
 
 

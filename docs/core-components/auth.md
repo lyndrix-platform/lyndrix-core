@@ -137,8 +137,11 @@ Beyond the interactive login flow, Lyndrix Core ships a small, composable auth l
 
 1. **System API key** — header `X-API-Key: <key>` or `Authorization: Bearer <key>`. Resolved from `LYNDRIX_SYSTEM_API_KEY` first, then Vault (`lyndrix/core/settings → system_api_key`). The master key bypasses all permission checks (`is_system=True`).
 2. **Per-user API key** — same headers, validated against the per-user key store; carries the owner's roles/permissions and may be limited to an explicit set of `key_scopes`.
-3. **HTTP Basic** — `Authorization: Basic <base64(user:pass)>`, validated against the local IAM.
-4. **Session cookie** — an already-authenticated NiceGUI dashboard session, when the request runs inside NiceGUI's storage context.
+3. **HTTP Basic** — `Authorization: Basic <base64(user:pass)>`, validated against the **local** accounts. Only on routes that require authentication (the public `/api/health`, `/api/auth/whoami` and `/api/events` ignore it), throttled like the login form (`429`/`503` + `Retry-After` instead of `401` when an attempt is not evaluated), not advertised in `WWW-Authenticate`, and switched off with `LYNDRIX_API_BASIC_AUTH=false`. Prefer API keys for automation.
+
+### Password login throttling
+
+Every password check — `POST /api/auth/login`, the NiceGUI form, HTTP Basic, "confirm your current password" — runs through one choke point (`auth/logic/login_guard.py`). Budgets and the lock-out trade-off are described in [Security → Password logins](../security.md#password-logins).
 
 > If neither `LYNDRIX_SYSTEM_API_KEY` nor a Vault-stored `system_api_key` is configured, the **system-key method is disabled entirely** — no empty or implicit key is ever accepted. A fresh install with the key unset is simply not reachable via the system API key.
 

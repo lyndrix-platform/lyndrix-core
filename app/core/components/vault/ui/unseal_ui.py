@@ -6,15 +6,19 @@ from core.bus import bus
 from core.i18n import t
 from ui.theme import UIStyles, apply_theme
 
-from ..logic.rate_limit import unseal_limiter
+from ..logic.rate_limit import normalize_client_address, unseal_retry_after
 
 
 def _rate_limit_key() -> str:
-    """Per-client key so one operator's failed attempts cannot lock out others."""
+    """The browser's address — the same budget as the REST path.
+
+    (Keyed on the NiceGUI client id before: every page reload was a new
+    client and so a fresh budget.)
+    """
     try:
-        return f"ui:{context.client.id}"
+        return normalize_client_address(context.client.ip)
     except Exception:
-        return "ui:unknown"
+        return "unknown"
 
 
 def render_unseal_page():
@@ -42,8 +46,8 @@ def render_unseal_page():
                     ui.notify(t("auth.unseal.empty_key"), type="warning")
                     return
 
-                # Per-client throttle (the authoritative API path is throttled per IP).
-                retry = unseal_limiter.hit(_rate_limit_key())
+                # Per-address + global throttle, shared with POST /api/vault/unseal.
+                retry = unseal_retry_after(_rate_limit_key())
                 if retry > 0:
                     status_label.set_text(t("auth.unseal.locked_for", seconds=retry))
                     status_label.classes(

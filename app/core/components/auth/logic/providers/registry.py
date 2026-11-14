@@ -73,7 +73,9 @@ class AuthProviderRegistry:
     # Authentication
     # ------------------------------------------------------------------
 
-    async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
+    async def authenticate(
+        self, username: str, password: str, *, client_ip: Optional[str] = None
+    ) -> Optional[AuthResult]:
         """
         Try each configured form-based provider in registration order.
         Returns the first successful AuthResult or None if all fail.
@@ -82,34 +84,100 @@ class AuthProviderRegistry:
         in the chain, attempt local authentication as a last-resort fallback so
         the built-in admin account remains accessible even when external providers
         (LDAP, OIDC) are misconfigured or unreachable.
+
+        The whole chain is ONE throttled login attempt (``login_guard``);
+        ``client_ip`` is the caller's address for the per-address budgets.
+
+        Raises ``LoginRejected`` (``LoginThrottled`` / ``LoginBusy``) when the
+        attempt was not evaluated — answer 429/503 with ``Retry-After`` — and
+        ``IdentityLinkError`` when the credentials were accepted but the login
+        could not be bound to a local profile: the caller denies the login
+        (503), it is not a credential failure.
         """
-        for provider in self.get_form_providers():
+        import asyncio
+
+        from core.components.auth.logic import login_guard
+
+        providers = self.get_form_providers()
+        # A failure that involved an external directory always counts: each
+        # one was a bind there. Local-only failures count a repeated identical
+        # wrong password once per window (see login_throttle).
+        external = any(p.provider_id != "local" for p in providers)
+        local_username, has_local_password = await asyncio.to_thread(
+            login_guard.resolve_local_account, username
+        )
+
+        async def _verify():
+            result, backend_down = await self._authenticate_chain(username, password, providers)
+            if result is None and backend_down and not has_local_password:
+                # Nobody judged these credentials: the account is not a local
+                # one with a password and a provider could not be asked. Deny,
+                # but do not count a wrong password — otherwise a directory
+                # outage leaves its users throttled after it is over. A local
+                # account's wrong password was judged and counts regardless.
+                return login_guard.UNEVALUATED
+            return result
+
+        result = await login_guard.guarded_verify_async(
+            username, password, client_ip, _verify,
+            local_username=local_username, external=external,
+        )
+        if result is None:
+            return None
+        # After the throttle bookkeeping and outside any provider try: a
+        # linking failure must end the login, not be mistaken for a wrong
+        # password or fall through to the next provider.
+        return await self.link_identity(result)
+
+    async def _authenticate_chain(
+        self, username: str, password: str, providers: List[AuthProvider]
+    ) -> tuple[Optional[AuthResult], bool]:
+        """``(result, backend_down)``: the not yet linked result of the first
+        provider that accepts, and whether a provider could not evaluate the
+        credentials at all (it raised instead of answering)."""
+        from core.components.auth.logic.login_guard import LoginRejected
+        from .base import AuthProviderUnavailable
+
+        backend_down = False
+        for provider in providers:
             try:
                 result = await provider.authenticate(username, password)
-                if result:
-                    return await self.link_identity(result)
+            except LoginRejected:
+                raise  # no verification slot — not a verdict, do not try further
+            except AuthProviderUnavailable as e:
+                backend_down = True
+                log.warning(f"AUTH: Provider '{provider.provider_id}' is unavailable: {e}")
+                continue
             except Exception as e:
+                backend_down = True
                 log.error(
                     f"AUTH: Provider '{provider.provider_id}' raised an exception: {e}",
                     exc_info=True,
                 )
+                continue
+            if result:
+                return result, backend_down
 
         # Fallback: try local provider if it wasn't part of the active chain.
         if "local" not in self._providers:
+            result = None
             try:
                 from .local import LocalProvider
                 fallback = LocalProvider()
                 result = await fallback.authenticate(username, password)
-                if result:
-                    log.warning(
-                        f"AUTH: All configured providers failed; local fallback succeeded "
-                        f"for '{username}'. Consider adding 'local' to LYNDRIX_AUTH_PROVIDERS."
-                    )
-                    return await self.link_identity(result)
+            except LoginRejected:
+                raise
             except Exception as e:
+                backend_down = True
                 log.error(f"AUTH: Local fallback raised an exception: {e}", exc_info=True)
+            if result:
+                log.warning(
+                    f"AUTH: All configured providers failed; local fallback succeeded "
+                    f"for {username!r}. Consider adding 'local' to LYNDRIX_AUTH_PROVIDERS."
+                )
+                return result, backend_down
 
-        return None
+        return None, backend_down
 
     async def link_identity(self, result: AuthResult) -> AuthResult:
         """Resolve the provider result to the linked LOCAL profile.
@@ -119,17 +187,25 @@ class AuthProviderRegistry:
         ``identity_link_service.resolve`` — creating/linking the local User +
         UserIdentity rows and rewriting the AuthResult onto the local username,
         system-flag roles and extra_permissions. Sync DB work → worker thread.
+
+        Fails closed: raises ``IdentityLinkError`` when no link could be
+        committed. The provider's own result is never returned in its place —
+        it carries the EXTERNAL username, and a session built from it would
+        belong to whichever local account happens to have that name.
         """
         import asyncio
 
-        try:
-            from core.components.auth.logic import identity_link_service
+        from core.components.auth.logic import identity_link_service
 
+        try:
             linked = await asyncio.to_thread(identity_link_service.resolve, result)
-            return linked or result
-        except Exception as e:  # pragma: no cover - defensive
-            log.warning(f"AUTH: identity linking failed: {e}")
-            return result
+        except identity_link_service.IdentityLinkError:
+            raise
+        except Exception as e:  # pragma: no cover - defensive: resolve() already wraps
+            raise identity_link_service.IdentityLinkError(f"identity linking failed: {e}") from e
+        if linked is None or not linked.linked_user_id:
+            raise identity_link_service.IdentityLinkError("identity linking returned no local profile")
+        return linked
 
 
 # Singleton — imported by auth_service and login_ui

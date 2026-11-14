@@ -22,6 +22,23 @@ class AuthResult:
     # OIDC email_verified claim). Gates trusted-email auto-linking — an
     # unverified email never merges accounts (spoofing protection).
     email_verified: bool = False
+    # ``User.id`` of the LOCAL profile this login was bound to. Set only by
+    # ``identity_link_service.resolve`` after the link is committed; a result
+    # without it has not been linked and must never be turned into a session or
+    # token (see ``IdentityLinkError``).
+    linked_user_id: Optional[str] = None
+
+
+class AuthProviderUnavailable(Exception):
+    """The provider could NOT evaluate the credentials (directory unreachable,
+    service bind refused, timeout) — neither "accepted" nor "rejected".
+
+    Raise it from ``authenticate`` instead of returning ``None`` for
+    infrastructure errors: the login is still denied, but it is not counted as
+    a wrong password, so a directory outage does not leave its users throttled
+    once the directory is back. Any other exception a provider raises is
+    treated the same way.
+    """
 
 
 class AuthProvider(ABC):
@@ -49,7 +66,9 @@ class AuthProvider(ABC):
     @abstractmethod
     async def authenticate(self, username: str, password: str) -> Optional[AuthResult]:
         """
-        Verify credentials. Return an AuthResult on success, None on failure.
+        Verify credentials. Return an AuthResult on success, None on failure
+        (unknown account or wrong password). Raise ``AuthProviderUnavailable``
+        when the credentials could not be checked at all.
         SSO-only providers should return None here.
         """
         ...
