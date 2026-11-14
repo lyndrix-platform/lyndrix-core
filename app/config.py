@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     # the SSRF guard in core.components.plugins.logic.git_providers. Add your
     # self-hosted GitLab's hostname here to install plugins from it.
     LYNDRIX_PLUGIN_REPO_HOSTS: str = "github.com"
+    # Host the global GitLab token (GITLAB_TOKEN / Vault gitlab_token) belongs to.
+    # A token is only ever sent to its own host, over https. Empty = the single
+    # non-GitHub host in LYNDRIX_PLUGIN_REPO_HOSTS; with several GitLab hosts on
+    # the allowlist this must be set, otherwise the token is not used at all.
+    LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST: str = ""
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc

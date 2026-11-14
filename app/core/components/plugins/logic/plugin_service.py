@@ -12,7 +12,7 @@ import httpx
 import re
 from pathlib import Path
 from config import settings
-from core.logger import get_logger
+from core.logger import get_logger, mask_text
 from core.bus import bus
 from . import git_providers
 from .requirements_guard import check_requirements, pip_environment
@@ -64,6 +64,7 @@ class PluginService:
         self.github_api_base = "https://api.github.com/repos"
         # Per-repo install serialization (see install_plugin).
         self._install_locks: dict = {}
+        self._warned_ambiguous_gitlab_host = False
         
         # Cache für Marketplace-Daten
         self._marketplace_cache = []
@@ -618,7 +619,7 @@ class PluginService:
     def _get_headers(self, include_auth: bool = True) -> dict:
         """Build GitHub request headers (used for the public collection fallback).
 
-        Provider-aware install/version requests use :meth:`_auth_headers_for`.
+        Provider-aware install/version requests use :meth:`_request_headers`.
         """
         headers = {
             "User-Agent": "Lyndrix-Core/1.0",
@@ -650,11 +651,39 @@ class PluginService:
             return os.environ.get("GITHUB_TOKEN") or self._read_vault_setting("github_token")
         return os.environ.get("GITLAB_TOKEN") or self._read_vault_setting("gitlab_token")
 
-    def _resolve_token(self, url: str, provider: str) -> str | None:
-        """Resolve the token for a repo URL.
+    def _gitlab_token_host(self) -> str | None:
+        """The one host the global GitLab token belongs to (SC-07).
 
-        Order: per-repo override (Vault, via the custom repo row) → global
-        provider token (env/Vault) → None (anonymous).
+        ``LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST`` names it explicitly. Without it the
+        token is bound to the only non-GitHub host on the allowlist — the common
+        single-GitLab setup keeps working unchanged. With several candidates the
+        token is sent to none of them: guessing would hand an internal PAT to
+        every allowlisted host.
+        """
+        configured = str(getattr(settings, "LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST", "") or "").strip()
+        if configured:
+            return configured
+        candidates = [
+            host for host in self._allowed_repo_hosts()
+            if git_providers.provider_for_host(host) == git_providers.GITLAB
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1 and not self._warned_ambiguous_gitlab_host:
+            self._warned_ambiguous_gitlab_host = True
+            log.warning(
+                "SECURITY: several GitLab hosts are allowed for plugins but "
+                "LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST is not set — the global GitLab "
+                "token is not sent to any of them."
+            )
+        return None
+
+    def _resolve_token(self, url: str, ref: "git_providers.RepoRef") -> str | None:
+        """Resolve the token for a repo reference.
+
+        Order: per-repo override (Vault, via the custom repo row — matched by
+        the exact repository URL) → global provider token (env/Vault), which is
+        only used for the host it is configured for → None (anonymous).
         """
         try:
             from .custom_repo_service import custom_repo_service
@@ -665,22 +694,69 @@ class PluginService:
                     return token
         except Exception:
             pass
-        return self._global_token(provider)
+        if ref.provider == git_providers.GITHUB:
+            # GitHub requests only ever go to (api.)github.com — hard-coded URLs.
+            return self._global_token(git_providers.GITHUB)
+        if git_providers.token_allowed_for(ref, self._gitlab_token_host()):
+            return self._global_token(git_providers.GITLAB)
+        return None
 
-    def _auth_headers_for(self, url: str, provider: str) -> dict:
-        """Provider-appropriate request headers, including auth when available.
+    def _request_headers(self, url: str, ref: "git_providers.RepoRef") -> tuple[dict, dict]:
+        """``(base_headers, auth_headers)`` for requests about ``ref``.
 
-        Only ever called after :meth:`validate_repo_url` has passed for ``url``
-        (see ``get_plugin_versions``/``install_plugin``), so a token is never
-        attached to a request going to a host outside the configured allowlist
-        — trust comes from that allowlist, never from the URL alone.
+        Kept apart on purpose: the auth header is passed per request and only
+        to the origin it belongs to, never as a client default that would ride
+        along on a redirect (httpx only strips ``Authorization`` cross-origin,
+        GitLab's ``PRIVATE-TOKEN`` survived). Only ever called after
+        :meth:`validate_repo_url` passed for ``url``. Raises ``ValueError`` when
+        a token would have to travel over plain http.
         """
-        headers = {"User-Agent": "Lyndrix-Core/1.0"}
-        headers.update(git_providers.accept_header(provider))
-        token = self._resolve_token(url, provider)
-        if token:
-            headers.update(git_providers.auth_header(provider, token))
-        return headers
+        base = {"User-Agent": "Lyndrix-Core/1.0"}
+        base.update(git_providers.accept_header(ref.provider))
+        token = self._resolve_token(url, ref)
+        if not token:
+            return base, {}
+        if ref.provider != git_providers.GITHUB and ref.scheme != "https":
+            raise ValueError(
+                f"Refusing to send the access token for '{ref.host}' over "
+                f"{ref.scheme}:// — use an https:// repository URL"
+            )
+        return base, git_providers.auth_header(ref.provider, token)
+
+    @staticmethod
+    async def _get_archive(client, url: str, ref: "git_providers.RepoRef", auth: dict,
+                           max_redirects: int = 5):
+        """GET an archive URL, following redirects by hand (SC-07).
+
+        Same-origin redirects keep the auth header. A redirect to one of the
+        provider's known download hosts (GitHub → codeload.github.com) is
+        followed without it. Anything else is refused: the token must not
+        follow a 3xx to another host and the installer must not be steered to
+        an arbitrary one.
+        """
+        origin = url
+        headers = dict(auth)
+        for _ in range(max_redirects + 1):
+            response = await client.get(url, headers=headers, follow_redirects=False)
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return response
+            location = response.headers.get("location")
+            if not location:
+                return response
+            target = str(response.url.join(location))
+            if git_providers.same_origin(origin, target):
+                pass  # same host: the token stays where it belongs
+            else:
+                target_parts = httpx.URL(target)
+                allowed = git_providers.ARCHIVE_REDIRECT_HOSTS.get(ref.provider, frozenset())
+                if target_parts.scheme != "https" or (target_parts.host or "").lower() not in allowed:
+                    raise PluginInstallError(
+                        f"archive download was redirected to an unexpected host "
+                        f"('{target_parts.host}') — refused"
+                    )
+                headers = {}
+            url = target
+        raise PluginInstallError("archive download: too many redirects")
 
     def _allowed_repo_hosts(self) -> list[str]:
         """Configured git host allowlist (``LYNDRIX_PLUGIN_REPO_HOSTS``)."""
@@ -729,11 +805,11 @@ class PluginService:
 
         api_url = git_providers.tags_url(ref)
         try:
-            headers = self._auth_headers_for(github_url, ref.provider)
+            headers, auth = self._request_headers(github_url, ref)
             # No redirects here: this is a pure provider-API (tags) call, so a
             # 3xx would only ever mean something unexpected is happening.
             async with httpx.AsyncClient(headers=headers, follow_redirects=False) as client:
-                resp = await client.get(api_url)
+                resp = await client.get(api_url, headers=auth)
                 if resp.status_code == 200:
                     raw_tags = git_providers.tag_names(ref.provider, resp.json())
                     def parse_v(t):
@@ -817,8 +893,19 @@ class PluginService:
             # SSRF host allowlist rejection (or an unparseable URL) — every
             # caller (API background task, reconcile-on-boot, NiceGUI) treats
             # a False return the same way an install failure always has.
-            log.error(f"INSTALL: rejected repo URL '{github_url}': {exc}")
-            bus.emit("plugin:install_failed", {"repo": github_url, "error": str(exc)})
+            # A rejected URL may be rejected precisely because it carries
+            # credentials — it goes through the masker, never raw.
+            safe_url = mask_text(str(github_url))
+            log.error(f"INSTALL: rejected repo URL '{safe_url}': {exc}")
+            bus.emit("plugin:install_failed", {"repo": safe_url, "error": str(exc)})
+            return False
+        try:
+            # The version becomes part of provider URLs (SC-10).
+            version = git_providers.validate_ref_name(version)
+        except ValueError as exc:
+            log.error(f"INSTALL: rejected version for '{ref.repo}': {exc}")
+            bus.emit("plugin:install_failed", {"repo": ref.repo, "error": str(exc)})
+            await self._report_operation_failure(ref.repo.replace("-", "_"), str(exc))
             return False
         repo = ref.repo
         provider = ref.provider
@@ -845,16 +932,16 @@ class PluginService:
         swap_started: list[bool] = []
 
         try:
-            headers = self._auth_headers_for(github_url, provider)
-            # Default to no redirects: the auth header (possibly a PAT) must
-            # never silently follow a 3xx to a host outside the allowlist.
-            # GitHub's archive URLs are a known, deliberate exception — they
-            # redirect to codeload.github.com — so those two GETs opt back in
-            # explicitly below.
+            headers, auth = self._request_headers(github_url, ref)
+            # No automatic redirects and no auth header on the client itself:
+            # the token is passed per request, and archive redirects are
+            # followed by hand (_get_archive) so it never travels to another
+            # host. GitHub's archive URLs redirect to codeload.github.com —
+            # that hop is allowed, without the token.
             async with httpx.AsyncClient(follow_redirects=False, headers=headers) as client:
                 # 1. Fetch Repository Metadata (to discover the default branch)
                 api_url = git_providers.metadata_url(ref)
-                resp = await client.get(api_url)
+                resp = await client.get(api_url, headers=auth)
 
                 if resp.status_code == 403:
                     log.warning("INSTALL: Rate limit hit for metadata. Assuming 'main' branch.")
@@ -870,7 +957,7 @@ class PluginService:
                 zip_url = git_providers.archive_url(ref, ref_name, is_tag=not is_latest)
 
                 log.info(f"DOWNLOAD: Fetching source from {zip_url}")
-                response = await client.get(zip_url, follow_redirects=True)
+                response = await self._get_archive(client, zip_url, ref, auth)
 
                 # GitHub fallback: many repos default to 'master' instead of 'main'.
                 if (
@@ -881,7 +968,7 @@ class PluginService:
                 ):
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
                     zip_url = git_providers.archive_url(ref, "master", is_tag=False)
-                    response = await client.get(zip_url, follow_redirects=True)
+                    response = await self._get_archive(client, zip_url, ref, auth)
 
                 # Tag-form fallback: plugin_states stores the manifest version
                 # ("1.1.2") while many repos only tag "v1.1.2" (or the other way
@@ -891,7 +978,7 @@ class PluginService:
                     for alt in self._alternate_tag_forms(version):
                         alt_url = git_providers.archive_url(ref, alt, is_tag=True)
                         log.info(f"DOWNLOAD: tag '{version}' not found, trying '{alt}'...")
-                        response = await client.get(alt_url, follow_redirects=True)
+                        response = await self._get_archive(client, alt_url, ref, auth)
                         if response.status_code != 404:
                             zip_url = alt_url
                             break

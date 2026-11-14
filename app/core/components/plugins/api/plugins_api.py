@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from core.api.security import ApiIdentity, require_permission
 from core.bus import bus
 from core.logger import get_logger
+from core.components.plugins.logic import git_providers
 
 log = get_logger("Core:PluginsAPI")
 
@@ -206,6 +207,7 @@ async def install_plugin(
     # background task afterwards, where a raised error would only be logged.
     try:
         ref = svc.validate_repo_url(payload.url)
+        git_providers.validate_ref_name(payload.version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Install queued for '{payload.url}' v{payload.version} by '{identity.username}'.")
@@ -237,6 +239,7 @@ async def upgrade_plugin(
     svc = _plugin_service()
     try:
         svc.validate_repo_url(repo_url)
+        git_providers.validate_ref_name(payload.version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Upgrade queued for '{plugin_id}' v{payload.version} by '{identity.username}'.")
