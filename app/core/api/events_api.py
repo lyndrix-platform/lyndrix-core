@@ -13,6 +13,11 @@ The signing secret is derived deterministically from ``STORAGE_SECRET`` (see
 ``_derive_ticket_secret``) so tickets stay valid across a restart or across
 replicas sharing the same secret; it only falls back to a process-random
 value when ``STORAGE_SECRET`` is unset.
+
+Who gets what is decided per connection from an *audience snapshot* (credential
+still valid? user still there? effective permissions) that is loaded off the
+event loop at connect and refreshed every ``_AUDIENCE_REFRESH_SECONDS``. Topic
+and notification gates are then pure in-memory checks per message.
 """
 import asyncio
 import base64
@@ -21,12 +26,13 @@ import hmac
 import json
 import secrets
 import time
-from typing import Optional, Set
+from dataclasses import dataclass
+from typing import Any, Optional, Set
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from core.api.security import ApiIdentity, optional_api_auth, require_api_auth
+from core.api.security import ApiIdentity, authenticate_request, optional_api_auth, require_api_auth
 from fastapi import Depends
 from core.bus import bus
 from core.logger import get_logger
@@ -62,10 +68,64 @@ _PUBLIC_TOPICS = frozenset({
     "vault:status_changed",
 })
 
-# Internal queue message that ends a stream (drain / shutdown). The generator
-# sends a final ``event: reconnect`` and closes, so EventSource clients
-# reconnect through the load balancer and land on a live instance.
+# Per-topic permission gate (any one of the listed permissions suffices;
+# superadmin / the system key pass). Plugin install/operation events carry repo
+# names, paths and error text, cluster events the topology — operator data that
+# used to reach every authenticated stream (audit finding AZ-06).
+_PLUGIN_ADMIN = ("feature:plugins.manage", "admin:read")
+_TOPIC_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "plugin:installed": _PLUGIN_ADMIN,
+    "plugin:install_failed": _PLUGIN_ADMIN,
+    "plugin:update_available": _PLUGIN_ADMIN,
+    "plugin:operation_changed": _PLUGIN_ADMIN,   # REST /api/plugins/operations needs admin:read
+    "cluster:changed": ("admin:read",),
+    "cluster:leader_changed": ("admin:read",),
+}
+# Topics every signed-in shell needs to stay consistent (plugin module cache,
+# sidebar, i18n/theme refresh), but whose payload may say more than a user
+# without plugin-admin rights should see. Those connections get only the
+# listed keys — enough for the React shell, which reads ``plugin_id`` alone.
+# ``plugin:runtime_status`` (warm-up panel) and ``nav:changed`` flow unchanged.
+_REDUCED_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    "plugin:state_changed": ("plugin_id", "action", "is_active"),
+    "ui:needs_refresh": (),
+}
+# Keys of a ``notification:new`` payload that drive delivery and never leave the server.
+_NOTIFICATION_INTERNAL_KEYS = frozenset({"user_id", "required_permission", "source_plugin_id", "endpoint_name"})
+
+_QUEUE_SIZE = 128
+# Lossy high-frequency topic: not queued for a connection that is already
+# falling behind, so it cannot push a slow client into an overflow by itself.
+_LOSSY_TOPICS = frozenset({"system:metrics_update"})
+
+# The audience snapshot is refreshed when older than this. The stream wakes at
+# least every keep-alive interval (15 s) and checks before each delivery, so a
+# revoked credential, a deleted user or a withdrawn permission takes effect
+# within ~20 s (plus the 5 s access_service cache) — always under 30 s.
+_AUDIENCE_REFRESH_SECONDS = 20.0
+_KEEPALIVE_SECONDS = 15.0
+
+# Internal queue message that ends a stream (drain / shutdown / overflow). The
+# generator sends a final ``event: reconnect`` and ENDS THE RESPONSE. The end of
+# the stream is what makes clients reconnect: the React shell (useSSE) has no
+# listener for the custom event, its ``onerror`` fires when the stream closes
+# and schedules a reconnect with a fresh ticket.
 _CLOSE_KEY = "__close__"
+
+
+def _force_close(q: asyncio.Queue, reason: str) -> None:
+    """Take ``q`` out of the fan-out and make its stream end next.
+
+    The backlog is dropped so the close sentinel always fits and is the very
+    next thing the generator sees — the client resyncs on reconnect anyway.
+    """
+    _SSE_QUEUES.discard(q)
+    while True:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    q.put_nowait(json.dumps({_CLOSE_KEY: reason}))
 
 
 def close_all_streams(reason: str = "reconnect") -> int:
@@ -74,9 +134,9 @@ def close_all_streams(reason: str = "reconnect") -> int:
     for q in list(_SSE_QUEUES):
         try:
             q.put_nowait(json.dumps({_CLOSE_KEY: reason}))
-            closed += 1
         except asyncio.QueueFull:
-            _SSE_QUEUES.discard(q)
+            _force_close(q, reason)
+        closed += 1
     if closed:
         log.info("SSE: closing %d stream(s) (%s)", closed, reason)
     return closed
@@ -120,32 +180,144 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + padding)
 
 
-def _connection_allows(username: str | None, permission: str) -> bool:
-    """Audience gate for the SSE stream (superadmin flag included)."""
-    if not username:
-        return False
-    try:
-        from core.components.auth.logic import access_service
-        from core.components.auth.logic.user_service import user_service
+# ─── Audience snapshot ───────────────────────────────────────────────────────
 
-        user = user_service.get_by_username(username)
-        if user is not None and "superadmin" in (user.roles or []):
+@dataclass(frozen=True)
+class _Credential:
+    """What a connection authenticated with — enough to re-validate it later."""
+
+    username: str
+    is_system: bool = False               # master system API key
+    key_id: Optional[int] = None          # per-user API key behind a ticket
+    request: Optional[Request] = None     # header-authenticated: re-run the auth chain
+
+
+@dataclass(frozen=True)
+class _Audience:
+    """One connection's rights at a point in time (checked in memory per message)."""
+
+    valid: bool = True                    # False → credential revoked / user gone: end the stream
+    superadmin: bool = False
+    permissions: frozenset = frozenset()
+    scopes: Optional[frozenset] = None    # scoped per-user API key
+
+    def allows(self, permission: str) -> bool:
+        if self.superadmin:
             return True
-        return access_service.username_has_permission(username, permission)
-    except Exception:
-        return False
+        from core.components.auth.logic import access_service
+
+        if not access_service.has_permission(self.permissions, permission):
+            return False
+        return self.scopes is None or access_service.has_permission(self.scopes, permission)
+
+    def allows_any(self, permissions: tuple[str, ...]) -> bool:
+        return any(self.allows(p) for p in permissions)
 
 
-def _mint_stream_ticket(username: str) -> str:
-    payload = _b64url_encode(
-        json.dumps({"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}).encode("utf-8")
+_REVOKED = _Audience(valid=False)
+# Rights unknown (DB error during a refresh): fail closed for everything gated,
+# keep the stream itself — it recovers with the next successful refresh.
+_UNKNOWN = _Audience()
+
+
+def _api_key_scopes(key_id: int, username: str) -> Optional[frozenset]:
+    """Scopes of a still-valid per-user key (``frozenset()`` = unscoped); ``None`` = revoked/gone."""
+    from core.components.auth.logic.models import UserApiKey
+    from core.components.database.logic.db_service import db_instance
+
+    with db_instance.SessionLocal() as s:
+        rec = (
+            s.query(UserApiKey)
+            .filter(UserApiKey.id == key_id, UserApiKey.username == username,
+                    UserApiKey.revoked == False)  # noqa: E712
+            .first()
+        )
+        return None if rec is None else frozenset(rec.scopes or [])
+
+
+def _api_key_id(request: Request) -> Optional[int]:
+    """Id of the per-user API key this request presented (read-only lookup), if any."""
+    import hashlib as _hashlib
+
+    from core.components.auth.logic.models import UserApiKey
+    from core.components.database.logic.db_service import db_instance
+
+    auth = request.headers.get("Authorization", "")
+    presented = request.headers.get("X-API-Key") or (auth[7:] if auth.lower().startswith("bearer ") else "")
+    presented = presented.strip()
+    if not presented or db_instance.SessionLocal is None:
+        return None
+    digest = _hashlib.sha256(presented.encode("utf-8")).hexdigest()
+    with db_instance.SessionLocal() as s:
+        rec = s.query(UserApiKey.id).filter(
+            UserApiKey.hashed_key == digest, UserApiKey.revoked == False  # noqa: E712
+        ).first()
+        return int(rec[0]) if rec else None
+
+
+def _load_audience(cred: _Credential) -> _Audience:
+    """Blocking (DB): re-validate the credential and resolve the rights. Run via ``to_thread``.
+
+    Raises on infrastructure errors — the caller decides how to degrade.
+    """
+    from core.components.auth.logic import access_service
+    from core.components.auth.logic.user_service import user_service
+
+    if cred.request is not None:
+        # Header-authenticated stream: the full auth chain again, so a revoked
+        # API key or a removed system key ends the stream.
+        identity = authenticate_request(cred.request)
+        if identity is None:
+            return _REVOKED
+        if identity.is_system:
+            return _Audience(superadmin=True)
+        username = identity.username
+        scopes = frozenset(identity.key_scopes) if identity.key_scopes is not None else None
+    elif cred.is_system:
+        # Ticket minted with the system key: the key itself is not in the
+        # ticket, so there is nothing to re-check beyond the ticket signature.
+        return _Audience(superadmin=True)
+    else:
+        username = cred.username
+        scopes = None
+        if cred.key_id is not None:
+            key_scopes = _api_key_scopes(cred.key_id, username)
+            if key_scopes is None:
+                return _REVOKED
+            scopes = key_scopes or None
+
+    user = user_service.get_by_username(username)
+    if user is None:
+        return _REVOKED  # deleted user: no stream, whatever the ticket says
+    return _Audience(
+        superadmin="superadmin" in (user.roles or []),
+        permissions=access_service.get_effective_permissions(username),
+        scopes=scopes,
     )
+
+
+async def _refresh_audience(cred: _Credential) -> _Audience:
+    try:
+        return await asyncio.to_thread(_load_audience, cred)
+    except Exception as exc:
+        log.warning("SSE: audience refresh failed for '%s' (%s) — gated topics paused", cred.username, exc)
+        return _UNKNOWN
+
+
+def _mint_stream_ticket(username: str, *, is_system: bool = False, key_id: Optional[int] = None) -> str:
+    claims: dict[str, Any] = {"u": username, "exp": int(time.time()) + _TICKET_TTL_SECONDS}
+    if is_system:
+        claims["s"] = 1
+    if key_id is not None:
+        # Row id of the API key (not secret) — lets the stream notice a revocation.
+        claims["k"] = int(key_id)
+    payload = _b64url_encode(json.dumps(claims).encode("utf-8"))
     sig = hmac.new(_TICKET_SECRET, payload.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
-def _verify_stream_ticket(ticket: str) -> Optional[str]:
-    """Return the ticket's username when valid and unexpired, else None."""
+def _verify_stream_ticket_claims(ticket: str) -> Optional[dict]:
+    """Return the claims of a valid, unexpired ticket, else None."""
     try:
         payload, sig = ticket.split(".", 1)
         expected = hmac.new(_TICKET_SECRET, payload.encode("ascii"), hashlib.sha256).hexdigest()
@@ -155,13 +327,28 @@ def _verify_stream_ticket(ticket: str) -> Optional[str]:
         if int(data.get("exp", 0)) < time.time():
             return None
         username = data.get("u")
-        return username if isinstance(username, str) and username else None
+        return data if isinstance(username, str) and username else None
     except Exception:
         return None
 
 
+def _verify_stream_ticket(ticket: str) -> Optional[str]:
+    """Return the ticket's username when valid and unexpired, else None."""
+    claims = _verify_stream_ticket_claims(ticket)
+    return claims["u"] if claims else None
+
+
+def _credential_from_ticket(claims: dict) -> _Credential:
+    key_id = claims.get("k")
+    return _Credential(
+        username=claims["u"],
+        is_system=bool(claims.get("s")),
+        key_id=int(key_id) if isinstance(key_id, int) else None,
+    )
+
+
 @events_router.post("/api/events/ticket", summary="Mint a short-lived SSE stream ticket")
-async def mint_stream_ticket(identity: ApiIdentity = Depends(require_api_auth)):
+async def mint_stream_ticket(request: Request, identity: ApiIdentity = Depends(require_api_auth)):
     """
     Mint a short-TTL ticket granting one authenticated ``/api/events`` connection.
 
@@ -171,20 +358,32 @@ async def mint_stream_ticket(identity: ApiIdentity = Depends(require_api_auth)):
     pass the returned ticket as ``/api/events?ticket=…``. Tickets are process-local
     and expire after ``expires_in`` seconds — mint a fresh one per (re)connect.
     """
-    return {"ticket": _mint_stream_ticket(identity.username), "expires_in": _TICKET_TTL_SECONDS}
+    key_id: Optional[int] = None
+    if identity.method == "user_api_key":
+        try:
+            key_id = await asyncio.to_thread(_api_key_id, request)
+        except Exception as exc:  # pragma: no cover - defensive: the ticket still works
+            log.debug("SSE: could not resolve API key id for ticket: %s", exc)
+    ticket = _mint_stream_ticket(identity.username, is_system=identity.is_system, key_id=key_id)
+    return {"ticket": ticket, "expires_in": _TICKET_TTL_SECONDS}
 
 
 def _publish(topic: str, payload: dict) -> None:
     if not _SSE_QUEUES:
         return
     msg = json.dumps({"topic": topic, "payload": payload})
-    dead: Set[asyncio.Queue] = set()
-    for q in _SSE_QUEUES:
+    lossy = topic in _LOSSY_TOPICS
+    for q in list(_SSE_QUEUES):
+        if lossy and q.qsize() > q.maxsize // 2:
+            continue
         try:
             q.put_nowait(msg)
         except asyncio.QueueFull:
-            dead.add(q)
-    _SSE_QUEUES.difference_update(dead)
+            # A client that stopped reading. Dropping the queue from the fan-out
+            # alone left a zombie: the stream stayed open, got keep-alives and
+            # never another event, so EventSource never reconnected. End it.
+            log.info("SSE: client queue overflowed — closing the stream so the client reconnects")
+            _force_close(q, "overflow")
 
 
 def _make_forwarder(topic: str):
@@ -218,79 +417,139 @@ async def sse_stream(
 
     Each event payload is a JSON object: ``{"topic": "...", "payload": {...}}``.
     """
-    ticket_user = _verify_stream_ticket(ticket) if ticket else None
-    allowed = _AUTH_TOPICS if (identity or ticket_user) else _PUBLIC_TOPICS
-    username = identity.username if identity else ticket_user
-    q: asyncio.Queue = asyncio.Queue(maxsize=128)
+    claims = _verify_stream_ticket_claims(ticket) if ticket else None
+    cred: Optional[_Credential] = None
+    if identity is not None:
+        cred = _Credential(username=identity.username, request=request)
+    elif claims is not None:
+        cred = _credential_from_ticket(claims)
+
+    # Resolve who is listening BEFORE anything is delivered. A ticket for a
+    # user that no longer exists (or a key revoked since) gets the public subset.
+    if identity is not None:
+        # Just authenticated by the dependency — no second round trip.
+        audience = _Audience(
+            superadmin=identity.is_system or "superadmin" in (identity.roles or []),
+            permissions=await asyncio.to_thread(identity.effective_permissions),
+            scopes=frozenset(identity.key_scopes) if identity.key_scopes is not None else None,
+        )
+    else:
+        audience = await _refresh_audience(cred) if cred else _UNKNOWN
+    if cred is not None and not audience.valid:
+        cred = None
+    allowed = _AUTH_TOPICS if cred else _PUBLIC_TOPICS
+    username = cred.username if cred else None
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
     _SSE_QUEUES.add(q)
 
-    async def generator():
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-
-                try:
-                    data = json.loads(msg)
-                except Exception:
-                    # Unparseable message — forward best-effort and move on.
-                    yield f"data: {msg}\n\n"
-                    continue
-
-                if _CLOSE_KEY in data:
-                    try:
-                        from core.components.cluster.logic.cluster_service import cluster_service
-
-                        instance_id = cluster_service.instance_id
-                    except Exception:  # pragma: no cover - defensive
-                        instance_id = None
-                    hint = json.dumps({"reason": data[_CLOSE_KEY], "instance_id": instance_id})
-                    yield f"event: reconnect\ndata: {hint}\n\n"
-                    break
-
-                topic = data.get("topic")
-                if topic not in allowed:
-                    continue
-
-                # Per-connection user scoping for user-targeted topics: a notification
-                # is delivered only to its owner (payload.user_id == this connection's
-                # username) or to everyone when it is a broadcast (user_id is None).
-                # Without this, the shared broadcast queue would stream user A's
-                # notification body to user B. Also strip the internal user_id so it is
-                # never exposed to clients (mirrors the REST _public_view contract).
-                if topic == "notification:new":
-                    payload = data.get("payload") or {}
-                    target = payload.get("user_id")
-                    if target is not None and target != username:
-                        continue
-                    # Routing v2 audience gate: permission-restricted entries
-                    # only reach connections whose user holds the permission
-                    # (resolved per message via the cached access_service —
-                    # 5s TTL keeps this cheap; notification volume is low).
-                    req = payload.get("required_permission")
-                    if req and not _connection_allows(username, req):
-                        continue
-                    internal = {"user_id", "required_permission", "source_plugin_id", "endpoint_name"}
-                    if any(k in payload for k in internal):
-                        sanitized = {k: v for k, v in payload.items() if k not in internal}
-                        msg = json.dumps({"topic": topic, "payload": sanitized})
-
-                yield f"data: {msg}\n\n"
-        except (asyncio.CancelledError, GeneratorExit):
-            pass
-        finally:
-            _SSE_QUEUES.discard(q)
-
     return StreamingResponse(
-        generator(),
+        _stream(request, q, allowed, username, cred, audience),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _reconnect_frame(reason: str) -> str:
+    try:
+        from core.components.cluster.logic.cluster_service import cluster_service
+
+        instance_id = cluster_service.instance_id
+    except Exception:  # pragma: no cover - defensive
+        instance_id = None
+    return f"event: reconnect\ndata: {json.dumps({'reason': reason, 'instance_id': instance_id})}\n\n"
+
+
+def _render(topic: str, data: dict, msg: str, username: Optional[str], audience: _Audience) -> Optional[str]:
+    """The frame for one bus message on one connection, or ``None`` to skip it."""
+    required = _TOPIC_PERMISSIONS.get(topic)
+    if required and not audience.allows_any(required):
+        return None
+
+    payload = data.get("payload") or {}
+
+    if topic in _REDUCED_PAYLOAD_KEYS and not audience.allows_any(_PLUGIN_ADMIN):
+        keep = _REDUCED_PAYLOAD_KEYS[topic]
+        reduced = {k: payload[k] for k in keep if k in payload}
+        return f"data: {json.dumps({'topic': topic, 'payload': reduced})}\n\n"
+
+    # Per-connection user scoping for user-targeted topics: a notification is
+    # delivered only to its owner (payload.user_id == this connection's
+    # username) or to everyone when it is a broadcast (user_id is None).
+    # Without this, the shared broadcast queue would stream user A's
+    # notification body to user B. The internal keys are stripped so they are
+    # never exposed to clients (mirrors the REST _public_view contract).
+    if topic == "notification:new":
+        target = payload.get("user_id")
+        if target is not None and target != username:
+            return None
+        # Routing v2 audience gate: permission-restricted entries only reach
+        # connections whose user holds the permission (in-memory snapshot).
+        req = payload.get("required_permission")
+        if req and not audience.allows(req):
+            return None
+        if any(k in payload for k in _NOTIFICATION_INTERNAL_KEYS):
+            sanitized = {k: v for k, v in payload.items() if k not in _NOTIFICATION_INTERNAL_KEYS}
+            return f"data: {json.dumps({'topic': topic, 'payload': sanitized})}\n\n"
+
+    return f"data: {msg}\n\n"
+
+
+async def _stream(
+    request: Request,
+    q: asyncio.Queue,
+    allowed: frozenset,
+    username: Optional[str],
+    cred: Optional[_Credential],
+    audience: _Audience,
+):
+    """The SSE body of one connection."""
+    refreshed_at = time.monotonic()
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                msg: Optional[str] = await asyncio.wait_for(q.get(), timeout=_KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                msg = None
+
+            # Refresh the snapshot off-loop when it is due — on idle wake-ups
+            # too, so a revoked stream ends even when nothing is being sent.
+            if cred is not None and time.monotonic() - refreshed_at >= _AUDIENCE_REFRESH_SECONDS:
+                audience = await _refresh_audience(cred)
+                refreshed_at = time.monotonic()
+                if not audience.valid:
+                    # Credential revoked / user deleted: end the stream. The
+                    # client's reconnect cannot mint a ticket any more.
+                    yield _reconnect_frame("revoked")
+                    break
+
+            if msg is None:
+                yield ": keep-alive\n\n"
+                continue
+
+            try:
+                data = json.loads(msg)
+            except Exception:
+                # Unparseable message — forward best-effort and move on.
+                yield f"data: {msg}\n\n"
+                continue
+
+            if _CLOSE_KEY in data:
+                yield _reconnect_frame(data[_CLOSE_KEY])
+                break
+
+            topic = data.get("topic")
+            if topic not in allowed:
+                continue
+            frame = _render(topic, data, msg, username, audience)
+            if frame is not None:
+                yield frame
+    except (asyncio.CancelledError, GeneratorExit):
+        pass
+    finally:
+        _SSE_QUEUES.discard(q)

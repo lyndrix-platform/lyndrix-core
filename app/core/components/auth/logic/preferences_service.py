@@ -54,10 +54,30 @@ class PreferencesService:
     """CRUD + deep-merge over the per-user preference document."""
 
     def _ensure_schema(self) -> None:
-        """Create the ``user_preferences`` table if it does not exist (idempotent)."""
-        if db_instance.engine is None:
-            return
-        UserPreference.__table__.create(bind=db_instance.engine, checkfirst=True)
+        """Create the ``user_preferences`` table if it does not exist.
+
+        Checked once per engine (it used to cost an information_schema round
+        trip on EVERY write) and under the cluster bootstrap lock.
+        """
+        from core.components.database.logic.tx import ensure_table_once
+
+        ensure_table_once(UserPreference.__table__)
+
+    @staticmethod
+    def _locked_row(session, username: str):
+        """The user's row, locked for update until the transaction ends.
+
+        The document is read, changed and written back as a whole. Without the
+        row lock two concurrent writes (two tabs, two instances, the shell's
+        debounced panel state next to a theme change) both read the old document
+        and the second commit silently dropped the first one's keys.
+        """
+        return (
+            session.query(UserPreference)
+            .filter(UserPreference.username == username)
+            .with_for_update()
+            .first()
+        )
 
     # ------------------------------------------------------------------
     # Read
@@ -90,25 +110,29 @@ class PreferencesService:
         """
         if not isinstance(partial, dict):
             raise ValueError("preferences patch must be an object")
+        from core.components.database.logic.tx import run_with_retry, write_session
+
         self._ensure_schema()
-        with db_instance.SessionLocal() as s:
-            rec = (
-                s.query(UserPreference)
-                .filter(UserPreference.username == username)
-                .first()
-            )
-            current: Dict[str, Any] = copy.deepcopy(dict(rec.data)) if (rec and rec.data) else {}
-            merged = _deep_merge(current, copy.deepcopy(partial))
-            if rec is None:
-                rec = UserPreference(
-                    username=username, data=merged, updated_at=datetime.utcnow()
-                )
-                s.add(rec)
-            else:
-                # Reassign so SQLAlchemy detects the JSON column changed.
-                rec.data = merged
-                rec.updated_at = datetime.utcnow()
-            s.commit()
+
+        # One attempt = one short READ COMMITTED transaction on a fresh session.
+        # Retried on 1020/1205/1213 and on the duplicate-key error of two
+        # requests creating the same user's first row (the loser's second pass
+        # finds the row and merges into it) — both used to surface as HTTP 500.
+        def _merge_once() -> Dict[str, Any]:
+            with write_session() as s:
+                rec = self._locked_row(s, username)
+                current: Dict[str, Any] = copy.deepcopy(dict(rec.data)) if (rec and rec.data) else {}
+                merged = _deep_merge(current, copy.deepcopy(partial))
+                if rec is None:
+                    s.add(UserPreference(username=username, data=merged, updated_at=datetime.utcnow()))
+                else:
+                    # Reassign so SQLAlchemy detects the JSON column changed.
+                    rec.data = merged
+                    rec.updated_at = datetime.utcnow()
+                s.commit()
+                return merged
+
+        merged = run_with_retry(_merge_once, retry_integrity=True)
         log.debug(f"PREFS: merged preferences for '{username}' ({list(partial.keys())}).")
         return merged
 
@@ -129,22 +153,25 @@ class PreferencesService:
         parts = [p for p in dotted_key.split(".") if p]
         if not parts or db_instance.SessionLocal is None:
             return self.get(username)
+        from core.components.database.logic.tx import run_with_retry, write_session
+
         self._ensure_schema()
-        with db_instance.SessionLocal() as s:
-            rec = (
-                s.query(UserPreference)
-                .filter(UserPreference.username == username)
-                .first()
-            )
-            if rec is None or not rec.data:
-                return {}
-            data: Dict[str, Any] = copy.deepcopy(dict(rec.data))
-            self._delete_in(data, parts)
-            rec.data = data
-            rec.updated_at = datetime.utcnow()
-            s.commit()
-            log.debug(f"PREFS: deleted path '{dotted_key}' for '{username}'.")
-            return data
+
+        def _delete_once() -> Dict[str, Any]:
+            with write_session() as s:
+                rec = self._locked_row(s, username)
+                if rec is None or not rec.data:
+                    return {}
+                data: Dict[str, Any] = copy.deepcopy(dict(rec.data))
+                self._delete_in(data, parts)
+                rec.data = data
+                rec.updated_at = datetime.utcnow()
+                s.commit()
+                return data
+
+        data = run_with_retry(_delete_once)
+        log.debug(f"PREFS: deleted path '{dotted_key}' for '{username}'.")
+        return data
 
     # ------------------------------------------------------------------
     # Helpers

@@ -99,11 +99,13 @@ class DatabaseService:
         self.is_connected = False
         self._connection_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
-        self._max_retries = 30  # ~2.5 minutes with 5s intervals
+        self._max_retries = 30  # fast phase: ~2.5 minutes with 5s intervals, then capped backoff
         # Boot-screen telemetry (read by BootService.snapshot): how far the
         # connection loop got, whether it gave up and why, and whether we were
         # ever connected (a watchdog drop then reads as "reconnecting").
         self.connect_attempts = 0
+        # "config_error" is terminal; "max_retries" is only a hint that the fast
+        # phase is over — the loop keeps retrying with backoff.
         self.failure_reason: Optional[str] = None  # "config_error" | "max_retries"
         self.was_connected = False
         bus.subscribe("vault:opened")(self.init_db_connection)
@@ -113,7 +115,7 @@ class DatabaseService:
         return self._max_retries
 
     @contextmanager
-    def advisory_lock(self, name: str, timeout: int = 60) -> Iterator[bool]:
+    def advisory_lock(self, name: str, timeout: int = 60, *, warn: bool = True) -> Iterator[bool]:
         """Serialize a critical section across core instances with MariaDB ``GET_LOCK``.
 
         Used around bootstrap DDL and seeds so two instances booting at the same
@@ -122,6 +124,10 @@ class DatabaseService:
         duration of the block. Yields ``True`` when the lock was obtained,
         ``False`` on timeout or on non-MySQL dialects (SQLite tests) — callers
         proceed either way; the lock only narrows the race window.
+
+        Callers that must NOT run unlocked on MySQL (they skip and retry later
+        instead) pass ``warn=False`` and check the yielded value themselves, so
+        the log does not claim "continuing unlocked".
         """
         engine = self.engine
         if engine is None or engine.dialect.name not in ("mysql", "mariadb"):
@@ -137,7 +143,7 @@ class DatabaseService:
                 acquired = bool(conn.execute(text("SELECT GET_LOCK(:n, :t)"), {"n": name, "t": timeout}).scalar())
             except Exception as exc:
                 log.warning(f"DATABASE: GET_LOCK('{name}') failed ({exc}) — continuing unlocked")
-            if not acquired:
+            if not acquired and warn:
                 log.warning(f"DATABASE: could not obtain lock '{name}' within {timeout}s — continuing unlocked")
             yield acquired
         finally:
@@ -210,6 +216,7 @@ class DatabaseService:
 
                 self.is_connected = True
                 self.was_connected = True
+                self.failure_reason = None  # a late first connect clears the boot-screen hint
                 log.info("SUCCESS: Database connection established.")
                 if reconnecting:
                     # Reconnect after an outage (DB restart, MaxScale failover):
@@ -237,16 +244,10 @@ class DatabaseService:
                     bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "config_error"})
                     return
 
-                if attempt >= self._max_retries and not reconnecting:
-                    log.error(f"EXHAUSTED: Database connection failed after {attempt} attempts. Giving up.")
-                    self.failure_reason = "max_retries"
-                    bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "max_retries"})
-                    return
-
                 if reconnecting:
                     # Never give up on a connection we once had: a DB/proxy failover
                     # or maintenance window must not turn into a dead core instance.
-                    delay = min(30, 5 * (1 + attempt // 6))
+                    delay = self._retry_delay(attempt)
                     if attempt in (1, 6, 12) or attempt % 60 == 0:
                         log.warning(f"RETRY: Database connection lost — reconnect attempt {attempt}, next in {delay}s")
                     if attempt == 1:
@@ -254,8 +255,32 @@ class DatabaseService:
                     await asyncio.sleep(delay)
                     continue
 
-                log.warning(f"RETRY: Database not reachable (attempt {attempt}/{self._max_retries}). Retrying in 5s...")
-                await asyncio.sleep(5)
+                if attempt < self._max_retries:
+                    log.warning(f"RETRY: Database not reachable (attempt {attempt}/{self._max_retries}). Retrying in 5s...")
+                    await asyncio.sleep(5)
+                    continue
+
+                # First connect still failing after the fast phase. Giving up here
+                # left the instance up but unready FOREVER when the core simply
+                # started before MariaDB/Galera (k3s start order, DB restore) —
+                # only a restart recovered it. Report it once (boot screen +
+                # maintenance mode) and keep trying with capped backoff.
+                if attempt == self._max_retries:
+                    log.error(
+                        f"EXHAUSTED: Database still unreachable after {attempt} attempts — "
+                        "continuing to retry with backoff."
+                    )
+                    self.failure_reason = "max_retries"
+                    bus.emit("system:maintenance_mode", {"service": "db", "active": True, "reason": "max_retries"})
+                delay = self._retry_delay(attempt - self._max_retries)
+                if attempt % 20 == 0:
+                    log.warning(f"RETRY: Database not reachable (attempt {attempt}), next in {delay}s")
+                await asyncio.sleep(delay)
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> int:
+        """Capped linear backoff for the slow retry phases: 5 s … 30 s."""
+        return min(30, 5 * (1 + attempt // 6))
 
     def _check_db_sync(self):
         """Synchronous helper for DB health check (runs in executor)."""

@@ -69,6 +69,7 @@ _registered_dirs: dict[str, None] = {}
 
 # Deferred config cache.
 _supported: set[str] | None = None
+_supported_key: tuple | None = None
 _default: str = "en"
 
 # Placeholder pattern: %{name}
@@ -190,25 +191,36 @@ _load_dir(_LOCALES_DIR)
 
 
 def _get_supported() -> set[str]:
-    global _supported, _default
-    if _supported is None:
-        try:
-            from config import settings  # noqa: PLC0415
+    """Supported locales (and ``_default``) from the LIVE settings.
 
-            _default = settings.DEFAULT_LOCALE
-            _supported = {
-                s.strip() for s in settings.SUPPORTED_LOCALES.split(",") if s.strip()
-            }
-        except Exception:
+    Both are editable at runtime and hydrated from Vault after boot. Caching
+    them on first use froze whatever was set at that moment (often the value
+    before hydration) until the next restart, while ``/api/i18n/locales`` read
+    the settings live — NiceGUI and the React shell disagreed. The parsed set
+    is cached per raw setting value, so this stays one tuple comparison.
+    """
+    global _supported, _default, _supported_key
+    try:
+        from config import settings  # noqa: PLC0415
+
+        key = (settings.DEFAULT_LOCALE, settings.SUPPORTED_LOCALES)
+    except Exception:
+        if _supported is None:
             _supported = {"en", "de"}
+        return _supported
+    if _supported is None or key != _supported_key:
+        _supported_key = key
+        _default = key[0]
+        _supported = {s.strip() for s in key[1].split(",") if s.strip()}
     return _supported
 
 
 def _current_locale() -> str:
     """Return the locale for the active NiceGUI request, or the configured default."""
     try:
+        supported = _get_supported()  # also refreshes _default from the settings
         locale = get_user_value("locale", _default)
-        return locale if locale in _get_supported() else _default
+        return locale if locale in supported else _default
     except Exception:
         return _default
 

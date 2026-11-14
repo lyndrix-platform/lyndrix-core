@@ -32,22 +32,27 @@ class LocalProvider(AuthProvider):
             log.error("AUTH:Local: Database session unavailable.")
             return None
 
-        with db_instance.SessionLocal() as session:
-            user = session.query(User).filter(User.username == username).first()
+        def _load() -> Optional[tuple]:
+            with db_instance.SessionLocal() as session:
+                user = session.query(User).filter(User.username == username).first()
+                if not user:
+                    return None
+                # Snapshot the fields we need before leaving the session scope so the
+                # (slow) hash verification can run without holding the DB session.
+                return str(user.hashed_password), AuthResult(
+                    username=user.username,
+                    full_name=user.full_name or username,
+                    email=user.email or "",
+                    roles=list(user.roles or []),
+                    provider=self.provider_id,
+                )
 
-            if not user:
-                return None
-
-            # Snapshot the fields we need before leaving the session scope so the
-            # (slow) hash verification can run without holding the DB session.
-            hashed_password = str(user.hashed_password)
-            result = AuthResult(
-                username=user.username,
-                full_name=user.full_name or username,
-                email=user.email or "",
-                roles=list(user.roles or []),
-                provider=self.provider_id,
-            )
+        # Sync SQLAlchemy lookup → off the event loop (every login and every
+        # HTTP Basic request passes here).
+        loaded = await asyncio.to_thread(_load)
+        if loaded is None:
+            return None
+        hashed_password, result = loaded
 
         # Argon2 verification is deliberately CPU/memory-heavy; run it off the
         # event loop so a login (or API basic-auth) never blocks the loop and

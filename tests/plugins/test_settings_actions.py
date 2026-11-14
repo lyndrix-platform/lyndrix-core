@@ -41,6 +41,8 @@ def test_coercion_rejects_actions_and_keeps_values():
     ]
     out = coerce_plugin_settings(schema, {"retention": "9", "token": "", "mode": "b"}, {"token": "kept"})
     assert out == {"retention": 9, "token": "kept", "mode": "b"}
+    # A blank secret with nothing stored is left out — never persisted as "".
+    assert coerce_plugin_settings(schema, {"token": "", "mode": "a"}, {}) == {"mode": "a"}
 
     with pytest.raises(HTTPException) as exc:
         coerce_plugin_settings(schema, {"action_prune": "1"}, {})

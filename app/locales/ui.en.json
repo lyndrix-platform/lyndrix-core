@@ -782,7 +782,7 @@
       "reconnecting": "Connection lost — reconnecting",
       "db_retry": "Not reachable yet — attempt {{attempt}} of {{max}}",
       "db_config_error": "Configuration or credential error — check the logs",
-      "db_gave_up": "Gave up after {{max}} attempts — check the logs",
+      "db_gave_up": "Still not reachable after {{max}} attempts — retrying, check the logs",
       "iam_bootstrapping": "Creating tables, groups and users",
       "iam_ready": "Ready",
       "iam_failed": "Bootstrap failed — check the logs",

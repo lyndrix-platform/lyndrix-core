@@ -7,6 +7,10 @@ Boot integration:
   - subscribed at setup() so the bus topic is wired before any plugin loads.
   - on ``db:connected`` hydrates the precedence cache from the DB and runs
     the discovery sync (UPSERT current manifests, prune stale rows).
+  - re-syncs (debounced, single-flight) on LOCAL plugin lifecycle events only.
+    ``ui:needs_refresh`` is deliberately not a trigger: it is relayed to every
+    instance and fires several times per install, which made N instances run
+    ~4N full syncs per plugin install (lock storms, audit finding BG-03).
 """
 from __future__ import annotations
 
@@ -20,6 +24,17 @@ reload_core_locales()
 from .logic.router_service import notification_router
 
 
+# Local events after which the set of loaded manifests may differ. Every
+# instance syncs its OWN manifests, so a peer's relay of the same event (payload
+# carries ``_origin``) adds nothing and is ignored.
+_LIFECYCLE_TOPICS = (
+    "system:boot_complete",   # plugins are loaded after db:connected
+    "plugin:files_changed",   # install / upgrade / uninstall on this instance
+    "plugin:state_changed",   # installed / uninstalled / reloaded
+    "plugin:rolled_back",
+)
+
+
 manifest = ModuleManifest(
     id="lyndrix.core.notification_router",
     name="Notification Router",
@@ -29,7 +44,7 @@ manifest = ModuleManifest(
     icon="campaign",
     type="CORE",
     permissions=ModulePermissions(
-        subscribe=["db:connected", "notification:routed", "ui:needs_refresh"],
+        subscribe=["db:connected", "notification:routed", *_LIFECYCLE_TOPICS],
         emit=["messaging:outbound", "ui:needs_refresh"],
     ),
 )
@@ -54,9 +69,13 @@ def setup(ctx):
     async def _on_envelope(payload):
         await notification_router.handle_envelope(payload or {})
 
-    @ctx.subscribe("ui:needs_refresh")
-    async def _on_ui_refresh(_payload):
+    def _on_lifecycle(payload=None):
+        if isinstance(payload, dict) and payload.get("_origin"):
+            return  # a peer's event — that peer syncs its own manifests
         if db_instance.is_connected:
-            await notification_router.sync_declared_endpoints()
+            notification_router.request_sync()
+
+    for topic in _LIFECYCLE_TOPICS:
+        ctx.subscribe(topic)(_on_lifecycle)
 
     ctx.log.info("Notification Router: setup complete")

@@ -44,6 +44,19 @@ class PendingAction(BaseModel):
     expires_at:       datetime
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Give a datetime read from the database its UTC zone back.
+
+    MariaDB ``DATETIME`` and SQLite return NAIVE values even for
+    ``DateTime(timezone=True)`` columns. Everything in this module compares
+    against an aware ``now``; a naive value in the cache made ``expire_stale``
+    raise ``TypeError`` after every restart with a pending action.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 class CorrelationStore:
     """Manages the lifecycle of correlation IDs for interactive messages."""
 
@@ -60,10 +73,11 @@ class CorrelationStore:
         if not session:
             return
         try:
-            # Create table (idempotent — checkfirst=True)
-            PendingActionRecord.__table__.create(
-                bind=db_instance.engine, checkfirst=True
-            )
+            # Create the table once, under the cluster bootstrap lock (instances
+            # booting together used to race the CREATE → error 1050).
+            from core.components.database.logic.tx import ensure_table_once
+
+            ensure_table_once(PendingActionRecord.__table__)
             # Reload unresolved, non-expired rows
             now = datetime.now(timezone.utc)
             rows = (
@@ -75,14 +89,7 @@ class CorrelationStore:
                 .all()
             )
             for row in rows:
-                pa = PendingAction(
-                    correlation_id=UUID(row.correlation_id),
-                    source_plugin_id=row.source_plugin_id,
-                    resume_topic=row.resume_topic,
-                    state_snapshot=row.state_json or {},
-                    expires_at=row.expires_at,
-                )
-                self._cache[row.correlation_id] = pa
+                self._cache[row.correlation_id] = self._row_to_action(row)
             log.info("CorrelationStore: loaded %d pending action(s) from DB.", len(rows))
         except Exception as exc:
             log.error("CorrelationStore: init_db failed: %s", exc)
@@ -146,7 +153,7 @@ class CorrelationStore:
             source_plugin_id=record.source_plugin_id,
             resume_topic=record.resume_topic,
             state_snapshot=record.state_json or {},
-            expires_at=record.expires_at,
+            expires_at=_as_utc(record.expires_at),
         )
 
     async def resolve(
@@ -221,9 +228,7 @@ class CorrelationStore:
                 record = session.get(PendingActionRecord, key)
                 if not record or record.resolved_at is not None:
                     return None
-                expires = record.expires_at
-                if expires is not None and expires.tzinfo is None:
-                    expires = expires.replace(tzinfo=timezone.utc)
+                expires = _as_utc(record.expires_at)
                 if expires is not None and expires <= datetime.now(timezone.utc):
                     return None
                 return self._row_to_action(record)

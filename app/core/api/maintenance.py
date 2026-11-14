@@ -82,6 +82,10 @@ DEFAULT_LINGER_MINUTES = 15
 DEFAULT_MAX_OVERRIDE_MINUTES = 240
 #: How far ahead ``next_window``/``next_start`` look by default.
 DEFAULT_HORIZON = timedelta(days=30)
+# Occurrences coalesced into ONE window before its end counts as unknown
+# ("open-ended"). Real windows are one or a handful of occurrences; only
+# schedules that never pause reach this, and stopping here keeps evaluation cheap.
+_CHAIN_LIMIT = 256
 
 #: Cron evaluation gives up after this span without a match (e.g. ``0 0 30 2 *``).
 _CRON_SEARCH_LIMIT = timedelta(days=366 * 5)
@@ -712,6 +716,47 @@ def intervals_between(
     return list(_coalesce(raw))
 
 
+def _scan_window(
+    schedules: Iterable[Schedule], after: datetime, until: datetime
+) -> Tuple[Optional[Interval], bool]:
+    """Earliest coalesced window with ``end > after`` and ``start <= until``.
+
+    Returns ``(window, open_ended)``. ``open_ended`` is True when the real end
+    of the window is NOT known: its occurrences kept overlapping/abutting for
+    ``_CHAIN_LIMIT`` occurrences. ``window.end`` is then a *lower bound* (the
+    window certainly lasts that long) — a value backed by real occurrences,
+    never one derived from the search horizon.
+
+    The chain limit also bounds the cost: a cron such as ``*/5 * * * *`` with
+    ``duration_minutes: 10`` used to be walked occurrence by occurrence across
+    the whole 30-day horizon (~8 640 steps, several times per call), and its
+    "end" was simply where the horizon cut the walk off.
+    """
+    schedules = list(schedules)
+    while True:
+        current: Optional[Interval] = None
+        chained = 0
+        for iv in _merged(schedules, after, until):
+            if current is None:
+                current = iv
+                chained = 1
+            elif iv.start <= current.end:
+                if iv.end > current.end:
+                    current = Interval(current.start, iv.end)
+                chained += 1
+                if chained >= _CHAIN_LIMIT:
+                    return current, True
+            else:
+                return current, False  # a gap follows: the end is real
+        if current is None or current.end < until:
+            return current, False
+        # Enumeration stopped at ``until`` while the window is still running
+        # there; occurrences starting later may continue it. Look further (the
+        # horizon limits where a window may START, not how long it may last)
+        # until a gap or the chain limit decides.
+        until = max(current.end, after + 2 * (until - after))
+
+
 def next_window(
     schedules: Iterable[Schedule],
     after: datetime,
@@ -722,35 +767,72 @@ def next_window(
 
     If ``after`` lies inside a window, that running window is returned
     (``start <= after``), extended by adjacent/overlapping occurrences.
+
+    For windows that never really end (occurrences overlap or abut without a
+    gap, e.g. an every-5-minutes cron lasting 10 minutes, or 24/7 weekly
+    windows) coalescing stops after a bounded number of occurrences; ``end`` is
+    then a lower bound. Use :func:`effective_state` (``open_ended``) to tell
+    that case from a real end.
     """
     after = _ensure_aware(after, "after")
-    until = after + horizon
-    current: Optional[Interval] = None
-    for iv in _merged(schedules, after, until):
-        if current is None:
-            current = iv
-        elif iv.start <= current.end:
-            if iv.end > current.end:
-                current = Interval(current.start, iv.end)
-        else:
-            break
-    return current
+    return _scan_window(schedules, after, after + horizon)[0]
+
+
+def _running_window(
+    schedules: Iterable[Schedule], now: datetime, horizon: timedelta = DEFAULT_HORIZON
+) -> Tuple[Optional[Interval], bool, Optional[Interval]]:
+    """``(running, open_ended, upcoming)`` from ONE scan starting at ``now``.
+
+    ``running`` is the window containing ``now`` (or None), ``upcoming`` the
+    first window found when none is running.
+    """
+    window, open_ended = _scan_window(schedules, now, now + horizon)
+    if window is not None and window.start <= now:
+        return window, open_ended, None
+    return None, False, window
 
 
 def current_interval(
     schedules: Iterable[Schedule], now: datetime
 ) -> Optional[Interval]:
-    """The window containing ``now`` (``start <= now < end``), coalesced, or None."""
-    window = next_window(schedules, now)
-    if window is not None and window.start <= _ensure_aware(now, "now"):
-        return window
-    return None
+    """The window containing ``now`` (``start <= now < end``), coalesced, or None.
+
+    ``end`` is a lower bound for a window without a real end — see :func:`next_window`.
+    """
+    return _running_window(schedules, _ensure_aware(now, "now"))[0]
 
 
 def active_until(schedules: Iterable[Schedule], now: datetime) -> Optional[datetime]:
-    """End of the running window, or None when no window is active."""
+    """End of the running window, or None when no window is active.
+
+    For a window without a real end this is the lower bound described in
+    :func:`next_window` — re-evaluate when it is reached instead of treating it
+    as the end of maintenance.
+    """
     window = current_interval(schedules, now)
     return window.end if window else None
+
+
+def _next_start(
+    schedules: List[Schedule],
+    after: datetime,
+    horizon: timedelta,
+    running: Optional[Interval],
+    open_ended: bool,
+    upcoming: Optional[Interval],
+) -> Optional[datetime]:
+    """Shared tail of :func:`next_start` / :func:`effective_state` (scan already done)."""
+    if running is None:
+        return upcoming.start if upcoming is not None else None
+    if open_ended:
+        # The running window has no known end, so there is no "next" one. The
+        # old code searched on from the horizon-shaped end and reported a start
+        # that lay INSIDE the running window.
+        return None
+    window = _scan_window(schedules, running.end, running.end + horizon)[0]
+    if window is None or window.start <= after:
+        return None
+    return window.start
 
 
 def next_start(
@@ -759,15 +841,15 @@ def next_start(
     *,
     horizon: timedelta = DEFAULT_HORIZON,
 ) -> Optional[datetime]:
-    """Start of the next window that is **not yet running** at ``after``."""
+    """Start of the next window that is **not yet running** at ``after``.
+
+    None when nothing starts within ``horizon`` — and when the running window
+    has no known end (nothing can follow a window that does not end).
+    """
     after = _ensure_aware(after, "after")
     schedules = list(schedules)
-    running = current_interval(schedules, after)
-    base = running.end if running else after
-    window = next_window(schedules, base, horizon=horizon)
-    if window is None or window.start <= after:
-        return None
-    return window.start
+    running, open_ended, upcoming = _running_window(schedules, after, horizon)
+    return _next_start(schedules, after, horizon, running, open_ended, upcoming)
 
 
 # --------------------------------------------------------------------------- #
@@ -858,13 +940,22 @@ def apply_override_ended(o: Override, payload: Mapping[str, object]) -> Override
 
 @dataclass(frozen=True)
 class MaintenanceState:
-    """What a consumer shows/acts on for one CI at one instant."""
+    """What a consumer shows/acts on for one CI at one instant.
+
+    ``until`` is the end of the running maintenance. When ``open_ended`` is
+    True the windows have no real end (their occurrences overlap or abut
+    without a gap for as far as the evaluation looks): ``until`` is then only a
+    **lower bound** — maintenance certainly lasts until then and very likely
+    longer. Show it as "ongoing", re-evaluate when it is reached, and never
+    store it as the moment maintenance ends. ``next_start`` is None in that case.
+    """
 
     active: bool
     until: Optional[datetime]
     source: Optional[Literal["window", "override"]]
     next_start: Optional[datetime]
     note: Optional[str] = None
+    open_ended: bool = False
 
 
 def effective_state(
@@ -875,19 +966,28 @@ def effective_state(
     horizon: timedelta = DEFAULT_HORIZON,
 ) -> MaintenanceState:
     """Combine windows and overrides. An active override wins (``source="override"``);
-    ``until`` is the later of the two ends."""
+    ``until`` is the later of the two ends. See :class:`MaintenanceState` for
+    ``open_ended``."""
     now = _ensure_aware(now, "now")
     schedules = list(schedules)
-    window = current_interval(schedules, now)
+    # One scan answers "running?", "until when?" and (when nothing runs) "what
+    # is next?"; a second, short one finds the follower of a window that ends.
+    # ``horizon`` limits the search for the NEXT window only — whether a window
+    # is running never depended on it.
+    window, open_ended, following = _running_window(schedules, now)
+    if window is None and horizon != DEFAULT_HORIZON:
+        following = _scan_window(schedules, now, now + horizon)[0]
+    upcoming = _next_start(schedules, now, horizon, window, open_ended, following)
     active_overrides = [o for o in overrides if override_active(o, now)]
-    upcoming = next_start(schedules, now, horizon=horizon)
     if active_overrides:
         strongest = max(active_overrides, key=override_until)
         until = override_until(strongest)
-        if window is not None and window.end > until:
-            until = window.end
+        window_wins = window is not None and window.end > until
+        if window_wins:
+            until = window.end  # type: ignore[union-attr]
         return MaintenanceState(
-            True, until, "override", upcoming, strongest.reason or None
+            True, until, "override", upcoming, strongest.reason or None,
+            open_ended=bool(open_ended and window_wins),
         )
     if window is not None:
         note = next(
@@ -898,7 +998,7 @@ def effective_state(
             ),
             None,
         )
-        return MaintenanceState(True, window.end, "window", upcoming, note)
+        return MaintenanceState(True, window.end, "window", upcoming, note, open_ended=open_ended)
     return MaintenanceState(False, None, None, upcoming, None)
 
 

@@ -23,10 +23,43 @@ log = get_logger("Core:PluginService")
 # git-manager stores repos under /data/storage/git_repos/{repo_id}.
 # Source URL is configurable via LYNDRIX_PLUGIN_COLLECTION_URL (defaults to the
 # lyndrix-platform org); see config.Settings.
-COLLECTION_REPO_URL = settings.LYNDRIX_PLUGIN_COLLECTION_URL
-COLLECTION_REPO_ID = COLLECTION_REPO_URL.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-COLLECTION_LOCAL_PATH = Path("/data/storage/git_repos") / COLLECTION_REPO_ID
-COLLECTION_JSON_PATH = COLLECTION_LOCAL_PATH / "plugin-directory" / "plugins.json"
+# The URL is an editable setting hydrated from Vault AFTER this module is
+# imported, so it must be read when used — as module constants (computed at
+# import) the "Plugin Collection URL" setting never took effect.
+def collection_repo_url() -> str:
+    return settings.LYNDRIX_PLUGIN_COLLECTION_URL
+
+
+def collection_repo_id() -> str:
+    return collection_repo_url().rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def collection_json_path() -> Path:
+    return Path("/data/storage/git_repos") / collection_repo_id() / "plugin-directory" / "plugins.json"
+
+
+def collection_fallback_url() -> str:
+    """HTTP fallback (used when the local clone is not yet available).
+    Override via PLUGIN_COLLECTION_URL env var, else derived from the collection URL."""
+    return os.environ.get("PLUGIN_COLLECTION_URL") or _raw_collection_fallback_url(collection_repo_url())
+
+
+# Backwards-compatible module attributes (COLLECTION_REPO_URL, …): resolved on
+# access so importers also see the current setting.
+_LAZY_COLLECTION_ATTRS = {
+    "COLLECTION_REPO_URL": collection_repo_url,
+    "COLLECTION_REPO_ID": collection_repo_id,
+    "COLLECTION_LOCAL_PATH": lambda: collection_json_path().parent.parent,
+    "COLLECTION_JSON_PATH": collection_json_path,
+    "COLLECTION_FALLBACK_URL": collection_fallback_url,
+}
+
+
+def __getattr__(name: str):
+    resolver = _LAZY_COLLECTION_ATTRS.get(name)
+    if resolver is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return resolver()
 
 
 def _raw_collection_fallback_url(git_url: str) -> str:
@@ -39,13 +72,6 @@ def _raw_collection_fallback_url(git_url: str) -> str:
             "/main/plugin-directory/plugins.json"
         )
     return base
-
-# HTTP fallback (used when the local clone is not yet available).
-# Override via PLUGIN_COLLECTION_URL env var, else derived from the collection URL.
-COLLECTION_FALLBACK_URL = os.environ.get(
-    "PLUGIN_COLLECTION_URL",
-    _raw_collection_fallback_url(COLLECTION_REPO_URL),
-)
 
 # How often to check for new commits on main (seconds).
 COLLECTION_POLL_INTERVAL = int(os.environ.get("PLUGIN_COLLECTION_POLL_INTERVAL", "900"))  # 15 min
@@ -219,7 +245,10 @@ class PluginService:
             from .models import PluginVersionHistory
             if not db_instance.engine:
                 return
-            PluginVersionHistory.__table__.create(bind=db_instance.engine, checkfirst=True)
+            # Once per engine, under the cluster bootstrap lock (was: a checkfirst
+            # round trip per call, racing between instances).
+            from core.components.database.logic.tx import ensure_table_once
+            ensure_table_once(PluginVersionHistory.__table__)
             with db_instance.SessionLocal() as session:
                 session.add(PluginVersionHistory(
                     module_id=module_id, repo_name=repo_name, version=version,
@@ -281,7 +310,7 @@ class PluginService:
         """
         try:
             result = subprocess.run(
-                ["git", "ls-remote", COLLECTION_REPO_URL, "HEAD"],
+                ["git", "ls-remote", collection_repo_url(), "HEAD"],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0 and result.stdout:
@@ -294,8 +323,8 @@ class PluginService:
         """Emit git:sync so the git-manager plugin clones/pulls the collection."""
         log.info("COLLECTION: Requesting git-manager to sync plugin collection...")
         bus.emit("git:sync", {
-            "repo_id": COLLECTION_REPO_ID,
-            "url": COLLECTION_REPO_URL,
+            "repo_id": collection_repo_id(),
+            "url": collection_repo_url(),
             "auth_type": "none",  # public repo — no token needed
         })
 
@@ -501,7 +530,7 @@ class PluginService:
         """Called when git-manager emits git:status_update.
         Invalidates the marketplace cache so the next fetch reads fresh data.
         """
-        if payload.get("repo_id") != COLLECTION_REPO_ID:
+        if payload.get("repo_id") != collection_repo_id():
             return
         if payload.get("status") == "synced":
             log.info("COLLECTION: git-manager sync complete — invalidating marketplace cache.")
@@ -1159,20 +1188,21 @@ class PluginService:
         data = None
 
         # 1. Prefer the local git clone — fast, no network, no tokens.
-        if COLLECTION_JSON_PATH.exists():
+        json_path = collection_json_path()
+        if json_path.exists():
             try:
-                data = json.loads(COLLECTION_JSON_PATH.read_text(encoding="utf-8"))
-                log.debug(f"MARKETPLACE: Loaded collection from local clone ({COLLECTION_JSON_PATH})")
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                log.debug(f"MARKETPLACE: Loaded collection from local clone ({json_path})")
             except Exception as exc:
                 log.warning(f"MARKETPLACE: Failed to read local collection JSON: {exc}")
 
         # 2. Fall back to HTTP if the clone isn't available yet.
         if data is None:
-            log.info(f"MARKETPLACE: Local clone not ready, falling back to HTTP ({COLLECTION_FALLBACK_URL})")
+            log.info(f"MARKETPLACE: Local clone not ready, falling back to HTTP ({collection_fallback_url()})")
             try:
                 # Public raw.githubusercontent.com URL — no auth headers needed.
                 async with httpx.AsyncClient(headers=self._get_headers(include_auth=False), follow_redirects=True) as client:
-                    resp = await client.get(COLLECTION_FALLBACK_URL, timeout=5.0)
+                    resp = await client.get(collection_fallback_url(), timeout=5.0)
                     resp.raise_for_status()
                     data = resp.json()
             except Exception as exc:

@@ -9,7 +9,8 @@ the one place that logic lives, so either UI engine is a thin client over it.
 Raises:
   * ``ValueError`` — unsupported keys or failed Settings validation (caller maps
     to HTTP 422 / a UI warning).
-  * ``RuntimeError`` — Vault unavailable / write failed (caller maps to 503).
+  * ``RuntimeError`` — Vault unavailable, current secret unreadable or write
+    failed (caller maps to 503). Nothing was persisted or applied.
 """
 from __future__ import annotations
 
@@ -54,7 +55,7 @@ class SystemConfigService:
         from config import Settings, settings
         from pydantic import ValidationError
 
-        from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
+        from core.components.vault.logic.kv_helper import update_secret_dict
 
         remove_keys = list(remove_keys or [])
         settings_fields = set(settings.model_fields.keys())
@@ -75,12 +76,16 @@ class SystemConfigService:
                 raise ValueError(exc.errors()) from exc
 
         if persist:
-            data = read_secret_dict(_VAULT_PATH)
-            data.update(updates)
-            for key in remove_keys:
-                data.pop(key, None)
-            if not write_secret_dict(_VAULT_PATH, data):
-                raise RuntimeError("Vault unavailable — configuration was not persisted")
+            def _merge(data: Dict[str, Any]) -> None:
+                data.update(updates)
+                for key in remove_keys:
+                    data.pop(key, None)
+
+            # Never write after a failed read: ``core/settings`` also holds the
+            # git tokens and the system API key, and a KV v2 write replaces the
+            # whole secret. VaultReadError/VaultWriteError are RuntimeErrors, so
+            # the callers' existing "Vault unavailable" handling (503) applies.
+            update_secret_dict(_VAULT_PATH, _merge)
 
         if apply_runtime and validated is not None:
             for key in settings_updates:

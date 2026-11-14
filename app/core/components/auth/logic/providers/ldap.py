@@ -210,7 +210,8 @@ class LDAPProvider(AuthProvider):
         local_groups: set = set(self._map_groups_to_local_groups(groups))
         try:
             from core.components.auth.logic.group_service import group_service
-            local_groups |= set(group_service.resolve_ldap_groups(groups))
+            # Sync DB lookup → off the event loop.
+            local_groups |= set(await asyncio.to_thread(group_service.resolve_ldap_groups, groups))
         except Exception as exc:
             log.warning(f"AUTH:LDAP: local group resolution failed: {exc}")
 

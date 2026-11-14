@@ -45,6 +45,10 @@ manifest = ModuleManifest(
 )
 
 
+_EXPIRE_INTERVAL_SECONDS = 300
+_STREAM_CLEANUP_INTERVAL_SECONDS = 600
+
+
 def setup(ctx):
     ctx.log.info("Messaging Gateway: initialising…")
 
@@ -63,7 +67,8 @@ def setup(ctx):
 
     @ctx.subscribe("db:connected")
     async def _on_db_connected(payload):
-        messaging_gateway.init_db()
+        # Table create + reload of pending rows is sync SQLAlchemy → off the loop.
+        await asyncio.to_thread(messaging_gateway.init_db)
         # Start retry workers that were registered before the event loop existed.
         messaging_gateway.start_pending_workers()
         ctx.log.info("Messaging Gateway: DB initialised, retry workers started.")
@@ -76,15 +81,24 @@ def setup(ctx):
         except Exception as exc:
             ctx.log.error("Messaging Gateway: outbound dispatch error: %s", exc)
 
+    # Housekeeping loops must survive a failing pass: an exception escaping the
+    # ``while True`` ended the task for good (logged once), and expired actions /
+    # stale streams were never cleaned up again until the next restart.
     async def _expire_loop():
         while True:
-            await asyncio.sleep(300)
-            await messaging_gateway.expire_stale_actions()
+            await asyncio.sleep(_EXPIRE_INTERVAL_SECONDS)
+            try:
+                await messaging_gateway.expire_stale_actions()
+            except Exception as exc:  # CancelledError is a BaseException → still stops the loop
+                ctx.log.error("Messaging Gateway: expiring stale actions failed: %s", exc)
 
     async def _stream_cleanup_loop():
         while True:
-            await asyncio.sleep(600)
-            await messaging_gateway.stream_bridge.cleanup_stale()
+            await asyncio.sleep(_STREAM_CLEANUP_INTERVAL_SECONDS)
+            try:
+                await messaging_gateway.stream_bridge.cleanup_stale()
+            except Exception as exc:
+                ctx.log.error("Messaging Gateway: stream cleanup failed: %s", exc)
 
     ctx.create_task(_expire_loop(), name="messaging:expire_stale")
     ctx.create_task(_stream_cleanup_loop(), name="messaging:stream_cleanup")

@@ -54,6 +54,8 @@ _ENV_VAR = "LYNDRIX_SYSTEM_API_KEY"
 # request does not trigger a fresh hvac round-trip every time. Env-var resolution
 # is not cached (cheap + always authoritative). Bust explicitly on settings update.
 _KEY_CACHE_TTL_SECONDS = 30.0
+# After a failed Vault read the next attempt is allowed this soon (retry throttle).
+_KEY_ERROR_RETRY_SECONDS = 2.0
 _key_cache: dict = {"value": None, "expires": 0.0}
 
 
@@ -158,18 +160,31 @@ def resolve_system_api_key() -> Optional[str]:
 
     value: Optional[str] = None
     try:
+        import hvac.exceptions
+
         from core.services import vault_instance
 
-        if vault_instance.is_connected:
+        if not vault_instance.is_connected:
+            # Vault state unknown (sealed / not up yet): answer "not configured"
+            # for THIS call only. Caching it would keep API-key auth off for the
+            # whole TTL after Vault is back.
+            return None
+        try:
             resp = vault_instance.client.secrets.kv.v2.read_secret_version(
                 path=_VAULT_PATH, mount_point=_VAULT_MOUNT
             )
-            vault_val = (resp.get("data", {}).get("data", {}) or {}).get(_VAULT_KEY)
+            vault_val = ((resp.get("data") or {}).get("data") or {}).get(_VAULT_KEY)
             if vault_val and str(vault_val).strip():
                 value = str(vault_val).strip()
+        except hvac.exceptions.InvalidPath:
+            value = None  # secret really absent → a cacheable "not configured"
     except Exception:
-        # Vault unavailable / key absent — fall through to "not configured".
-        value = None
+        # Read error (5xx, timeout, sealed): the key is UNKNOWN, not absent.
+        # Only throttle the retry briefly so a Vault outage does not cost one
+        # round trip per request — never hold "no key" for the full TTL.
+        _key_cache["value"] = None
+        _key_cache["expires"] = now + _KEY_ERROR_RETRY_SECONDS
+        return None
 
     _key_cache["value"] = value
     _key_cache["expires"] = now + _KEY_CACHE_TTL_SECONDS

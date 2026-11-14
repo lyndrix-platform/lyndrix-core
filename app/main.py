@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from config import settings, EDITABLE_SETTINGS
 from core.bus import bus
-from core.logger import setup_logging, get_logger
+from core.logger import setup_logging, get_logger, apply_log_level
 from core.services import vault_instance, boot_service
 
 # --- UI engine flags (computed once at import time) ---
@@ -202,7 +202,7 @@ def _public_config_snapshot() -> dict:
     sanitized["ldap_default_roles"] = settings.ldap_default_roles
     sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
     sanitized["env_locked"] = [
-        s.field for s in EDITABLE_SETTINGS if os.getenv(s.field) is not None
+        s.field for s in EDITABLE_SETTINGS if settings.is_env_locked(s.field)
     ]
     sanitized["editable_settings"] = [
         {
@@ -537,9 +537,8 @@ app.include_router(cluster_router)
 # ==========================================
 
 # /api/health calls every plugin's health(); dashboards and probes poll it, so
-# the plugin round is cached briefly (N pollers → one round per window).
-_HEALTH_CACHE_TTL_S = 10.0
-_health_cache: Dict[str, Any] = {"at": 0.0, "worst": "ok", "plugins": {}}
+# the plugin round is cached briefly and refreshed single-flight (N pollers →
+# one round per window) — see core/api/health_round.py.
 
 
 @app.get("/api/health", tags=["System"])
@@ -560,69 +559,11 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
     per-plugin breakdown, raw failure reasons and version numbers are returned
     only to authenticated callers with the ``api:read`` permission.
     """
+    from core.api.health_round import plugin_health_round
     from core.components.plugins.logic.manager import module_manager
 
     ready, reasons = cluster_service.readiness()
-    now = _time.monotonic()
-    if now - _health_cache["at"] < _HEALTH_CACHE_TTL_S:
-        worst, plugin_results = _health_cache["worst"], _health_cache["plugins"]
-        if identity is None or not identity.allows("api:read"):
-            return {"status": worst, "ready": ready}
-        return {
-            "status": worst,
-            "ready": ready,
-            "readiness_reasons": reasons,
-            "instance_id": cluster_service.instance_id,
-            "core_version": __core_version__,
-            "api_version": __api_version__,
-            "plugins": plugin_results,
-            "cached": True,
-        }
-
-    plugin_results: dict = {}
-    severity_order = {"error": 3, "degraded": 2, "unknown": 1, "ok": 0}
-    worst = "ok"
-
-    async def _call_health(module_id: str, entry: dict):
-        module = entry.get("module")
-        ctx = entry.get("context")
-        if module is None or ctx is None or not hasattr(module, "health"):
-            return module_id, PluginHealthStatus(status="unknown")
-        # A plugin in its warm-up window is not probed: health() would only add
-        # load to the very work it is waiting for, and "starting" is not an error.
-        runtime = getattr(ctx, "runtime", None)
-        if runtime and runtime.get("phase") == "starting":
-            return module_id, PluginHealthStatus(status="unknown", details={"reason": "starting"})
-        try:
-            t0 = _time.monotonic()
-            result = await asyncio.wait_for(module.health(ctx), timeout=5.0)
-            elapsed_ms = (_time.monotonic() - t0) * 1000
-            if not isinstance(result, PluginHealthStatus):
-                result = PluginHealthStatus(status="unknown", details={"raw": str(result)})
-            result.latency_ms = round(elapsed_ms, 2)
-            return module_id, result
-        except asyncio.TimeoutError:
-            return module_id, PluginHealthStatus(status="error", details={"reason": "health() timed out"})
-        except Exception as exc:
-            return module_id, PluginHealthStatus(status="error", details={"reason": str(exc)})
-
-    tasks = [
-        _call_health(mid, entry)
-        for mid, entry in module_manager.registry.items()
-        if entry.get("manifest") and entry["manifest"].type == "PLUGIN"
-        and entry.get("status") == "active"
-    ]
-
-    gathered = await asyncio.gather(*tasks)
-    for module_id, health_status in gathered:
-        plugin_results[module_id] = {
-            **health_status.model_dump(),
-            "runtime": module_manager.get_runtime(module_id),
-        }
-        if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
-            worst = health_status.status
-
-    _health_cache.update({"at": _time.monotonic(), "worst": worst, "plugins": plugin_results})
+    worst, plugin_results, cached = await plugin_health_round.get(module_manager)
 
     # Public callers only see the coarse status — no plugin inventory, failure
     # reasons or version numbers (avoid information disclosure / reconnaissance).
@@ -637,7 +578,7 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
         "core_version": __core_version__,
         "api_version": __api_version__,
         "plugins": plugin_results,
-        "cached": False,
+        "cached": cached,
     }
 
 
@@ -698,7 +639,7 @@ async def set_runtime_config(
 
     # Reject env-locked keys up-front: an OS env var always wins on the next boot,
     # so persisting it to Vault would silently no-op and confuse the operator.
-    locked = [key for key in updates if os.getenv(key) is not None]
+    locked = [key for key in updates if settings.is_env_locked(key)]
     if locked:
         raise HTTPException(
             status_code=409,
@@ -708,7 +649,9 @@ async def set_runtime_config(
     from core.components.settings.logic.system_config_service import system_config_service
 
     try:
-        result = system_config_service.apply(
+        # Vault read-modify-write (sync hvac) → off the event loop.
+        result = await asyncio.to_thread(
+            system_config_service.apply,
             updates,
             persist=payload.persist_in_vault,
             apply_runtime=payload.apply_runtime,
@@ -827,6 +770,7 @@ async def _hydrate_settings_from_vault(payload=None):
     try:
         # hydrate_from_vault performs a blocking hvac round-trip — keep it off the loop.
         await asyncio.to_thread(settings.hydrate_from_vault)
+        apply_log_level(settings.LOG_LEVEL)  # a UI-saved level must survive a restart
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"CONFIG: Vault settings hydration failed: {exc}")
 
@@ -839,9 +783,6 @@ async def _on_settings_changed_remote(payload=None):
     if not (payload or {}).get("_origin"):
         return  # our own save already applied the values in-process
     await _hydrate_settings_from_vault()
-    import logging as _logging
-
-    _logging.getLogger().setLevel(getattr(_logging, str(settings.LOG_LEVEL).upper(), _logging.INFO))
     log.info(f"CONFIG: settings re-hydrated after a change on instance {payload.get('_origin')}.")
 
 

@@ -18,6 +18,10 @@ from core.logger import get_logger
 log = get_logger("Core:NotificationService")
 
 _HISTORY_LIMIT = 500
+# After a failed write-through: wait this long before the next flush; at most
+# this many operations are kept for a database that stays unreachable.
+_DB_FLUSH_RETRY_SECONDS = 5.0
+_DB_PENDING_LIMIT = 1000
 _SAVE_DEBOUNCE_SECONDS = 0.5
 
 
@@ -162,20 +166,50 @@ class NotificationService:
         with self._db_lock:
             self._db_pending.append(fn)
 
-    def _db_flush(self) -> None:
+    def _db_flush(self) -> bool:
+        """Write the queued operations in one transaction (blocking).
+
+        Returns ``False`` when the batch could not be written but was put back
+        for a later flush. A transient database error (lock wait 1205, deadlock
+        1213, snapshot conflict 1020, lost connection, a peer inserting the same
+        row) used to drop the whole batch — read/dismiss marks and bell entries
+        silently vanished from the shared store. The operations are idempotent
+        upserts/deletes, so they are retried with a fresh session and, when that
+        does not help, re-queued IN FRONT of anything queued meanwhile.
+        """
         with self._db_lock:
             pending, self._db_pending = self._db_pending, []
         if not pending:
-            return
-        from core.components.database.logic.db_service import db_instance
+            return True
+        from sqlalchemy.exc import IntegrityError, OperationalError
 
-        try:
-            with db_instance.SessionLocal() as s:
+        from core.components.database.logic.tx import run_with_retry, write_session
+
+        def _write() -> None:
+            with write_session() as s:
                 for fn in pending:
                     fn(s)
                 s.commit()
+
+        try:
+            run_with_retry(_write, attempts=3, retry_integrity=True)
+            return True
+        except (OperationalError, IntegrityError) as exc:
+            with self._db_lock:
+                self._db_pending[:0] = pending
+                # Bounded against a database that stays down: keep the newest.
+                overflow = len(self._db_pending) - _DB_PENDING_LIMIT
+                if overflow > 0:
+                    del self._db_pending[:overflow]
+            if overflow > 0:
+                log.error("Notifications: write-through backlog full — dropped the %d oldest operation(s)", overflow)
+            log.warning("Notifications: write-through failed (%s) — %d operation(s) re-queued",
+                        exc, len(pending))
+            return False
         except Exception as exc:
+            # Not a database hiccup (a bug in an operation): retrying cannot help.
             log.error("Notifications: write-through to the shared store failed: %s", exc)
+            return True
 
     def _db_upsert(self, n: dict[str, Any]) -> None:
         from ..model.models import NotificationRow, NotificationUserState
@@ -308,14 +342,20 @@ class NotificationService:
     async def _debounced_flush(self) -> None:
         # Coalesce bursts of notifications into a single write.
         await asyncio.sleep(_SAVE_DEBOUNCE_SECONDS)
-        if not self._dirty:
-            return
-        self._dirty = False
-        if self._db_enabled:
-            await asyncio.to_thread(self._db_flush)
-            return
-        snapshot = self._serialize()
-        await asyncio.to_thread(self._write_file, snapshot)
+        # Loop instead of flushing once: a change that arrives WHILE the flush
+        # runs in its worker thread finds this task still alive, so
+        # ``_request_save`` schedules nothing — without the loop it stayed
+        # queued until some later change (possibly never; lost on restart).
+        while self._dirty or (self._db_enabled and self._db_pending):
+            self._dirty = False
+            if self._db_enabled:
+                if not await asyncio.to_thread(self._db_flush):
+                    # Batch re-queued after a transient DB error: try again later.
+                    self._dirty = True
+                    await asyncio.sleep(_DB_FLUSH_RETRY_SECONDS)
+                continue
+            snapshot = self._serialize()
+            await asyncio.to_thread(self._write_file, snapshot)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -426,6 +466,13 @@ class NotificationService:
                     "type": notif["type"],
                     "timestamp": notif["timestamp"],
                     "user_id": notif["user_id"],
+                    # Delivery metadata for the SSE audience gate (and peers, the
+                    # topic is bridged). Without ``required_permission`` the gate
+                    # never fired and gated notifications reached every stream
+                    # (AZ-06). events_api strips these keys before sending.
+                    "required_permission": notif.get("required_permission"),
+                    "source_plugin_id": notif.get("source_plugin_id"),
+                    "endpoint_name": notif.get("endpoint_name"),
                 },
             )
 
@@ -468,6 +515,68 @@ class NotificationService:
                             multi_line=True,
                             timeout=3.0,
                         )
+            except Exception as exc:
+                log.debug("broadcast_toast: skipped a client: %s", exc)
+
+    # --- permission-gated toasts, without DB work on the event loop ---------
+
+    @staticmethod
+    def _session_identity() -> tuple[str, bool]:
+        """Inside a ``with client:`` block: ``(username, is_superadmin)`` of that session."""
+        from nicegui import app as _app
+
+        roles = list(_app.storage.user.get("roles", []) or [])
+        return str(_app.storage.user.get("username", "") or ""), "superadmin" in roles
+
+    def _connected_sessions(self) -> list[tuple[Any, str, bool]]:
+        """``(client, username, is_superadmin)`` for every connected NiceGUI client."""
+        sessions = []
+        for client in list(Client.instances.values()):
+            try:
+                if client.has_socket_connection:
+                    with client:
+                        sessions.append((client, *self._session_identity()))
+            except Exception as exc:
+                log.debug("broadcast_toast: skipped a client: %s", exc)
+        return sessions
+
+    @staticmethod
+    def _notify_client(client, message: str, toast_type: str) -> None:
+        with client:
+            ui.notify(message, type=toast_type, position="top-right", multi_line=True, timeout=3.0)
+
+    async def broadcast_toast_async(
+        self, message: str, type_: str, *, required_permission: str | None = None
+    ) -> None:
+        """``broadcast_toast`` for async callers (the notification router).
+
+        The sync variant resolves the permission per client on the event loop
+        (a SELECT whenever the 5 s access cache misses). Here the session users
+        are collected first, their permissions are resolved in ONE worker-thread
+        call, and only the notifying happens on the loop.
+        """
+        if not required_permission:
+            self.broadcast_toast(message, type_)
+            return
+        toast_type = type_ if type_ in ["positive", "negative", "warning", "info"] else "info"
+        sessions = self._connected_sessions()
+        usernames = {user for _client, user, is_super in sessions if user and not is_super}
+
+        def _resolve() -> set[str]:
+            from core.components.auth.logic import access_service
+
+            return {u for u in usernames if access_service.username_has_permission(u, required_permission)}
+
+        try:
+            permitted = await asyncio.to_thread(_resolve) if usernames else set()
+        except Exception as exc:
+            log.debug("broadcast_toast: permission resolution failed (%s) — superadmins only", exc)
+            permitted = set()
+        for client, username, is_super in sessions:
+            if not (is_super or username in permitted):
+                continue
+            try:
+                self._notify_client(client, message, toast_type)
             except Exception as exc:
                 log.debug("broadcast_toast: skipped a client: %s", exc)
 

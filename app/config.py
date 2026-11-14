@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # the SSRF guard in core.components.plugins.logic.git_providers. Add your
     # self-hosted GitLab's hostname here to install plugins from it.
     LYNDRIX_PLUGIN_REPO_HOSTS: str = "github.com"
+    # Seconds a plugin's teardown() may take on disable/unload/reload before
+    # the core stops waiting for it and continues (the plugin lifecycle reads
+    # this; a hanging teardown must not block the operation forever).
+    LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: int = 15
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
@@ -481,13 +485,26 @@ class Settings(BaseSettings):
             return []
         return [g.strip() for g in self.LYNDRIX_OIDC_ADMIN_GROUPS.split(",") if g.strip()]
 
+    def is_env_locked(self, field: str) -> bool:
+        """True when ``field`` is provided by the OS environment or the ``.env`` file.
+
+        Such a value is the operator's deployment configuration and outranks
+        anything saved through the UI (documented order: OS env > .env > Vault >
+        default). The UI shows the field as locked and Vault hydration skips it.
+        """
+        return os.getenv(field) is not None or field in _dotenv_fields()
+
     def hydrate_from_vault(self) -> int:
         """
         Apply Vault-stored values (lyndrix/core/settings) onto editable fields.
 
-        Environment variables always win: a field whose OS environment variable
-        is set is never overridden here.  This is what makes UI-saved settings
-        survive a reboot while keeping env vars authoritative.
+        Environment variables and ``.env`` entries always win: a field provided
+        by either is never overridden here.  This is what makes UI-saved
+        settings survive a reboot while keeping the deployment authoritative.
+
+        Every value is validated like a UI save (field type, select options,
+        model validators). An invalid stored value is skipped with a warning —
+        it never reaches the live settings and never fails the boot.
 
         Returns the number of fields that were applied.
         """
@@ -506,22 +523,50 @@ class Settings(BaseSettings):
             _config_log.warning("CONFIG: Could not read settings from Vault — skipped: %s", exc)
             return 0
 
-        applied = 0
+        candidates: Dict[str, Any] = {}
         for spec in EDITABLE_SETTINGS:
             if spec.field not in data:
                 continue
-            if os.getenv(spec.field) is not None:
-                continue  # env var takes precedence — never override
+            if self.is_env_locked(spec.field):
+                continue  # env / .env takes precedence — never override
             try:
-                setattr(self, spec.field, spec.coerce(data[spec.field]))
-                applied += 1
-            except Exception:
+                candidates[spec.field] = spec.validated(data[spec.field])
+            except (ValueError, TypeError) as exc:
                 _config_log.warning(
-                    f"CONFIG: Could not apply Vault value for '{spec.field}' — skipped."
+                    f"CONFIG: Ignoring invalid Vault value for '{spec.field}': {exc}"
                 )
-        if applied:
-            _config_log.info(f"CONFIG: Hydrated {applied} setting(s) from Vault.")
-        return applied
+
+        validated = self._validate_candidates(candidates)
+        for field_name in candidates:
+            setattr(self, field_name, getattr(validated, field_name))
+        if candidates:
+            _config_log.info(f"CONFIG: Hydrated {len(candidates)} setting(s) from Vault.")
+        return len(candidates)
+
+    def _validate_candidates(self, candidates: Dict[str, Any]) -> "Settings":
+        """Validate ``candidates`` on top of the current values through the model.
+
+        Fields pydantic rejects are dropped from ``candidates`` (in place) with a
+        warning; when a model-level rule fails (no single field to blame) all of
+        them are dropped. Returns the validated model for the remaining ones.
+        """
+        while candidates:
+            try:
+                return type(self).model_validate({**self.model_dump(), **candidates})
+            except ValidationError as exc:
+                bad = {str(err["loc"][0]) for err in exc.errors() if err.get("loc")} & set(candidates)
+                if not bad:
+                    _config_log.warning(
+                        "CONFIG: Vault settings rejected as a whole (%s) — keeping current values.",
+                        "; ".join(err.get("msg", "") for err in exc.errors()),
+                    )
+                    bad = set(candidates)
+                for field_name in bad:
+                    _config_log.warning(
+                        f"CONFIG: Ignoring invalid Vault value for '{field_name}' — keeping the current one."
+                    )
+                    candidates.pop(field_name, None)
+        return self
 
     def get(self, env_var: str, vault_key: Optional[str] = None, default: Optional[str] = None) -> Optional[str]:
         """
@@ -575,6 +620,31 @@ except ValidationError as _exc:
     sys.exit(1)
 
 
+_DOTENV_FIELDS: Optional[frozenset] = None
+
+
+def _dotenv_fields() -> frozenset:
+    """Names of the settings provided by the ``.env`` file (read once).
+
+    pydantic-settings loads ``.env`` at startup only, so the set is fixed for
+    the process lifetime. Matching is case-insensitive like pydantic-settings.
+    """
+    global _DOTENV_FIELDS
+    if _DOTENV_FIELDS is None:
+        fields: set = set()
+        env_file = Settings.model_config.get("env_file")
+        try:
+            from dotenv import dotenv_values
+
+            if env_file and os.path.isfile(env_file):
+                present = {str(k).upper() for k, v in dotenv_values(env_file).items() if v is not None}
+                fields = {name for name in Settings.model_fields if name.upper() in present}
+        except Exception as exc:  # pragma: no cover - defensive: never fail startup over this
+            _config_log.warning("CONFIG: could not inspect %s for locked settings: %s", env_file, exc)
+        _DOTENV_FIELDS = frozenset(fields)
+    return _DOTENV_FIELDS
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Editable settings registry (System tab in the Settings UI)
 #
@@ -583,7 +653,8 @@ except ValidationError as _exc:
 # environment variable name (pydantic-settings reads env vars matching the field
 # name).  Values saved from the UI are persisted to Vault (lyndrix/core/settings)
 # and re-applied on boot via Settings.hydrate_from_vault(), unless the matching
-# environment variable is set — in which case the env var always wins.
+# environment variable or .env entry is set — in which case that always wins
+# (Settings.is_env_locked).
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -599,6 +670,17 @@ class EditableSetting:
     @property
     def env_var(self) -> str:
         return self.field
+
+    def validated(self, raw: Any) -> Any:
+        """``coerce`` plus the checks a stored value must pass before it is applied.
+
+        Raises ``ValueError`` for a select value outside ``options`` or a value
+        that cannot be converted (e.g. a non-numeric int).
+        """
+        value = self.coerce(raw)
+        if self.kind == "select" and self.options and value not in self.options:
+            raise ValueError(f"{value!r} is not one of {self.options}")
+        return value
 
     def coerce(self, raw: Any) -> Any:
         """Convert a raw (UI / Vault) value into the proper Python type."""

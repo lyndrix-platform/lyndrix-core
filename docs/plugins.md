@@ -324,7 +324,8 @@ Effects of a **blocking** `starting`/`maintenance` status:
   `X-Plugin-Runtime` header (JSON status) — public routes included;
 - the React shell shows a warm-up panel with message, progress and elapsed time instead of the
   plugin UI and mounts the UI by itself when `ready` arrives;
-- `/api/health` does not call the plugin's `health()` while it is `starting`.
+- `/api/health` does not call the plugin's `health()` while it is `starting` or in a blocking
+  `maintenance` (it reports `unknown` with `details.reason`).
 
 A non-blocking status only adds a banner above the plugin UI. The status is broadcast as
 `plugin:runtime_status` (a core-owned topic, no manifest permission needed), exposed as
@@ -672,8 +673,30 @@ schedules = mw.parse_windows(item["windows"], default_tz="Europe/Berlin")
 state = mw.effective_state(schedules, overrides, mw.utcnow())
 if state.active:                            # window or override running
     suppress_alerts_until(state.until)      # state.source == "window" | "override"
+    if state.open_ended:                    # no real end known — see below
+        recheck_at(state.until)
 upcoming = state.next_start                 # next window that is not yet running
 ```
+
+**Result semantics** (`MaintenanceState`: `active, until, source, next_start, note, open_ended`):
+
+| Situation | `active` | `until` | `open_ended` | `next_start` |
+|---|---|---|---|---|
+| nothing running | `False` | `None` | `False` | start of the next window within `horizon` (30 days), else `None` |
+| window/override with a real end | `True` | that end (occurrences that overlap or abut are merged into one window; a running window is followed past the horizon to its real end) | `False` | next window after it, else `None` |
+| windows that never pause | `True` | **lower bound** — maintenance certainly lasts until then, very likely longer | `True` | `None` |
+
+A window "never pauses" when its occurrences overlap or abut without a gap for 256 occurrences in
+a row — e.g. `cron: {expr: "*/5 * * * *", duration_minutes: 10}`, `0 * * * *` with
+`duration_minutes: 60`, or weekly windows that cover the whole week. For those there is no end to
+report: `until` is the end of the last occurrence that was looked at, a time at which the CI is
+still in maintenance. **Never store an `open_ended` `until` as the moment maintenance ends**
+(e.g. as a suppression end) — show it as "ongoing" and evaluate again when it is reached.
+`open_ended` was added after core 1.11.1 — use `getattr(state, "open_ended", False)` when the
+plugin must run on older cores (which reported `now + 30 days` here). `active_until()`, `current_interval()` and `next_window()` return
+the same lower bound as their end for such windows. Evaluation cost is bounded by that limit
+(a few milliseconds per call); callers that evaluate many CIs per request should still do it off
+the event loop and once per request.
 
 **Window formats** (input form in `service.yml`/iac-controller, normal form on the bus):
 

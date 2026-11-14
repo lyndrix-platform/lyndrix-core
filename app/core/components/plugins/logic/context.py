@@ -746,13 +746,14 @@ class ModuleContext:
         Settings are written by the React UI via PUT /api/plugins/{id}/settings
         and stored at a separate Vault path from raw secrets (set_secret).
         Returns *default* when Vault is unreachable or the key has no value.
+        Sync Vault I/O — inside ``async def`` use :meth:`aget_setting`.
 
         Example::
 
             def setup(ctx):
                 @ctx.subscribe("vault:ready_for_data")
                 async def _load(_payload=None):
-                    ctx.state["timeout"] = ctx.get_setting("timeout_s", default=30)
+                    ctx.state["timeout"] = await ctx.aget_setting("timeout_s", default=30)
         """
         from core.components.vault.logic.kv_helper import read_secret_dict
 
@@ -764,13 +765,14 @@ class ModuleContext:
 
         Returns an empty dict when Vault is unreachable or no settings have
         been saved yet.  Useful for bulk-loading on ``vault:ready_for_data``.
+        Sync Vault I/O — inside ``async def`` use :meth:`aget_all_settings`.
 
         Example::
 
             def setup(ctx):
                 @ctx.subscribe("vault:ready_for_data")
                 async def _load(_payload=None):
-                    cfg = ctx.get_all_settings()
+                    cfg = await ctx.aget_all_settings()
                     ctx.state["api_url"] = cfg.get("api_url", "http://localhost")
         """
         from core.components.vault.logic.kv_helper import read_secret_dict
@@ -778,35 +780,64 @@ class ModuleContext:
         return read_secret_dict(self._get_settings_vault_path())
 
     def set_secret(self, key: str, value: str):
-        """Speichert einen Wert im KV-V2 Store, ohne andere Keys zu löschen."""
+        """Store one value in this module's KV v2 secret without touching the other keys.
+
+        Returns ``True`` on success, ``False`` when nothing was written. A KV v2
+        write replaces the whole secret, so when the current content cannot be
+        read (Vault down, sealed, 5xx) the write is ABORTED — writing only this
+        key would delete every other secret of the plugin. The write itself is a
+        check-and-set, so a peer instance updating the same path is merged, not
+        overwritten.
+
+        Sync Vault I/O: from ``async`` code call :meth:`aset_secret` instead.
+        """
+        from core.components.vault.logic.kv_helper import (
+            VaultReadError, VaultWriteError, update_secret_dict,
+        )
+
         if not vault_instance.is_connected:
             self.log.error("VAULT: Vault not connected.")
             return False
-            
+
         path = self._get_vault_path()
+
+        def _set(current: dict) -> None:
+            current[key] = value
+
         try:
-            lock = self._vault_write_locks[path]
-            with lock:
-                # Serialize read-modify-write updates per Vault path so concurrent
-                # plugin writes do not overwrite each other.
-                current_data = {}
-                try:
-                    response = vault_instance.client.secrets.kv.v2.read_secret_version(
-                        path=path, mount_point="lyndrix"
-                    )
-                    current_data = response['data']['data']
-                except Exception:
-                    pass
-
-                current_data[key] = value
-
-                vault_instance.client.secrets.kv.v2.create_or_update_secret(
-                    path=path,
-                    mount_point="lyndrix",
-                    secret=current_data
-                )
+            # The per-path lock keeps writers of this process from racing each
+            # other into needless CAS conflicts; CAS covers the other instances.
+            with self._vault_write_locks[path]:
+                update_secret_dict(path, _set)
             self.log.info(f"SUCCESS: Secret '{key}' persisted securely at '{path}'.")
             return True
+        except VaultReadError as e:
+            self.log.error(f"ERROR: Secret '{key}' NOT written — current secret unreadable: {e}")
+            return False
+        except VaultWriteError as e:
+            self.log.error(f"ERROR: Failed to write to Vault: {e}")
+            return False
         except Exception as e:
             self.log.error(f"ERROR: Failed to write to Vault: {e}", exc_info=True)
             return False
+
+    # --- Async variants -------------------------------------------------
+    # The accessors above are sync hvac calls (network I/O). Handlers and bus
+    # subscribers that are ``async def`` run on the event loop and must use these
+    # instead, so a slow Vault never stalls every other request.
+
+    async def aget_secret(self, key: str) -> str:
+        """``get_secret`` off the event loop."""
+        return await asyncio.to_thread(self.get_secret, key)
+
+    async def aset_secret(self, key: str, value: str) -> bool:
+        """``set_secret`` off the event loop."""
+        return await asyncio.to_thread(self.set_secret, key, value)
+
+    async def aget_setting(self, key: str, default=None):
+        """``get_setting`` off the event loop."""
+        return await asyncio.to_thread(self.get_setting, key, default)
+
+    async def aget_all_settings(self) -> dict:
+        """``get_all_settings`` off the event loop."""
+        return await asyncio.to_thread(self.get_all_settings)

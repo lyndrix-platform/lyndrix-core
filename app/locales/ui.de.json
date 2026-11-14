@@ -782,7 +782,7 @@
       "reconnecting": "Verbindung verloren — verbinde neu",
       "db_retry": "Noch nicht erreichbar — Versuch {{attempt}} von {{max}}",
       "db_config_error": "Konfigurations- oder Zugangsdatenfehler — Logs prüfen",
-      "db_gave_up": "Nach {{max}} Versuchen aufgegeben — Logs prüfen",
+      "db_gave_up": "Nach {{max}} Versuchen noch nicht erreichbar — weitere Versuche laufen, Logs prüfen",
       "iam_bootstrapping": "Lege Tabellen, Gruppen und Benutzer an",
       "iam_ready": "Bereit",
       "iam_failed": "Bootstrap fehlgeschlagen — Logs prüfen",
