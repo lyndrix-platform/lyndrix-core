@@ -34,6 +34,9 @@ async def ready():
     body = {
         "ready": ok,
         "reasons": reasons,
+        # Impaired but still fit for traffic (e.g. "vault" while Vault is away
+        # after the boot) — never changes the status code.
+        "degraded": cluster_service.degraded(),
         "instance_id": cluster_service.instance_id,
         "mode": cluster_service.mode,
         "leader": cluster_service.is_leader,

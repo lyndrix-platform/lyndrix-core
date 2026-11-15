@@ -334,7 +334,23 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     except Exception as exc:
         add("clock", "skip", f"clock drift check unavailable: {_why(exc)}", recheck=True)
 
-    # 11. Vault nodes
+    # 11. Vault as this instance sees it (seal watchdog) and the configured nodes
+    try:
+        from core.services import vault_instance
+
+        if getattr(vault_instance, "is_connected", False):
+            add("vault", "ok", "Vault is unsealed and reachable from this instance")
+        else:
+            gates = bool(getattr(settings, "LYNDRIX_READY_REQUIRES_VAULT", False))
+            add("vault", "warn",
+                f"Vault is not available to this instance (state: {getattr(vault_instance, 'ui_state', 'unknown')}) — "
+                "secrets and Vault-stored settings cannot be read or written",
+                ("/api/ready answers 503 'vault' until it is back (LYNDRIX_READY_REQUIRES_VAULT=true)." if gates else
+                 "The instance stays in rotation; the watchdog reconnects by itself once Vault is unsealed and "
+                 "reachable. Set LYNDRIX_READY_REQUIRES_VAULT=true to fail readiness instead."),
+                recheck=True)
+    except Exception as exc:  # pragma: no cover - import-order edge case during tests
+        add("vault", "skip", f"Vault state unavailable: {_why(exc)}")
     if settings.VAULT_NODES:
         try:
             results = await _bounded(

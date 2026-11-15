@@ -296,6 +296,16 @@ class Settings(BaseSettings):
     # (seconds, at least 30). A check that could not decide gets up to five
     # quick re-runs (every two heartbeats) first, then this interval applies.
     LYNDRIX_PREFLIGHT_INTERVAL_SECONDS: int = 300
+    # Whether a Vault outage AFTER the boot fails /api/ready. Default false:
+    # the outage is reported (/api/ready "degraded", /api/health status
+    # "degraded", preflight check "vault", log) but the instance stays in
+    # rotation — logins, sessions and everything database-backed keep working,
+    # only secrets/settings stored in Vault are unavailable until it returns.
+    # With one Vault behind several cores, true turns a Vault restart into 503
+    # on every instance at once; set it only when Vault itself is highly
+    # available and an instance without Vault must not serve. During boot
+    # (Vault never opened) /api/ready is 503 either way.
+    LYNDRIX_READY_REQUIRES_VAULT: bool = False
     # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
     # the plugins recorded in plugin_states are installed and activated on this
     # instance — a fresh pod with an empty plugin directory would otherwise take

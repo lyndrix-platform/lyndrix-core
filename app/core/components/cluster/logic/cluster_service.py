@@ -944,13 +944,17 @@ class ClusterService:
     # ------------------------------------------------------------------
 
     def readiness(self) -> tuple[bool, list[str]]:
-        """``/api/ready``: boot finished ∧ DB ∧ Vault ∧ not draining ∧ coordinator
+        """``/api/ready``: boot finished ∧ DB ∧ not draining ∧ coordinator
         started and heart-beating (cluster) ∧ no hard preflight failure.
 
         Everything about the coordinator is read live. In cluster mode an
         instance without a successful heartbeat for a full lease TTL is dead to
         its peers (no leases, no shards, "no runner online") — it must not keep
         answering 200 to the load balancer just because the process is up.
+
+        Vault gates readiness until the boot finished (nothing works before it
+        was opened once). Afterwards a Vault outage is reported by
+        :meth:`degraded` instead, unless ``LYNDRIX_READY_REQUIRES_VAULT`` is set.
         """
         reasons: list[str] = []
         if self.draining:
@@ -959,11 +963,12 @@ class ClusterService:
             from core.services import boot_service, db_instance, vault_instance
 
             phase = getattr(boot_service, "phase", None)
-            if getattr(boot_service, "is_booting", True) or str(getattr(phase, "value", phase)) != "ready":
+            booted = self._booted(boot_service)
+            if not booted:
                 reasons.append(f"boot:{getattr(phase, 'value', phase)}")
             if not getattr(db_instance, "is_connected", False):
                 reasons.append("database")
-            if not getattr(vault_instance, "is_connected", False):
+            if not getattr(vault_instance, "is_connected", False) and (not booted or self._ready_requires_vault()):
                 reasons.append("vault")
         except Exception:  # pragma: no cover - import-order edge case during tests
             reasons.append("core")
@@ -984,6 +989,37 @@ class ClusterService:
             if c.get("status") == "fail" and c.get("id") in _READINESS_CHECKS
         )
         return (not reasons, reasons)
+
+    @staticmethod
+    def _booted(boot_service) -> bool:
+        """The boot sequence finished (Vault, database, IAM and modules were up once)."""
+        phase = getattr(boot_service, "phase", None)
+        return not getattr(boot_service, "is_booting", True) and str(getattr(phase, "value", phase)) == "ready"
+
+    @staticmethod
+    def _ready_requires_vault() -> bool:
+        return bool(getattr(settings, "LYNDRIX_READY_REQUIRES_VAULT", False))
+
+    def degraded(self) -> list[str]:
+        """What is impaired on this instance without making it unfit for traffic.
+
+        ``"vault"``: Vault was lost after the boot (restart of its pod, re-seal,
+        network). Logins, sessions, SSE and everything served from the database
+        keep working; reading or writing secrets and settings stored in Vault
+        fails until the seal watchdog sees it back. With one Vault behind N
+        cores, failing readiness for that would take every instance out of
+        rotation at the same moment — an outage of the whole platform caused
+        by the restart of one pod.
+        """
+        try:
+            from core.services import boot_service, vault_instance
+
+            booted = self._booted(boot_service)
+            if booted and not getattr(vault_instance, "is_connected", False) and not self._ready_requires_vault():
+                return ["vault"]
+        except Exception:  # pragma: no cover - import-order edge case during tests
+            pass
+        return []
 
     @staticmethod
     def _plugins_converged() -> bool:

@@ -615,6 +615,11 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
 
     ready, reasons = cluster_service.readiness()
     worst, plugin_results, cached = await plugin_health_round.get(module_manager)
+    # A core dependency that is away without failing readiness (Vault after
+    # the boot) makes the platform at least "degraded".
+    core_degraded = cluster_service.degraded()
+    if core_degraded and worst in ("ok", "unknown"):
+        worst = "degraded"
 
     # Public callers only see the coarse status — no plugin inventory, failure
     # reasons or version numbers (avoid information disclosure / reconnaissance).
@@ -625,6 +630,7 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
         "status": worst,
         "ready": ready,
         "readiness_reasons": reasons,
+        "degraded": core_degraded,
         "instance_id": cluster_service.instance_id,
         "core_version": __core_version__,
         "api_version": __api_version__,

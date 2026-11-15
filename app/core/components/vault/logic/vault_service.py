@@ -22,6 +22,9 @@ _CLIENT_TIMEOUT_SECONDS = 5
 # and how many consecutive unreachable probes count as "Vault is gone".
 _WATCHDOG_INTERVAL_SECONDS = 30
 _WATCHDOG_UNREACHABLE_THRESHOLD = 2
+# While Vault is lost the watchdog looks more often, so the core is back a few
+# seconds after Vault is — nothing else brings ``is_connected`` back.
+_WATCHDOG_RECOVERY_INTERVAL_SECONDS = 10
 
 
 class VaultService:
@@ -116,11 +119,24 @@ class VaultService:
         and auto-unseal never ran although ``LYNDRIX_MASTER_KEY`` was set.
         """
         while True:
-            await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+            await asyncio.sleep(self._watchdog_delay())
             try:
                 await self._watchdog_tick()
             except Exception as exc:  # the watchdog itself must never die
                 log.error(f"WATCHDOG: Vault check failed unexpectedly: {exc}")
+
+    def _watchdog_delay(self) -> float:
+        """Seconds until the next probe: the short interval while Vault is lost
+        or a first failed probe waits for its confirmation."""
+        if self.is_connected and self._unreachable_probes == 0:
+            return _WATCHDOG_INTERVAL_SECONDS
+        return min(_WATCHDOG_INTERVAL_SECONDS, _WATCHDOG_RECOVERY_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _readiness_note() -> str:
+        if getattr(settings, "LYNDRIX_READY_REQUIRES_VAULT", False):
+            return "/api/ready answers 503 'vault' (LYNDRIX_READY_REQUIRES_VAULT)"
+        return "the instance stays in rotation (degraded: vault)"
 
     async def _probe_seal_state(self) -> str:
         """``"unsealed"``, ``"sealed"`` or ``"unreachable"`` (one cheap sys call, off the loop)."""
@@ -142,11 +158,12 @@ class VaultService:
                 self._unreachable_probes += 1
                 if self._unreachable_probes < _WATCHDOG_UNREACHABLE_THRESHOLD:
                     return
-                log.error("WATCHDOG: Vault is unreachable — secrets are unavailable until it returns.")
+                log.error("WATCHDOG: Vault is unreachable — secrets are unavailable until it returns; "
+                          f"{self._readiness_note()}.")
                 self.is_connected = False
                 self._set_ui_state("error")
                 return
-            log.warning("WATCHDOG: Vault was sealed while the core is running.")
+            log.warning(f"WATCHDOG: Vault was sealed while the core is running; {self._readiness_note()}.")
             self.is_connected = False
             self._set_ui_state("needs_unseal")
             bus.emit("vault:needs_unseal", {})  # → auto-unseal when LYNDRIX_MASTER_KEY is set

@@ -18,6 +18,7 @@ exactly these values — Compose and Kubernetes operators share one vocabulary.
 | `LYNDRIX_STORAGE_SHARED_ROLES` | `api` | 1 | roles whose instances must see one shared `STORAGE_DIR` (comma list; they serve user files). The preflight `storage` check compares only those; empty = nobody has to share. An instance with role `api` on another host with its own `STORAGE_DIR` (e.g. a Compose core next to a Kubernetes cluster) is a permanent `storage: warn` — either keep it out of the user-facing load balancer and name only the roles of the shared instances here (e.g. `leader` when only those carry it), or mount the shared volume there |
 | `LYNDRIX_PREFLIGHT_INTERVAL_SECONDS` | `300` | 2 | cluster mode: how often the preflight re-checks the cluster contracts (minimum 30). A check that could not decide gets at most five quick re-runs (every two heartbeats, also after a recovered heartbeat), then this interval applies; an unchanged warning is logged once (the `PREFLIGHT: … warn` summary line still counts it every run) |
 | `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` | `300` | 1 | cluster mode: after boot `/api/ready` stays 503 (`plugins:converging`) until the plugins recorded in `plugin_states` are installed and activated on this instance — at most this long, then it turns ready anyway (preflight `plugins: warn`). `0` = do not wait |
+| `LYNDRIX_READY_REQUIRES_VAULT` | `false` | 1 | whether a Vault outage **after the boot** fails `/api/ready`. `false`: the outage is reported (`/api/ready` → `degraded: ["vault"]`, `/api/health` → `status: degraded`, preflight `vault: warn`, log) and the instance stays in rotation — see [Readiness](#readiness). `true`: `/api/ready` answers 503 `vault` until Vault is back; only sensible when Vault itself is highly available. During boot Vault gates readiness either way |
 | `LYNDRIX_RESTART_GRACE_SECONDS` | `90` | 1 | how long an instance that stopped gracefully counts as `restarting` (not `dead`) for its peers: `ctx.has_live_role()` stays true, pinned plugins answer `Retry-After: 5`. Should cover a container restart |
 | `LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT` | `15` | 0/1 | seconds a plugin's `teardown()` may take on disable/unload/reload before the core stops waiting and continues |
 | `LYNDRIX_UI_ENGINE` | `api` | 1 | run `react` behind a load balancer; `nicegui` needs sticky sessions (preflight warns) |
@@ -66,6 +67,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `trusted_proxies` | — | `X-Forwarded-For` arrives (or cluster mode) while `LYNDRIX_TRUSTED_PROXIES` is the default; or it is `*` (client addresses can be forged by anyone who reaches the core port directly) |
 | `database` | — | `DB_HOST` is a Galera node (`wsrep_on`) and `DB_ALLOW_DIRECT_NODE` is not set |
 | `clock` | — | this instance's clock is more than 5 s off the database clock |
+| `vault` | — | Vault is not available to this instance (unreachable or sealed after the boot); secrets and Vault-stored settings cannot be read or written until the watchdog sees it back |
 | `vault_nodes` | — | a node in `VAULT_NODES` does not answer `/v1/sys/health` |
 | `drain` | — | cluster mode with `LYNDRIX_DRAIN_SECONDS=0` |
 | `storage` | — | cluster mode: an instance that serves user files (`LYNDRIX_STORAGE_SHARED_ROLES`) does not share `STORAGE_DIR` with this one (its marker is not readable here — named in the message), no second such instance is alive so it cannot be verified, or the mount does not respond (a storage job is stuck) |
@@ -77,7 +79,8 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | Reason | Meaning |
 |---|---|
 | `boot:<phase>` | boot has not finished (or failed) |
-| `database` / `vault` | not connected |
+| `database` | not connected |
+| `vault` | Vault has not been opened yet (boot), or — only with `LYNDRIX_READY_REQUIRES_VAULT=true` — it was lost after the boot |
 | `draining` | SIGTERM received, the instance is leaving |
 | `coordinator` | cluster mode: the coordinator has not started yet (it retries with back-off) |
 | `plugins:converging` | cluster mode: boot finished, but the plugins of the cluster are still being installed/activated here (new pod with an empty plugin directory). Ends when they are, or after `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` |
@@ -91,6 +94,33 @@ out of rotation for minutes. Of the preflight checks only `storage_secret` gates
 cluster-level failure such as a missing runner instance, or a `STORAGE_DIR` mount that hangs, is
 shown on the Cluster page and in the logs but does not take instances out of rotation — the mount
 is shared, so every instance would leave at once.
+
+### Vault outage after the boot
+
+All instances usually share **one** Vault. When it restarts, re-seals or is cut off, the seal
+watchdog of every instance notices within two probes (30 s apart, the second one after 10 s) and
+marks Vault as lost. By default that does **not** fail readiness — taking every instance out of
+rotation at once would turn a Vault restart into an outage of the whole platform:
+
+- `/api/ready` stays 200 and lists `"degraded": ["vault"]`; `/api/health` reports `status: degraded`
+  (never better) and, for authenticated callers, `degraded: ["vault"]`; the preflight check `vault`
+  warns; the log has one `WATCHDOG:` line for the loss and one for the recovery.
+- Keeps working: logins (with the provider configuration already loaded), sessions and API keys,
+  SSE, notifications, everything read from the database, running plugins with the settings they
+  already hold in memory.
+- Does not work until Vault is back: reading or writing secrets (`ctx.get_secret` returns nothing,
+  `ctx.set_secret` fails), saving core, auth or plugin settings (an error, nothing is written — a
+  read-modify-write never writes over data it could not read), the Vault-stored system API key
+  (requests using it get `401`; the `LYNDRIX_SYSTEM_API_KEY` environment variable is not affected),
+  installs from private plugin repositories whose token lives in Vault.
+- Recovery is automatic: while Vault is lost the watchdog probes every 10 s; once Vault answers
+  unsealed it restores the token and re-emits `vault:opened` / `vault:ready_for_data`. A Vault that
+  comes back **sealed** is unsealed automatically when `LYNDRIX_MASTER_KEY` is set, otherwise it
+  waits for the operator.
+
+`LYNDRIX_READY_REQUIRES_VAULT=true` restores the strict behaviour (503 `vault` while it is away) —
+for deployments where Vault is highly available and an instance that lost it has a local problem.
+A freshly started instance never becomes ready without Vault, with either value.
 
 ## Endpoints
 
