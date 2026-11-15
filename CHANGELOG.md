@@ -15,11 +15,26 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 
 ### Upgrade notes
 - **Login sessions expire** 30 days after creation (`LYNDRIX_SESSION_MAX_AGE_HOURS`, default `720`, `0` =
-  never). Older sessions end at the first request after the upgrade; scripts that stored a
-  `/api/auth/login` token must log in again or use a named API key (those never expire). The sessions
-  live in the shared DB, so during a rolling update they end on the 1.11 instances too — create the
-  named key for operator scripts **before** the first 1.12 instance starts (or start the rollout with
-  `LYNDRIX_SESSION_MAX_AGE_HOURS=0` and set it afterwards).
+  never; named API keys never expire). **Sessions that exist at the upgrade are grandfathered**: the
+  first 1.12 instance records once, for the whole deployment, when the rule began to apply (table
+  `auth_markers`), and sessions created before that instant do not expire by age. Nobody is signed out
+  by the upgrade, a script that uses a `/api/auth/login` token keeps working, and nothing changes for
+  the 1.11 instances during a rolling update — no key has to be created or renewed beforehand.
+  `LYNDRIX_SESSION_MAX_AGE_LEGACY` chooses what the max-age means for those older sessions: `exempt`
+  (default, never by age), `from_enforcement` (their age counts from the recorded instant — all of them
+  end 30 days after the upgrade) or `strict` (like any other session; old ones end with their next
+  request). Revoking a session, a password change and deleting the account end them as always. Set the
+  same value on every instance. `GET /api/users/{u}/api-keys` shows `is_session`, `expires_at` and
+  `expiry` per row. Long-lived automation should still move to a named API key at its own pace.
+- **Vault and readiness**: a Vault outage *after the boot* (restart of the Vault pod, re-seal, network)
+  no longer fails `/api/ready`. It is reported instead — `/api/ready` `degraded: ["vault"]`,
+  `/api/health` `status: degraded`, preflight check `vault: warn`, a `WATCHDOG:` log line — and the
+  instance stays in rotation: logins, sessions, SSE and everything database-backed keep working, while
+  reading/writing secrets and Vault-stored settings fails cleanly until Vault is back (the watchdog
+  probes every 10 s while it is lost and reconnects by itself; a Vault that returns sealed needs
+  `LYNDRIX_MASTER_KEY` or the operator). `LYNDRIX_READY_REQUIRES_VAULT=true` restores 503 `vault` — only
+  sensible with a highly available Vault. During boot Vault gates readiness with either value. Alert
+  on `degraded` / the preflight instead of on readiness.
 - **Changing your own password needs `current_password`** (`PATCH /api/users/{u}`, 422 without it).
   lyndrix-ui ≥ 1.8.0 already sends it from the profile (`POST /api/users/{u}/password`); only an admin
   changing their *own* password in the user detail panel (PATCH without `current_password`) gets 422
@@ -44,7 +59,11 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
   `cluster:*` needs `admin:read`. Non-admins no longer get install toasts.
 - **Plugin installs are stricter**: `requirements.txt` may only contain plain requirement specifiers; an
   install/upgrade fails when its dependencies cannot be installed (before: activated without them); repo
-  URLs with credentials/query/fragment are rejected; provider tokens are never sent over `http://` and
+  URLs with credentials/query/fragment are rejected. In cluster mode a failure of the network or the
+  package index (pip cannot reach PyPI, download 5xx/timeout) is retried after 30, 60, 120 and 300 s —
+  the instance stays `plugins:converging` meanwhile, capped by `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` —
+  before the long back-off (10 min … 24 h) applies; any other failure backs off at once. Provider tokens
+  are never sent over `http://` and
   the GitLab token only to its own host (set `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST` when several GitLab
   hosts are on `LYNDRIX_PLUGIN_REPO_HOSTS`).
 - **Container file modes**: the entrypoint no longer runs `chmod -R 777`; `/data/security` becomes `0700`
@@ -59,7 +78,7 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
   volume. Do not start a rolling restart (`POST /api/system/restart`) or plugin upgrades while 1.11
   and 1.12 instances run side by side. Schema changes are additive and safe next
   to 1.11.x instances during a rolling update (`cluster_leases.token`, `cluster_instances.incarnation`,
-  `cluster_instances.stopped_at`, `users.email_trusted`).
+  `cluster_instances.stopped_at`, `users.email_trusted`, new table `auth_markers`).
 - **Disabled plugins lose their REST routes** (404 until re-enabled); `PUT` plugin settings is a merge.
 - Themes uploaded earlier through the NiceGUI page live in the image directory and now count as built-in.
 
@@ -76,7 +95,8 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - Scoped API keys are bounded by their scopes even for superadmins and cannot mint keys or change
   credentials. Deleting a user removes their keys, sessions, identities and preferences; keys without
   an owner are rejected; a password change signs out the account's other sessions; SSO-only accounts
-  cannot set a local password themselves.
+  cannot set a local password themselves. Login sessions created from 1.12 on expire after
+  `LYNDRIX_SESSION_MAX_AGE_HOURS`; older ones follow `LYNDRIX_SESSION_MAX_AGE_LEGACY`.
 - Permission-gated notifications reach only entitled users over SSE; a revoked key or deleted user ends
   its stream within ~20 s; open streams are capped per user (`LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER`).
 - OIDC start rejects crafted `redirect_uri`/`next` values and is rate-limited; the auth config API
@@ -119,6 +139,15 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - Plugin operations: a version that failed verification is backed off (10 min … 24 h) instead of being
   re-installed on every reconcile pass, reverts announce themselves, backed-off instances report at
   once, dead participants are marked `gone`.
+- Plugin installs on a fresh instance: transient download/pip failures get four quick retries
+  (30/60/120/300 s, own timer) and count as pending for boot convergence; a tracked operation reports
+  the instance as failed only when those are used up.
+- Readiness no longer depends on Vault after the boot (`LYNDRIX_READY_REQUIRES_VAULT`, default false);
+  new preflight check `vault`; `/api/ready` and `/api/health` carry `degraded`.
+- A one-shot lease (`ctx.lease()`) granted after its acquire timed out is released at once instead of
+  blocking the peers for a TTL; a heartbeat that is still under way can no longer overwrite the stop
+  tombstone; the coordinator's worker threads stay below the DB connection pool (12 with the default
+  pool of 15, was 16).
 
 ### Fixed
 - Disabling a plugin unmounts its REST routes; a failed import leaves no modules/ORM classes behind;
@@ -128,7 +157,8 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - Vault read-modify-write never writes after a failed read and uses KV v2 check-and-set
   (`ctx.set_secret`, system config, auth config, plugin settings, custom-repo tokens).
 - NotificationRouter sync: coalesced, READ COMMITTED with a short lock wait, writes only changes, never
-  deletes rows of installed plugins (the source of the 1205 lock storms).
+  deletes rows of installed plugins (the source of the 1205 lock storms); a sync that gave up on a busy
+  lock is retried after 60 s (doubling to 10 min) instead of waiting for the next plugin lifecycle event.
 - SSE: an overflowing client's stream is closed so it reconnects (no more zombie streams).
 - Notifications written during an in-flight flush are persisted; CorrelationStore survives a restart
   (timezone-aware) and its housekeeping loops no longer die on the first error.
@@ -153,8 +183,12 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
   `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST`, `LYNDRIX_PLUGIN_PIP_INDEX_URL`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_MB`,
   `LYNDRIX_PLUGIN_MAX_EXTRACTED_MB`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES`, `LYNDRIX_THEME_MAX_ZIP_MB`,
   `LYNDRIX_RESTART_GRACE_SECONDS`, `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`, `LYNDRIX_STORAGE_SHARED_ROLES`,
-  `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS`, `LYNDRIX_PREFLIGHT_INTERVAL_SECONDS` — see
-  `docs/ha/configuration.md`.
+  `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS`, `LYNDRIX_PREFLIGHT_INTERVAL_SECONDS`,
+  `LYNDRIX_SESSION_MAX_AGE_LEGACY` (`exempt` | `from_enforcement` | `strict`),
+  `LYNDRIX_READY_REQUIRES_VAULT` (default `false`) — see `docs/ha/configuration.md`,
+  `docs/security.md` and `docs/deployment.md`.
+- `GET /api/users/{u}/api-keys`: `is_session`, `expires_at`, `expiry` per key (additive);
+  `GET /api/ready` and `GET /api/health`: `degraded` (additive).
 
 ### Known limits
 - MariaDB/Galera-, NFS- and Vault-specific paths (READ COMMITTED sessions, `GET_LOCK` skip,
