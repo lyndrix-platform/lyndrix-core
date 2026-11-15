@@ -138,6 +138,7 @@ class DbCoordinator:
         # How long a gracefully stopped instance counts as "restarting".
         self.restart_grace_s = restart_grace_s
         self._registered = False     # this process wrote its row at least once
+        self._stopping = False       # stop() began: heartbeats must not revive the tombstone
         self._last_meta: dict = {}
         self.ttl = ttl
         self.heartbeat_s = heartbeat_s
@@ -312,6 +313,7 @@ class DbCoordinator:
     async def start(self) -> None:
         if self.started:
             return
+        self._stopping = False
         await self._run(self.ensure_schema)
         self._last_event_id = self._event_floor = await self._run(self._max_event_id)
         self._seen_event_ids.clear()
@@ -325,6 +327,10 @@ class DbCoordinator:
 
     async def stop(self) -> None:
         self.started = False
+        # From here on no heartbeat of this process may write (N3): one that is
+        # still under way would otherwise commit after the tombstone and turn
+        # the row back into "alive" for a lease TTL.
+        self._stopping = True
         if self._poll_task is not None and not self._poll_task.done():
             self._poll_task.cancel()
         self._poll_task = None
@@ -401,6 +407,9 @@ class DbCoordinator:
                            ClusterInstance.heartbeat_at, ClusterInstance.stopped_at)
                     .where(ClusterInstance.instance_id == me)
                 ).first()
+                if self._stopping:
+                    return  # stop() is writing (or wrote) the tombstone
+                condition = ClusterInstance.instance_id == me
                 if row is None:
                     try:
                         conn.execute(insert(ClusterInstance).values(
@@ -413,7 +422,16 @@ class DbCoordinator:
                     # A previous process used this id (restart under a fixed id,
                     # or a row written by core ≤ 1.11): this is a new life of the row.
                     values["started_at"] = self._started_at or now
-                conn.execute(update(ClusterInstance).where(ClusterInstance.instance_id == me).values(**values))
+                elif row[3] is None:
+                    # The ordinary beat on our own live row. Conditional on the
+                    # row STILL being live when the UPDATE runs: if this
+                    # process's stop() committed its tombstone since the SELECT
+                    # above, the beat matches nothing instead of reviving it.
+                    # (Reviving a tombstone is for a process that starts —
+                    # the branches above and a restarted coordinator.)
+                    condition = and_(condition, ClusterInstance.incarnation == mine,
+                                     ClusterInstance.stopped_at.is_(None))
+                conn.execute(update(ClusterInstance).where(condition).values(**values))
 
         self._retrying(_run)
         self._registered = True

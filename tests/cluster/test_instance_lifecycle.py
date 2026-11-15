@@ -439,3 +439,57 @@ def test_admin_release_asks_a_live_holder_to_hand_over(engine, ready_core, monke
         await holder.stop(), await other.stop()
 
     asyncio.run(run())
+
+
+# --- N3: a heartbeat must not undo this process's own tombstone -----------------------
+
+def test_a_heartbeat_still_under_way_does_not_overwrite_the_tombstone(engine):
+    """stop() commits the tombstone while a heartbeat of the same process is
+    between its SELECT and its UPDATE. The late UPDATE used to set
+    ``stopped_at = NULL`` again: the peers saw the stopped instance as "alive"
+    for a lease TTL instead of "restarting"."""
+    from sqlalchemy import event
+
+    clock = ClusterClock()
+    api = make_coordinator(engine, "pod-1", clock=clock)
+    runner = make_coordinator(engine, "docker-auto-runner", clock=clock, roles=["runner"])
+    armed = {"on": False}
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _stop_commits_first(conn, cursor, statement, parameters, context, executemany):
+        if armed["on"] and statement.lstrip().upper().startswith("UPDATE CLUSTER_INSTANCES"):
+            armed["on"] = False
+            runner._deregister_sync()            # the stop: tombstone committed on another connection
+
+    async def run():
+        await runner.start()
+        await runner.heartbeat({"ready": True})
+        armed["on"] = True
+        await runner.heartbeat({"ready": True})  # SELECT → (tombstone commits) → UPDATE
+        assert armed["on"] is False
+        return _view(await api.instances())["docker-auto-runner"]
+
+    seen = asyncio.run(run())
+    event.remove(engine, "before_cursor_execute", _stop_commits_first)
+    assert (seen.state, seen.alive) == ("restarting", False) and seen.stopped_at is not None
+
+
+def test_a_heartbeat_after_stop_does_not_revive_but_a_restart_does(engine):
+    clock = ClusterClock()
+    api = make_coordinator(engine, "pod-1", clock=clock)
+    runner = make_coordinator(engine, "docker-auto-runner", clock=clock, roles=["runner"])
+
+    async def state():
+        return _view(await api.instances())["docker-auto-runner"].state
+
+    async def run():
+        await runner.start()
+        await runner.heartbeat({})
+        await runner.stop()
+        await runner.heartbeat({})               # a beat that was queued behind the stop
+        after_stop = await state()
+        await runner.start()                     # the coordinator starts again in this process
+        await runner.heartbeat({})
+        return after_stop, await state()
+
+    assert asyncio.run(run()) == ("restarting", "alive")
