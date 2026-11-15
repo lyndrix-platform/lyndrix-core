@@ -15,6 +15,7 @@ und das Feature-Doc darf weg (oder wird als „shipped" markiert).
 
 | Doc | Thema | Status |
 |---|---|---|
+| [`discord-interactive-buttons.md`](./discord-interactive-buttons.md) | Discord: interaktive Buttons (Bestätigen/Übernehmen) — im Plugin seit 1.3.0 abgeschaltet (Audit DN-03); Voraussetzungen: Account-Linking Discord-User → Lyndrix-User, Berechtigungsprüfung je Aktion, Audit-Trail, Prüfung im Messaging-Gateway | 💡 Idee / geplant |
 | [`step-ca-ui-plugin.md`](./step-ca-ui-plugin.md) | PKI-Plugin als Web-UI für step-ca (Zertifikate, Ablauf-Monitoring, Revoke, Entity-Registry) — keine der OSS-UIs passt | 💡 Idee |
 | [`lyndrix-agent-framework.md`](./lyndrix-agent-framework.md) | Verschlüsselter Host-Agent (`lyndrix-agent`) + `agent-management`-Plugin — ersetzt Klartext docker-proxy/dockermon/docker-to-dns | 📐 Design |
 | [`rbac-security-k8s-audit.md`](./rbac-security-k8s-audit.md) | RBAC-Ausbau (Plugin-Rollen + Zuweisungs-API), Security-Findings aus dem Multi-Agent-Audit (inkl. kritischer superadmin-Escalation) & Kubernetes-Multi-Pod-Readiness | 📐 Design / Audit |
