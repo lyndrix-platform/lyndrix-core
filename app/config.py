@@ -293,7 +293,10 @@ class Settings(BaseSettings):
     # traffic and answer 404 for every plugin route while it still downloads
     # them. After this many seconds the instance turns ready anyway (a broken
     # plugin repo must not keep it out forever); 0 = do not wait.
-    LYNDRIX_READY_PLUGIN_WAIT_SECONDS: int = 600
+    # 300 s stays well inside the Kubernetes default progressDeadlineSeconds
+    # (600): a pod whose plugin repo is unreachable turns ready (preflight
+    # "plugins: warn") instead of failing the whole rollout at the same moment.
+    LYNDRIX_READY_PLUGIN_WAIT_SECONDS: int = 300
     # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
     # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
     # UI shows any instance's log from any instance; the leader keeps

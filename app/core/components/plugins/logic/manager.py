@@ -1305,12 +1305,7 @@ class ModuleManager:
     def _teardown_timeout() -> float:
         """Seconds an unload/disable waits for a plugin's teardown work
         (``LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT``, default 15)."""
-        # TODO(agent): declare LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT (float, default 15)
-        # on Settings in config.py (owned by another branch); until then the
-        # environment variable is read directly.
         raw = getattr(settings, "LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT", None)
-        if raw is None:
-            raw = os.environ.get("LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT")
         try:
             return max(0.0, float(raw)) if raw not in (None, "") else 15.0
         except (TypeError, ValueError):
