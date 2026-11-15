@@ -73,3 +73,22 @@ def test_no_catchall_is_safe_noop_append():
 def test_unknown_prefix_moves_nothing():
     app = _build_app_with_catchall_then_plugin()
     assert move_routes_before_catchall(app, "/api/plugins/does.not.exist") == 0
+
+
+def test_reorder_matches_the_prefix_at_a_path_boundary():
+    """BG-16: moving `/api/plugins/a.b` must not drag `/api/plugins/a.b_more` along."""
+    from core.api.route_order import path_under_prefix
+
+    assert path_under_prefix("/api/plugins/a.b", "/api/plugins/a.b")
+    assert path_under_prefix("/api/plugins/a.b/ping", "/api/plugins/a.b")
+    assert path_under_prefix("/api/plugins/a.b/ping", "/api/plugins/a.b/")
+    assert not path_under_prefix("/api/plugins/a.b_more/ping", "/api/plugins/a.b")
+
+    app = FastAPI()
+    app.router.add_api_route("", lambda: {"who": "catchall"}, methods=["GET"])
+    for plugin in ("a.b", "a.b_more"):
+        router = APIRouter()
+        router.add_api_route("/ping", lambda: {"who": "plugin"}, methods=["GET"])
+        app.include_router(router, prefix=f"/api/plugins/{plugin}")
+
+    assert move_routes_before_catchall(app, "/api/plugins/a.b") == 1

@@ -48,3 +48,28 @@ def test_forget_plugin_models_ignores_other_packages():
         assert any(m.class_ is model for m in Base.registry.mappers)
     finally:
         ModuleManager._forget_plugin_models(PKG)
+
+
+def test_unload_keeps_the_modules_of_a_sibling_package(monkeypatch):
+    """BG-16: unloading `plugins.bg16_mon` purged `plugins.bg16_mon_agent.*` from
+    sys.modules too (bare startswith) — while that plugin was running."""
+    import sys
+    import types
+
+    from core.components.plugins.logic.models import ModuleManifest, ModulePermissions
+
+    for name in ("plugins.bg16_mon", "plugins.bg16_mon.entrypoint", "plugins.bg16_mon.app",
+                 "plugins.bg16_mon_agent", "plugins.bg16_mon_agent.entrypoint"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    mgr = ModuleManager()
+    monkeypatch.setattr(mgr, "_teardown_ui", lambda mid: None)
+    module = sys.modules["plugins.bg16_mon.entrypoint"]
+    module.__file__ = "/nonexistent/plugins/bg16_mon/entrypoint.py"
+    manifest = ModuleManifest(id="lyndrix.plugin.bg16_mon", name="Mon", version="0.0.1", type="PLUGIN",
+                              permissions=ModulePermissions(emit=[], subscribe=[]))
+    mgr.registry[manifest.id] = {"manifest": manifest, "module": module, "context": None, "status": "active"}
+
+    assert mgr.unload_module(manifest.id) is True
+    assert not [m for m in sys.modules if m == "plugins.bg16_mon" or m.startswith("plugins.bg16_mon.")]
+    assert "plugins.bg16_mon_agent" in sys.modules and "plugins.bg16_mon_agent.entrypoint" in sys.modules

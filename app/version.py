@@ -9,10 +9,10 @@ Usage::
 
 from datetime import datetime
 
-__version__: str = "1.11.1"
-__version_info__: tuple[int, int, int] = (1, 11, 1)
-__release_date__: str = "2026-11-13"
-__codename__: str = "Quiet Hours"
+__version__: str = "1.12.0"
+__version_info__: tuple[int, int, int] = (1, 12, 0)
+__release_date__: str = "2026-11-16"
+__codename__: str = "Safe Harbor"
 
 # Captured at module import time → effectively tracks application start
 _start_time: datetime = datetime.now()

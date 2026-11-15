@@ -8,7 +8,13 @@ from typing import Any
 from config import settings
 from core.theming.loader import _THEME_ID_RE, load_theme_pack
 from core.theming.models import ThemePack
-from core.theming.schema import TOKEN_VALUE_VALIDATORS
+from core.theming.schema import (
+    TOKEN_VALUE_VALIDATORS,
+    is_safe_asset_filename,
+    is_safe_css_value,
+    is_valid_css_color,
+    is_valid_css_var_name,
+)
 
 log = logging.getLogger("Core:ThemeEngine")
 
@@ -165,6 +171,18 @@ _TOKEN_CATEGORIES: tuple[tuple[str, dict[str, str], dict[str, str]], ...] = (
 )
 
 
+def _safe_color(item: Any, dark: bool) -> str | None:
+    """The mode's colour of a token, or None when unset or not a literal colour.
+
+    Packs uploaded before the strict upload validation may still hold arbitrary
+    strings; callers fall back to the built-in default for those (SC-02).
+    """
+    if not item:
+        return None
+    value = item.dark if dark else item.light
+    return value.strip() if is_valid_css_color(value) else None
+
+
 class ThemeEngine:
     def __init__(self, base_dir: Path | None = None, user_dir: Path | None = None):
         self.base_dir = base_dir or THEMES_BASE_DIR          # built-in (read-only image)
@@ -200,10 +218,7 @@ class ThemeEngine:
 
     def resolve_color(self, key: str, dark: bool, theme_id: str | None = None) -> str | None:
         theme = self.resolve_theme(theme_id)
-        item = theme.tokens.colors.get(key)
-        if not item:
-            return None
-        return item.dark if dark else item.light
+        return _safe_color(theme.tokens.colors.get(key), dark)
 
     def resolve_component_styles(
         self,
@@ -221,10 +236,7 @@ class ThemeEngine:
         colors = theme.tokens.colors
 
         def color(name: str, fallback: str) -> str:
-            c = colors.get(name)
-            if not c:
-                return fallback
-            return c.dark if dark else c.light
+            return _safe_color(colors.get(name), dark) or fallback
 
         return {
             "primary": color("primary", "#6366f1"),
@@ -256,10 +268,7 @@ class ThemeEngine:
         colors = theme.tokens.colors
 
         def c(name: str, fallback: str) -> str:
-            item = colors.get(name)
-            if not item:
-                return fallback
-            return item.dark if dark else item.light
+            return _safe_color(colors.get(name), dark) or fallback
 
         if dark:
             css: dict[str, str] = {
@@ -370,6 +379,10 @@ class ThemeEngine:
         bg_file = None
         if bg_images is not None:
             bg_file = bg_images.dark if dark else bg_images.light
+        # The name ends up inside url("…") — only a plain image file name may.
+        if bg_file and not is_safe_asset_filename(bg_file):
+            log.debug("Theme '%s': ignoring unsafe background image name", theme.theme_id)
+            bg_file = None
         if bg_file:
             active_id = theme_id or settings.DEFAULT_THEME_ID
             url = f"/api/themes/{active_id}/assets/{bg_file}"
@@ -394,7 +407,15 @@ class ThemeEngine:
         if overrides is not None:
             mode_overrides = overrides.dark if dark else overrides.light
             for key, value in (mode_overrides or {}).items():
-                css[str(key)] = str(value)
+                # Emitted verbatim as ``name: value;`` — skip anything that is
+                # not a custom property with an injection-free value (SC-02).
+                if is_valid_css_var_name(key) and is_safe_css_value(value):
+                    css[key] = value.strip()
+                else:
+                    log.debug(
+                        "Theme '%s': ignoring unsafe css_variables entry %r",
+                        theme.theme_id, str(key)[:40],
+                    )
 
         return css
 
@@ -442,6 +463,11 @@ class ThemeEngine:
         the matching plugin_id — they do not affect the global UIStyles class.
         """
         self._plugin_overrides[plugin_id] = dict(overrides)
+
+    def unregister_plugin_overrides(self, plugin_id: str) -> None:
+        """Drop a plugin's overrides again (called when the plugin is disabled
+        or unloaded; its setup() registers them anew)."""
+        self._plugin_overrides.pop(plugin_id, None)
 
     def list_available_themes(self) -> list[str]:
         """All theme IDs on disk: built-in ones plus uploads on the shared storage."""

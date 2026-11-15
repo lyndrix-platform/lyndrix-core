@@ -163,6 +163,13 @@ def _render_password_change_card(username: str) -> None:
                     username, cur_pw.value, new_pw.value
                 )
                 if ok:
+                    # A new password ends the API/React sessions opened with the old one.
+                    try:
+                        from core.components.auth.logic.api_key_service import api_key_service
+
+                        api_key_service.revoke_sessions(username)
+                    except Exception:
+                        pass
                     status_label.classes(
                         add="text-emerald-400", remove="text-red-400 text-zinc-500"
                     )

@@ -9,7 +9,7 @@ Docker — nothing in it is Kubernetes-specific.
 
 | Object | Purpose | Settings |
 |---|---|---|
-| `Deployment lyndrix-core` (replicas 2–3) | API instances | `LYNDRIX_CLUSTER_MODE=cluster`, `LYNDRIX_INSTANCE_ROLES=api,leader`, `LYNDRIX_UI_ENGINE=react`, `LYNDRIX_TRUSTED_PROXIES=*` (pods see the ingress' pod IP), `LYNDRIX_DRAIN_SECONDS=10`, `LYNDRIX_INSTANCE_ID` from `metadata.name` via the downward API |
+| `Deployment lyndrix-core` (replicas 2–3) | API instances | `LYNDRIX_CLUSTER_MODE=cluster`, `LYNDRIX_INSTANCE_ROLES=api,leader`, `LYNDRIX_UI_ENGINE=react`, `LYNDRIX_TRUSTED_PROXIES=<ingress pod CIDR>` (pods see the ingress' pod IP; `*` only behind a NetworkPolicy, see [Ingress](ingress.md)), `LYNDRIX_DRAIN_SECONDS=10`, `LYNDRIX_INSTANCE_ID` from `metadata.name` via the downward API |
 | `Deployment lyndrix-runner` (replicas 1) | IaC Orchestrator host | `LYNDRIX_INSTANCE_ROLES=api,runner`; `nodeSelector` to a node with Docker (or DinD) until runners become Kubernetes Jobs |
 | `Deployment lyndrix-ui` | frontend | `LYNDRIX_BACKEND_URL=http://lyndrix-core` (the Service) |
 | `Service lyndrix-core` | load balancing | ClusterIP; readiness decides membership |

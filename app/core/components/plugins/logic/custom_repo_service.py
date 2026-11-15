@@ -15,7 +15,6 @@ from typing import List, Optional
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
 from .models import CustomPluginRepository
-from . import git_providers
 
 log = get_logger("Core:CustomRepoService")
 
@@ -41,13 +40,12 @@ class CustomRepositoryService:
         """
         if self._schema_ready or not db_instance.engine:
             return
-        try:
-            with db_instance.engine.begin() as connection:
-                CustomPluginRepository.__table__.create(bind=connection, checkfirst=True)
+        from core.components.database.logic.tx import ensure_table_once
+
+        # Under the cluster bootstrap lock; a lost CREATE race counts as done.
+        if ensure_table_once(CustomPluginRepository.__table__):
             self._schema_ready = True
             log.info("CUSTOM_REPO: Schema ready.")
-        except Exception as exc:
-            log.error(f"CUSTOM_REPO: Failed to ensure schema: {exc}")
 
     # ------------------------------------------------------------------- vault
     def _vault(self):
@@ -69,33 +67,35 @@ class CustomRepositoryService:
             return {}
 
     def _write_token(self, repo_id: int, token: str) -> bool:
-        vault = self._vault()
-        if not vault:
+        if not self._vault():
             log.warning("CUSTOM_REPO: Vault not connected — token not stored.")
             return False
-        data = self._read_vault_data(vault)
-        data[_token_key(repo_id)] = token
+        from core.components.vault.logic.kv_helper import update_secret_dict
+
+        def _set(data: dict) -> None:
+            data[_token_key(repo_id)] = token
+
         try:
-            vault.client.secrets.kv.v2.create_or_update_secret(
-                path=VAULT_PATH, mount_point=VAULT_MOUNT, secret=data
-            )
+            # Strict read + CAS: all repo tokens share one secret, so a failed
+            # read must abort instead of replacing it with this single token.
+            update_secret_dict(VAULT_PATH, _set)
             return True
         except Exception as exc:
             log.error(f"CUSTOM_REPO: Failed to write token: {exc}")
             return False
 
     def _delete_token(self, repo_id: int) -> None:
-        vault = self._vault()
-        if not vault:
+        if not self._vault():
             return
-        data = self._read_vault_data(vault)
-        if data.pop(_token_key(repo_id), None) is not None:
-            try:
-                vault.client.secrets.kv.v2.create_or_update_secret(
-                    path=VAULT_PATH, mount_point=VAULT_MOUNT, secret=data
-                )
-            except Exception as exc:
-                log.error(f"CUSTOM_REPO: Failed to delete token: {exc}")
+        from core.components.vault.logic.kv_helper import update_secret_dict
+
+        def _drop(data: dict) -> None:
+            data.pop(_token_key(repo_id), None)
+
+        try:
+            update_secret_dict(VAULT_PATH, _drop)
+        except Exception as exc:
+            log.error(f"CUSTOM_REPO: Failed to delete token: {exc}")
 
     def get_token(self, repo_id: int) -> Optional[str]:
         """Read a per-repo token from Vault, or None."""
@@ -152,8 +152,12 @@ class CustomRepositoryService:
         if not normalized:
             raise ValueError("Repository URL is required.")
 
-        # Validate + derive metadata from the URL.
-        ref = git_providers.parse_repo(normalized)
+        # Validate + derive metadata from the URL — through the same parser and
+        # host allowlist as install/upgrade (SC-10). Without it any host could
+        # be stored and shown in the marketplace (install rejected it later).
+        from .plugin_service import plugin_service
+
+        ref = plugin_service.validate_repo_url(normalized)
         provider = ref.provider
         display_name = (name or "").strip() or ref.repo.replace("-", " ").title()
 

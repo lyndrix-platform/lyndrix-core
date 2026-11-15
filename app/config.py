@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     # followers of a cluster, but anyone who can write that directory could poison
     # the next install on every instance — enable only on trusted storage.
     LYNDRIX_PLUGIN_PIP_CACHE_DIR: str = ""
+    # Package index for plugin requirement installs (e.g. an internal mirror).
+    # Empty = PyPI. pip runs with --isolated and a minimal environment, so
+    # PIP_INDEX_URL / pip.conf of the core container are deliberately ignored.
+    LYNDRIX_PLUGIN_PIP_INDEX_URL: str = ""
+    # Size limits for plugin archives (SC-13). Generous on purpose — the largest
+    # first-party plugin is ~15 MB / ~200 files — they only stop a runaway
+    # download or a zip bomb from filling memory and the plugin volume.
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_MB: int = 200       # downloaded archive
+    LYNDRIX_PLUGIN_MAX_EXTRACTED_MB: int = 1024    # sum of the extracted files
+    LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES: int = 20000  # entries in the archive
+    # Upper bound for an uploaded theme ZIP (tokens/components JSON + images).
+    LYNDRIX_THEME_MAX_ZIP_MB: int = 50
 
     # --- BOOTSTRAP CREDENTIALS ---
     LYNDRIX_ADMIN_USER: str = "admin"
@@ -106,6 +118,15 @@ class Settings(BaseSettings):
     # the SSRF guard in core.components.plugins.logic.git_providers. Add your
     # self-hosted GitLab's hostname here to install plugins from it.
     LYNDRIX_PLUGIN_REPO_HOSTS: str = "github.com"
+    # Seconds a plugin's teardown() may take on disable/unload/reload before
+    # the core stops waiting for it and continues (the plugin lifecycle reads
+    # this; a hanging teardown must not block the operation forever).
+    LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT: float = 15
+    # Host the global GitLab token (GITLAB_TOKEN / Vault gitlab_token) belongs to.
+    # A token is only ever sent to its own host, over https. Empty = the single
+    # non-GitHub host in LYNDRIX_PLUGIN_REPO_HOSTS; with several GitLab hosts on
+    # the allowlist this must be set, otherwise the token is not used at all.
+    LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST: str = ""
 
     # --- AUTH PROVIDERS ---
     # Ordered, comma-separated list of providers to try on login: local, ldap, oidc
@@ -124,6 +145,36 @@ class Settings(BaseSettings):
     # which persists it to Vault under lyndrix/core/settings → system_api_key.
     # Resolution order: this env var > Vault > disabled.
     LYNDRIX_SYSTEM_API_KEY: Optional[str] = None
+
+    # --- PASSWORD LOGIN ---
+    # HTTP Basic (``Authorization: Basic``) against the LOCAL accounts on API
+    # routes. On by default so existing automation keeps working; set to false
+    # once every client uses an API key or a session token. Basic is throttled
+    # like the login form and is never evaluated on the routes that answer
+    # without authentication (/api/health, /api/auth/whoami, /api/events).
+    LYNDRIX_API_BASIC_AUTH: bool = True
+    # Password verifications (Argon2id, 64 MiB each) one process runs at the
+    # same time. More of them wait a few seconds for a free slot and are then
+    # answered 503 + Retry-After — memory stays bounded under a login flood.
+    LYNDRIX_LOGIN_VERIFY_CONCURRENCY: int = 4
+    # Absolute lifetime of a login session (the token a web/SSO login returns)
+    # in hours; after that the token answers 401 and the user signs in again.
+    # 0 = never expires. Named API keys a user creates are NOT affected.
+    LYNDRIX_SESSION_MAX_AGE_HOURS: int = 720
+    # What the max-age means for LEGACY sessions — those created before this
+    # deployment first ran a core that knows the rule (the instant is recorded
+    # once in the database, table auth_markers):
+    #   exempt            they never expire by age (default: an upgrade signs
+    #                     nobody out and breaks no script that uses a session token)
+    #   from_enforcement  their age counts from the recorded instant
+    #   strict            like any other session (age counts from creation)
+    # Revocation, a password change and deleting the account end them regardless.
+    LYNDRIX_SESSION_MAX_AGE_LEGACY: str = "exempt"
+    # Open event streams (GET /api/events, one per browser tab) a single user
+    # may hold on one instance; further ones get 429 and the shell falls back
+    # to polling until one closes. Streams without a login are limited per
+    # client address at five times this value. 0 = unlimited.
+    LYNDRIX_SSE_MAX_CONNECTIONS_PER_USER: int = 20
 
     # --- LDAP ---
     # Full LDAP URL, e.g. ldap://ldap.example.com:389  or  ldaps://…:636
@@ -226,6 +277,45 @@ class Settings(BaseSettings):
     # hint, leases are released and the process exits. Default: 0 in single
     # mode (today's behaviour), 10 in cluster mode.
     LYNDRIX_DRAIN_SECONDS: Optional[int] = None
+    # How long an instance that stopped gracefully (tombstone) or went silent
+    # while draining counts as "restarting" for its peers before it is "dead":
+    # ctx.has_live_role() stays true and pinned plugins answer a short
+    # Retry-After meanwhile. Should cover a container restart (image pull
+    # excluded); rows are pruned after grace + TTL at the earliest.
+    LYNDRIX_RESTART_GRACE_SECONDS: int = 90
+    # Rolling restart (POST /api/system/restart in cluster mode): how long the
+    # leader waits for ONE restarted instance to be back and ready before it
+    # aborts the run instead of restarting the next one.
+    LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS: int = 300
+    # Roles whose instances must see ONE shared STORAGE_DIR (comma list): they
+    # serve user files (uploads, attachments, themes). The preflight "storage"
+    # check compares only these instances; a runner-only instance on another
+    # host is reported for information, not as a problem. Empty = nobody.
+    LYNDRIX_STORAGE_SHARED_ROLES: str = "api"
+    # Cluster mode: the preflight re-checks the cluster contracts this often
+    # (seconds, at least 30). A check that could not decide gets up to five
+    # quick re-runs (every two heartbeats) first, then this interval applies.
+    LYNDRIX_PREFLIGHT_INTERVAL_SECONDS: int = 300
+    # Whether a Vault outage AFTER the boot fails /api/ready. Default false:
+    # the outage is reported (/api/ready "degraded", /api/health status
+    # "degraded", preflight check "vault", log) but the instance stays in
+    # rotation — logins, sessions and everything database-backed keep working,
+    # only secrets/settings stored in Vault are unavailable until it returns.
+    # With one Vault behind several cores, true turns a Vault restart into 503
+    # on every instance at once; set it only when Vault itself is highly
+    # available and an instance without Vault must not serve. During boot
+    # (Vault never opened) /api/ready is 503 either way.
+    LYNDRIX_READY_REQUIRES_VAULT: bool = False
+    # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
+    # the plugins recorded in plugin_states are installed and activated on this
+    # instance — a fresh pod with an empty plugin directory would otherwise take
+    # traffic and answer 404 for every plugin route while it still downloads
+    # them. After this many seconds the instance turns ready anyway (a broken
+    # plugin repo must not keep it out forever); 0 = do not wait.
+    # 300 s stays well inside the Kubernetes default progressDeadlineSeconds
+    # (600): a pod whose plugin repo is unreachable turns ready (preflight
+    # "plugins: warn") instead of failing the whole rollout at the same moment.
+    LYNDRIX_READY_PLUGIN_WAIT_SECONDS: int = 300
     # Central log (cluster_logs): every instance ships its log lines (>= LEVEL,
     # minus EXCLUDE — comma list, trailing * = prefix) to the shared table so the
     # UI shows any instance's log from any instance; the leader keeps
@@ -358,6 +448,17 @@ class Settings(BaseSettings):
         return violations
 
     @model_validator(mode="after")
+    def _validate_session_policy(self) -> "Settings":
+        mode = (self.LYNDRIX_SESSION_MAX_AGE_LEGACY or "exempt").strip().lower()
+        if mode not in ("exempt", "from_enforcement", "strict"):
+            raise ValueError(
+                "LYNDRIX_SESSION_MAX_AGE_LEGACY must be 'exempt', 'from_enforcement' or 'strict', "
+                f"got {self.LYNDRIX_SESSION_MAX_AGE_LEGACY!r}"
+            )
+        self.LYNDRIX_SESSION_MAX_AGE_LEGACY = mode
+        return self
+
+    @model_validator(mode="after")
     def _validate_cluster_mode(self) -> "Settings":
         mode = (self.LYNDRIX_CLUSTER_MODE or "single").strip().lower()
         if mode not in ("single", "cluster"):
@@ -400,6 +501,10 @@ class Settings(BaseSettings):
             self.LYNDRIX_DRAIN_SECONDS = 10 if mode == "cluster" else 0
         elif self.LYNDRIX_DRAIN_SECONDS < 0:
             raise ValueError("LYNDRIX_DRAIN_SECONDS must be >= 0")
+        if self.LYNDRIX_RESTART_GRACE_SECONDS < 0:
+            raise ValueError("LYNDRIX_RESTART_GRACE_SECONDS must be >= 0")
+        if self.LYNDRIX_READY_PLUGIN_WAIT_SECONDS < 0:
+            raise ValueError("LYNDRIX_READY_PLUGIN_WAIT_SECONDS must be >= 0")
         return self
 
     # ------------------------------------------------------------------
@@ -481,13 +586,26 @@ class Settings(BaseSettings):
             return []
         return [g.strip() for g in self.LYNDRIX_OIDC_ADMIN_GROUPS.split(",") if g.strip()]
 
+    def is_env_locked(self, field: str) -> bool:
+        """True when ``field`` is provided by the OS environment or the ``.env`` file.
+
+        Such a value is the operator's deployment configuration and outranks
+        anything saved through the UI (documented order: OS env > .env > Vault >
+        default). The UI shows the field as locked and Vault hydration skips it.
+        """
+        return os.getenv(field) is not None or field in _dotenv_fields()
+
     def hydrate_from_vault(self) -> int:
         """
         Apply Vault-stored values (lyndrix/core/settings) onto editable fields.
 
-        Environment variables always win: a field whose OS environment variable
-        is set is never overridden here.  This is what makes UI-saved settings
-        survive a reboot while keeping env vars authoritative.
+        Environment variables and ``.env`` entries always win: a field provided
+        by either is never overridden here.  This is what makes UI-saved
+        settings survive a reboot while keeping the deployment authoritative.
+
+        Every value is validated like a UI save (field type, select options,
+        model validators). An invalid stored value is skipped with a warning —
+        it never reaches the live settings and never fails the boot.
 
         Returns the number of fields that were applied.
         """
@@ -506,22 +624,50 @@ class Settings(BaseSettings):
             _config_log.warning("CONFIG: Could not read settings from Vault — skipped: %s", exc)
             return 0
 
-        applied = 0
+        candidates: Dict[str, Any] = {}
         for spec in EDITABLE_SETTINGS:
             if spec.field not in data:
                 continue
-            if os.getenv(spec.field) is not None:
-                continue  # env var takes precedence — never override
+            if self.is_env_locked(spec.field):
+                continue  # env / .env takes precedence — never override
             try:
-                setattr(self, spec.field, spec.coerce(data[spec.field]))
-                applied += 1
-            except Exception:
+                candidates[spec.field] = spec.validated(data[spec.field])
+            except (ValueError, TypeError) as exc:
                 _config_log.warning(
-                    f"CONFIG: Could not apply Vault value for '{spec.field}' — skipped."
+                    f"CONFIG: Ignoring invalid Vault value for '{spec.field}': {exc}"
                 )
-        if applied:
-            _config_log.info(f"CONFIG: Hydrated {applied} setting(s) from Vault.")
-        return applied
+
+        validated = self._validate_candidates(candidates)
+        for field_name in candidates:
+            setattr(self, field_name, getattr(validated, field_name))
+        if candidates:
+            _config_log.info(f"CONFIG: Hydrated {len(candidates)} setting(s) from Vault.")
+        return len(candidates)
+
+    def _validate_candidates(self, candidates: Dict[str, Any]) -> "Settings":
+        """Validate ``candidates`` on top of the current values through the model.
+
+        Fields pydantic rejects are dropped from ``candidates`` (in place) with a
+        warning; when a model-level rule fails (no single field to blame) all of
+        them are dropped. Returns the validated model for the remaining ones.
+        """
+        while candidates:
+            try:
+                return type(self).model_validate({**self.model_dump(), **candidates})
+            except ValidationError as exc:
+                bad = {str(err["loc"][0]) for err in exc.errors() if err.get("loc")} & set(candidates)
+                if not bad:
+                    _config_log.warning(
+                        "CONFIG: Vault settings rejected as a whole (%s) — keeping current values.",
+                        "; ".join(err.get("msg", "") for err in exc.errors()),
+                    )
+                    bad = set(candidates)
+                for field_name in bad:
+                    _config_log.warning(
+                        f"CONFIG: Ignoring invalid Vault value for '{field_name}' — keeping the current one."
+                    )
+                    candidates.pop(field_name, None)
+        return self
 
     def get(self, env_var: str, vault_key: Optional[str] = None, default: Optional[str] = None) -> Optional[str]:
         """
@@ -575,6 +721,31 @@ except ValidationError as _exc:
     sys.exit(1)
 
 
+_DOTENV_FIELDS: Optional[frozenset] = None
+
+
+def _dotenv_fields() -> frozenset:
+    """Names of the settings provided by the ``.env`` file (read once).
+
+    pydantic-settings loads ``.env`` at startup only, so the set is fixed for
+    the process lifetime. Matching is case-insensitive like pydantic-settings.
+    """
+    global _DOTENV_FIELDS
+    if _DOTENV_FIELDS is None:
+        fields: set = set()
+        env_file = Settings.model_config.get("env_file")
+        try:
+            from dotenv import dotenv_values
+
+            if env_file and os.path.isfile(env_file):
+                present = {str(k).upper() for k, v in dotenv_values(env_file).items() if v is not None}
+                fields = {name for name in Settings.model_fields if name.upper() in present}
+        except Exception as exc:  # pragma: no cover - defensive: never fail startup over this
+            _config_log.warning("CONFIG: could not inspect %s for locked settings: %s", env_file, exc)
+        _DOTENV_FIELDS = frozenset(fields)
+    return _DOTENV_FIELDS
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Editable settings registry (System tab in the Settings UI)
 #
@@ -583,7 +754,8 @@ except ValidationError as _exc:
 # environment variable name (pydantic-settings reads env vars matching the field
 # name).  Values saved from the UI are persisted to Vault (lyndrix/core/settings)
 # and re-applied on boot via Settings.hydrate_from_vault(), unless the matching
-# environment variable is set — in which case the env var always wins.
+# environment variable or .env entry is set — in which case that always wins
+# (Settings.is_env_locked).
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -599,6 +771,17 @@ class EditableSetting:
     @property
     def env_var(self) -> str:
         return self.field
+
+    def validated(self, raw: Any) -> Any:
+        """``coerce`` plus the checks a stored value must pass before it is applied.
+
+        Raises ``ValueError`` for a select value outside ``options`` or a value
+        that cannot be converted (e.g. a non-numeric int).
+        """
+        value = self.coerce(raw)
+        if self.kind == "select" and self.options and value not in self.options:
+            raise ValueError(f"{value!r} is not one of {self.options}")
+        return value
 
     def coerce(self, raw: Any) -> Any:
         """Convert a raw (UI / Vault) value into the proper Python type."""

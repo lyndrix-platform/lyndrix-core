@@ -1,4 +1,4 @@
-"""``db`` coordinator driver against an in-memory SQLite engine shared by two
+"""``db`` coordinator driver against one SQLite database shared by two
 "instances" (same tables, different instance ids).
 
 Run inside the lyndrix-core runtime:
@@ -8,16 +8,18 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, insert, select, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import insert, select, text
 
+from cluster_harness import make_engine
 from core.components.cluster.logic.drivers.db import DbCoordinator
 from core.components.cluster.logic.models import ClusterEvent, ClusterInstance
 
 
 @pytest.fixture()
-def engine():
-    eng = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+def engine(tmp_path):
+    # File database, one connection per thread — see cluster_harness for why an
+    # in-memory StaticPool engine made these tests flaky.
+    eng = make_engine(tmp_path)
     yield eng
     eng.dispose()
 
@@ -62,7 +64,7 @@ def test_expired_lease_is_taken_over_and_force_release_works(engine):
     asyncio.run(run())
 
 
-def test_heartbeat_registers_instances_and_stop_deregisters(engine):
+def test_heartbeat_registers_instances_and_stop_leaves_tombstones(engine):
     a, b = _coord(engine, "a"), _coord(engine, "b")
 
     async def run():
@@ -80,7 +82,10 @@ def test_heartbeat_registers_instances_and_stop_deregisters(engine):
         assert len(await b.instances()) == 2
         await a.stop()
         await b.stop()
-        assert await _coord(engine, "c").instances() == []
+        # A graceful stop leaves a tombstone (core ≥ 1.12): not alive, "restarting".
+        gone = await _coord(engine, "c").instances()
+        assert [(i.instance_id, i.alive, i.state) for i in gone] == [("a", False, "restarting"),
+                                                                     ("b", False, "restarting")]
 
     asyncio.run(run())
 
@@ -175,3 +180,42 @@ def test_server_info_reports_dialect(engine):
     a = _coord(engine, "a")
     info = asyncio.run(a.server_info())
     assert info["driver"] == "db" and info["dialect"] == "sqlite"
+
+
+# --- N5: the coordinator must not be able to occupy the whole connection pool ----------
+
+def test_coordinator_threads_stay_below_the_connection_pool():
+    """16 coordinator threads against a pool of 15 connections: with a hanging
+    database the coordinator alone held every connection and each API request
+    waited for the pool timeout."""
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.pool import NullPool, QueuePool
+
+    from core.components.cluster.logic.drivers import db as driver
+
+    def threads(**pool_args):
+        engine = _create_engine("sqlite://", poolclass=QueuePool, **pool_args)
+        try:
+            return driver.coordinator_threads(engine.pool)
+        finally:
+            engine.dispose()
+
+    default_pool = threads()                                  # SQLAlchemy default: 5 + 10 overflow
+    assert default_pool == 12 and default_pool <= 15 - 3      # a quarter of the pool stays free
+    assert threads(pool_size=20, max_overflow=20) == 16       # never more than the upper bound
+    assert threads(pool_size=2, max_overflow=1) == 2          # tiny pool: the minimum of two threads
+    assert threads(pool_size=4, max_overflow=0) == 2
+    assert threads(pool_size=5, max_overflow=-1) == 16        # unlimited overflow: nothing to protect
+    assert driver.coordinator_threads(_create_engine("sqlite://", poolclass=NullPool).pool) == 16
+
+
+def test_the_executor_is_sized_from_the_engine_pool(engine):
+    from core.components.cluster.logic.drivers import db as driver
+
+    a = _coord(engine, "a")
+
+    async def run():
+        await a.heartbeat({})
+        return a._executor._max_workers
+
+    assert asyncio.run(run()) == driver.coordinator_threads(engine.pool) < 16

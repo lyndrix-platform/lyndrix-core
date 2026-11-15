@@ -8,14 +8,14 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
 from config import settings, EDITABLE_SETTINGS
 from core.bus import bus
-from core.logger import setup_logging, get_logger
+from core.logger import setup_logging, get_logger, apply_log_level
 from core.services import vault_instance, boot_service
 
 # --- UI engine flags (computed once at import time) ---
@@ -39,6 +39,7 @@ from core.api import (
     require_permission,
     system_api_key_configured,
 )
+from core.api.security import basic_auth_enabled
 from core.api.permissions_api import permissions_router
 from core.api.auth_api import auth_router, me_router
 from core.api.events_api import events_router
@@ -81,9 +82,13 @@ app = FastAPI(
     title="Lyndrix Core API",
     description="Core and plugin endpoints for Lyndrix.",
     version=__version__,
+    # The interactive docs and the schema are served by the gated routes below.
     docs_url=None,
     redoc_url=None,
+    openapi_url=None,
 )
+
+_OPENAPI_URL = "/openapi.json"
 
 app.add_middleware(
     CORSMiddleware,
@@ -131,11 +136,6 @@ def _custom_openapi():
                 "scheme": "bearer",
                 "description": "Send the API key as a Bearer token.",
             },
-            "BasicAuth": {
-                "type": "http",
-                "scheme": "basic",
-                "description": "Dashboard username and password (local IAM).",
-            },
         }
     )
     # Offered globally so the Authorize button applies the chosen credential to
@@ -143,8 +143,15 @@ def _custom_openapi():
     schema["security"] = [
         {"ApiKeyHeader": []},
         {"BearerAuth": []},
-        {"BasicAuth": []},
     ]
+    if basic_auth_enabled():
+        # Only advertised while LYNDRIX_API_BASIC_AUTH is on.
+        components["securitySchemes"]["BasicAuth"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "Username and password of a LOCAL account (throttled; prefer an API key).",
+        }
+        schema["security"].append({"BasicAuth": []})
     app.openapi_schema = schema
     return schema
 
@@ -152,11 +159,29 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
+def _api_docs_access(request: Request) -> None:
+    """Who may read the API map (OpenAPI schema, Swagger UI, ReDoc).
+
+    It lists every core and plugin route with its parameters — reconnaissance
+    material. Open while ``ENV_TYPE=dev``; otherwise it needs ``admin:read``
+    (send an API key / session token header, e.g. with curl — a browser cannot
+    attach one to a page load).
+    """
+    if settings.ENV_TYPE == "dev":
+        return
+    require_permission("admin:read")(request)
+
+
+@app.get(_OPENAPI_URL, include_in_schema=False)
+async def openapi_schema(_: None = Depends(_api_docs_access)):
+    return JSONResponse(app.openapi())
+
+
 @app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
+async def custom_swagger_ui_html(_: None = Depends(_api_docs_access)):
     """Swagger UI with the Lyndrix dark theme and an Authorize button."""
     response = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — Docs",
         swagger_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
         swagger_ui_parameters={"persistAuthorization": True, "tryItOutEnabled": True},
@@ -170,9 +195,9 @@ async def custom_swagger_ui_html():
 
 
 @app.get("/redoc", include_in_schema=False)
-async def custom_redoc_html():
+async def custom_redoc_html(_: None = Depends(_api_docs_access)):
     return get_redoc_html(
-        openapi_url=app.openapi_url,
+        openapi_url=_OPENAPI_URL,
         title=f"{app.title} — ReDoc",
         redoc_favicon_url=f"/assets/icons/favicon.ico?v={__version__}",
     )
@@ -202,7 +227,7 @@ def _public_config_snapshot() -> dict:
     sanitized["ldap_default_roles"] = settings.ldap_default_roles
     sanitized["oidc_admin_groups"] = settings.oidc_admin_groups
     sanitized["env_locked"] = [
-        s.field for s in EDITABLE_SETTINGS if os.getenv(s.field) is not None
+        s.field for s in EDITABLE_SETTINGS if settings.is_env_locked(s.field)
     ]
     sanitized["editable_settings"] = [
         {
@@ -221,6 +246,32 @@ def _public_config_snapshot() -> dict:
         for s in EDITABLE_SETTINGS
     ]
     return sanitized
+
+
+# What every signed-in user's shell needs from the configuration: branding,
+# locale and theme defaults. Everything else in the snapshot (database and
+# Vault hosts, bootstrap account names, LDAP/OIDC mappings, plugin sources) is
+# for administrators.
+_USER_CONFIG_FIELDS = (
+    "APP_NAME",
+    "APP_TITLE",
+    "DEFAULT_LOCALE",
+    "SUPPORTED_LOCALES",
+    "DEFAULT_THEME_ID",
+    "THEME_ENGINE_ENABLED",
+)
+
+
+def _user_config_snapshot() -> dict:
+    """The configuration view of a caller without ``admin:read``.
+
+    Same shape as the full snapshot (``env_locked`` / ``editable_settings``
+    are present but empty) so a shell reads both the same way.
+    """
+    view = {name: getattr(settings, name, None) for name in _USER_CONFIG_FIELDS}
+    view["env_locked"] = []
+    view["editable_settings"] = []
+    return view
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -537,9 +588,8 @@ app.include_router(cluster_router)
 # ==========================================
 
 # /api/health calls every plugin's health(); dashboards and probes poll it, so
-# the plugin round is cached briefly (N pollers → one round per window).
-_HEALTH_CACHE_TTL_S = 10.0
-_health_cache: Dict[str, Any] = {"at": 0.0, "worst": "ok", "plugins": {}}
+# the plugin round is cached briefly and refreshed single-flight (N pollers →
+# one round per window) — see core/api/health_round.py.
 
 
 @app.get("/api/health", tags=["System"])
@@ -560,69 +610,16 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
     per-plugin breakdown, raw failure reasons and version numbers are returned
     only to authenticated callers with the ``api:read`` permission.
     """
+    from core.api.health_round import plugin_health_round
     from core.components.plugins.logic.manager import module_manager
 
     ready, reasons = cluster_service.readiness()
-    now = _time.monotonic()
-    if now - _health_cache["at"] < _HEALTH_CACHE_TTL_S:
-        worst, plugin_results = _health_cache["worst"], _health_cache["plugins"]
-        if identity is None or not identity.allows("api:read"):
-            return {"status": worst, "ready": ready}
-        return {
-            "status": worst,
-            "ready": ready,
-            "readiness_reasons": reasons,
-            "instance_id": cluster_service.instance_id,
-            "core_version": __core_version__,
-            "api_version": __api_version__,
-            "plugins": plugin_results,
-            "cached": True,
-        }
-
-    plugin_results: dict = {}
-    severity_order = {"error": 3, "degraded": 2, "unknown": 1, "ok": 0}
-    worst = "ok"
-
-    async def _call_health(module_id: str, entry: dict):
-        module = entry.get("module")
-        ctx = entry.get("context")
-        if module is None or ctx is None or not hasattr(module, "health"):
-            return module_id, PluginHealthStatus(status="unknown")
-        # A plugin in its warm-up window is not probed: health() would only add
-        # load to the very work it is waiting for, and "starting" is not an error.
-        runtime = getattr(ctx, "runtime", None)
-        if runtime and runtime.get("phase") == "starting":
-            return module_id, PluginHealthStatus(status="unknown", details={"reason": "starting"})
-        try:
-            t0 = _time.monotonic()
-            result = await asyncio.wait_for(module.health(ctx), timeout=5.0)
-            elapsed_ms = (_time.monotonic() - t0) * 1000
-            if not isinstance(result, PluginHealthStatus):
-                result = PluginHealthStatus(status="unknown", details={"raw": str(result)})
-            result.latency_ms = round(elapsed_ms, 2)
-            return module_id, result
-        except asyncio.TimeoutError:
-            return module_id, PluginHealthStatus(status="error", details={"reason": "health() timed out"})
-        except Exception as exc:
-            return module_id, PluginHealthStatus(status="error", details={"reason": str(exc)})
-
-    tasks = [
-        _call_health(mid, entry)
-        for mid, entry in module_manager.registry.items()
-        if entry.get("manifest") and entry["manifest"].type == "PLUGIN"
-        and entry.get("status") == "active"
-    ]
-
-    gathered = await asyncio.gather(*tasks)
-    for module_id, health_status in gathered:
-        plugin_results[module_id] = {
-            **health_status.model_dump(),
-            "runtime": module_manager.get_runtime(module_id),
-        }
-        if severity_order.get(health_status.status, 0) > severity_order.get(worst, 0):
-            worst = health_status.status
-
-    _health_cache.update({"at": _time.monotonic(), "worst": worst, "plugins": plugin_results})
+    worst, plugin_results, cached = await plugin_health_round.get(module_manager)
+    # A core dependency that is away without failing readiness (Vault after
+    # the boot) makes the platform at least "degraded".
+    core_degraded = cluster_service.degraded()
+    if core_degraded and worst in ("ok", "unknown"):
+        worst = "degraded"
 
     # Public callers only see the coarse status — no plugin inventory, failure
     # reasons or version numbers (avoid information disclosure / reconnaissance).
@@ -633,11 +630,12 @@ async def global_health(identity: Optional[ApiIdentity] = Depends(optional_api_a
         "status": worst,
         "ready": ready,
         "readiness_reasons": reasons,
+        "degraded": core_degraded,
         "instance_id": cluster_service.instance_id,
         "core_version": __core_version__,
         "api_version": __api_version__,
         "plugins": plugin_results,
-        "cached": False,
+        "cached": cached,
     }
 
 
@@ -667,13 +665,16 @@ async def get_runtime_config(identity: ApiIdentity = Depends(require_permission(
     """Expose runtime settings from config.py with secrets redacted.
 
     Requires authentication and the ``api:read`` permission (system API key,
-    HTTP Basic, per-user API key, or dashboard session).
+    HTTP Basic, per-user API key, or dashboard session). Callers with
+    ``admin:read`` get the full snapshot; everybody else only the branding,
+    locale and theme fields a shell needs (``restricted: true``).
     """
-    snapshot = _public_config_snapshot()
+    full = identity.allows("admin:read")
     return {
         "status": "ok",
         "authenticated_as": identity.username,
-        "config": snapshot,
+        "config": _public_config_snapshot() if full else _user_config_snapshot(),
+        "restricted": not full,
     }
 
 
@@ -696,23 +697,43 @@ async def set_runtime_config(
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
+    from core.components.settings.logic.system_config_service import (
+        SYSTEM_API_KEY,
+        system_config_service,
+    )
+
+    # The system API key is the master credential (an ``is_system`` identity
+    # that bypasses every permission check): admin:write alone must not be able
+    # to mint it — superadmin or the system key itself only.
+    is_superadmin = identity.is_superadmin   # never a scope-restricted key
+    if SYSTEM_API_KEY in updates and not is_superadmin:
+        raise HTTPException(status_code=403, detail="Only a superadmin may set the system API key")
+
     # Reject env-locked keys up-front: an OS env var always wins on the next boot,
     # so persisting it to Vault would silently no-op and confuse the operator.
-    locked = [key for key in updates if os.getenv(key) is not None]
+    # (Only editable settings can be locked; anything else is refused with 422
+    # by the service, whether or not an environment variable of that name exists.)
+    editable_fields = {spec.field for spec in EDITABLE_SETTINGS}
+    locked = [key for key in updates if key in editable_fields and settings.is_env_locked(key)]
+    if SYSTEM_API_KEY in updates and (os.getenv("LYNDRIX_SYSTEM_API_KEY") or "").strip():
+        locked.append(SYSTEM_API_KEY)
     if locked:
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": sorted(locked)},
         )
 
-    from core.components.settings.logic.system_config_service import system_config_service
-
     try:
-        result = system_config_service.apply(
+        # Vault read-modify-write (sync hvac) → off the event loop.
+        result = await asyncio.to_thread(
+            system_config_service.apply,
             updates,
             persist=payload.persist_in_vault,
             apply_runtime=payload.apply_runtime,
+            allow_system_api_key=is_superadmin,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         # Structured pydantic errors or an unsupported-keys message.
         raise HTTPException(status_code=422, detail=exc.args[0]) from exc
@@ -729,7 +750,8 @@ async def set_runtime_config(
 
 
 @app.post("/api/system/restart", tags=["System"], summary="Restart the core container")
-async def system_restart(identity: ApiIdentity = Depends(require_permission("admin:write"))):
+async def system_restart(include_runners: bool = False,
+                         identity: ApiIdentity = Depends(require_permission("admin:write"))):
     """Restart THIS core's own Docker container — e.g. to make a plugin upgrade take
     effect without an external ``docker restart`` (a recurring gotcha).
 
@@ -738,12 +760,20 @@ async def system_restart(identity: ApiIdentity = Depends(require_permission("adm
     the container goes down and comes back — the UI should show "restarting" and poll for
     the core to return. Requires the ``api:write`` permission.
 
-    Cluster mode: no Docker socket needed. ``system:restart_requested`` is broadcast to
-    every instance; each one drains and exits in a staggered order (leader last) and the
-    restart policy / kubelet brings it back — a rolling restart without an external tool.
+    Cluster mode: no Docker socket needed. The leader restarts the instances ONE AT A TIME
+    (each drains, exits and is brought back by the restart policy / kubelet), waits until the
+    restarted one is ready again before it continues, and restarts itself last. Instances with
+    the ``runner`` role are left alone unless ``include_runners=true``. 409 when no leader can
+    coordinate the run (or one is already running). Progress: ``GET /api/cluster`` → ``restart``
+    on the leader.
     """
     if cluster_service.is_cluster:
-        payload = cluster_service.request_restart(identity.username)
+        from core.components.cluster.logic.restart import RestartRefused
+
+        try:
+            payload = cluster_service.request_restart(identity.username, include_runners=include_runners)
+        except RestartRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         log.warning(f"SYSTEM: cluster rolling restart requested by '{identity.username}' (order {payload['order']}).")
         return {"status": "restarting", "mode": "cluster", **payload}
 
@@ -786,7 +816,12 @@ async def auth_whoami(identity: ApiIdentity = Depends(optional_api_auth)):
 
     Returns whether the request is authenticated, by which method, and whether
     the system API key mechanism is enabled on this instance. Useful for clients
-    to verify their credentials without hitting a protected endpoint.
+    to verify an API key or session token without hitting a protected endpoint.
+
+    HTTP Basic credentials are NOT evaluated here (the caller counts as
+    anonymous): this route never answers 401, so checking a password on it
+    would be a password oracle. Verify Basic credentials against a protected
+    route such as ``GET /api/auth/me``.
     """
     return {
         "authenticated": identity is not None,
@@ -827,6 +862,7 @@ async def _hydrate_settings_from_vault(payload=None):
     try:
         # hydrate_from_vault performs a blocking hvac round-trip — keep it off the loop.
         await asyncio.to_thread(settings.hydrate_from_vault)
+        apply_log_level(settings.LOG_LEVEL)  # a UI-saved level must survive a restart
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"CONFIG: Vault settings hydration failed: {exc}")
 
@@ -838,10 +874,12 @@ async def _on_settings_changed_remote(payload=None):
     """A peer saved settings → re-read Vault here (bridged ``settings:changed``)."""
     if not (payload or {}).get("_origin"):
         return  # our own save already applied the values in-process
-    await _hydrate_settings_from_vault()
-    import logging as _logging
+    if "system_api_key" in set(payload.get("keys") or []) | set(payload.get("removed") or []):
+        # A peer rotated/cleared the system API key: stop serving the cached one.
+        from core.api.security import invalidate_system_api_key_cache
 
-    _logging.getLogger().setLevel(getattr(_logging, str(settings.LOG_LEVEL).upper(), _logging.INFO))
+        invalidate_system_api_key_cache()
+    await _hydrate_settings_from_vault()
     log.info(f"CONFIG: settings re-hydrated after a change on instance {payload.get('_origin')}.")
 
 

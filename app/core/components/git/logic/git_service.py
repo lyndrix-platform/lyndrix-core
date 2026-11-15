@@ -37,7 +37,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from core.bus import bus
-from core.logger import get_logger
+from core.logger import get_logger, mask_text
 
 log = get_logger("Core:Git")
 
@@ -375,7 +375,7 @@ class GitService:
                     "repo_id": repo_id,
                     "status": "error",
                     "request_id": request_id,
-                    "error": str(exc),
+                    "error": mask_text(str(exc)),  # may carry the remote URL with credentials
                 })
 
     async def handle_commit_push(self, payload: dict) -> None:
@@ -415,7 +415,7 @@ class GitService:
                     "repo_id": repo_id,
                     "status": "error",
                     "request_id": request_id,
-                    "error": str(exc),
+                    "error": mask_text(str(exc)),  # may carry the remote URL with credentials
                 })
 
 

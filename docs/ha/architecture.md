@@ -34,16 +34,41 @@ instances that have the Docker socket and the git working trees the `runner` rol
 
 Each instance heart-beats into `cluster_instances` every `LYNDRIX_LEASE_HEARTBEAT_SECONDS` with
 its roles, versions, readiness and two fingerprints (of `STORAGE_SECRET` and of the loaded plugin
-set) that the preflight compares. An instance whose heartbeat is older than the lease TTL counts
-as dead.
+set) that the preflight compares.
+
+Peers see an instance in one of four states (`GET /api/cluster` → `instances[].state`,
+`ctx.instance_state()`):
+
+| State | Meaning |
+|---|---|
+| `alive` | heart-beating within the lease TTL |
+| `draining` | heart-beating, SIGTERM received: `/api/ready` is 503, it gets no new shards, its leases are handed over |
+| `restarting` | stopped on purpose a moment ago — it left a *tombstone* (the row stays, `stopped_at` set), or it fell silent while draining (killed before it could) — and is expected back within `LYNDRIX_RESTART_GRACE_SECONDS` (90 s) |
+| `dead` | no heartbeat for a TTL without a goodbye, or the restart grace is over. Every live instance emits the local event `cluster:instance_lost` once |
+
+A graceful stop used to delete the row at once: the single runner "vanished" for the whole boot
+time of its replacement and the IaC Orchestrator reported "No runner instance online" after every
+core rollout, while a *crashed* instance stayed visible for a TTL. Now a planned restart keeps the
+role `restarting`: `ctx.has_live_role()` stays true and pinned plugins answer 503 with
+`Retry-After: 5` and `"role_state": "restarting"` in `X-Plugin-Runtime`.
+
+Every process has an **incarnation** (a boot nonce, `cluster_instances.incarnation`): a restart
+under a fixed instance id (`docker-auto-runner`) is a new incarnation with a fresh `started_at`,
+and leases of the previous one are never silently inherited (new fencing token). An instance that
+cannot read the registry (just started, database unreachable) answers `unknown` about its peers —
+never "dead".
 
 ## Leases and the leader
 
 A **lease** is "exactly one instance does this". Leases live in `cluster_leases`; acquire and
 renew are one atomic `UPDATE … WHERE holder = me OR expires_at < now`, compared on the
 **database clock** so instance clock drift cannot steal or extend a lease. A holder renews every
-heartbeat; if it cannot reach the coordinator for a full TTL it treats the lease as lost and stops
-the work (fencing) — by then a peer may own it.
+heartbeat, each lease independently of the others. If a renewal does not succeed the holder
+**fences itself before the TTL is over**: `lost` fires at `last renewal sent + TTL − margin` on the
+holder's monotonic clock (margin 7.5 s by default), i.e. before the row can expire for any peer.
+Every acquisition additionally carries a growing **fencing token** (`cluster_leases.token`,
+`ctx.lease_token()`), so the late writes of a holder that was paused past its TTL can be rejected
+— see [For plugin developers](plugin-development.md#fencing-tokens-api-114).
 
 The core leader is the holder of `core:leader`. It is the only instance that prunes the event
 log and dead instance rows; plugins use `ctx.is_leader` for one-shot tasks. Failover: a dead
@@ -79,9 +104,24 @@ event, a browser connected to instance B receives what happened on instance A.
 Why an allowlist: the moment a topic is bridged, every side-effecting subscriber runs on N
 instances. Plugin topics stay local unless the plugin opts in on purpose.
 
+Delivery guarantees (core ≥ 1.12): an instance publishes its events **in the order it emitted
+them**, through one publisher task with an outbox. While the database is unreachable the events
+wait there and are sent afterwards (retry with back-off; at most 1000 events — the oldest is
+dropped — and none older than five minutes; counters in `GET /api/cluster` →
+`coordinator.bridge`). Readers re-read the last 500 event ids on every poll, so a row that was
+committed after a higher id (normal with concurrent writers) is still delivered instead of being
+skipped for good. Delivery is at-least-once per reader within that window; order across
+*different* instances is not defined. A payload above 64 kB is not published (logged) — bridged
+events are signals, not data transport. The row format is unchanged, so instances of core ≤ 1.11
+and newer ones understand each other's events.
+
 Two rules keep one action from turning into N × N toasts: an event a handler emits *in reaction
 to a relayed event* (synchronously or from the task/thread spawned for it) is never published
-again — the originating instance already bridged its own reaction — and installs performed by a
+again — the originating instance already bridged its own reaction. That suppression ends at
+lifecycle boundaries: a plugin's `setup()`, every `ctx.create_task`, lease callbacks and the
+reconcile a peer's change triggers start outside the relay context, so a plugin that was
+(re)activated because a *peer* installed or enabled it publishes its cluster events like any
+other (before core 1.12 it silently could not, until the instance restarted). And installs performed by a
 reconcile (boot-time `LYNDRIX_PLUGINS_DESIRED`, cluster convergence) are silent; only the instance
 that executed the operator's action emits `plugin:installed` and the "Plugin installed"
 notification, which then reaches every browser exactly once through the relay.
@@ -90,12 +130,21 @@ notification, which then reaches every browser exactly once through the relay.
 
 `GET /api/ready` is the one contract every load balancer and Kubernetes readiness probe uses. It
 is 200 only when boot finished, the database and Vault are connected, the instance is not
-draining, the coordinator is up (cluster mode) and no hard preflight failure concerns this
-instance (`coordinator`, `storage_secret`).
+draining, the coordinator is up and a heartbeat succeeded within the last lease TTL (cluster mode)
+and no hard preflight failure concerns this instance (`storage_secret`). The reasons are listed in
+the [configuration reference](configuration.md#readiness).
 
-On SIGTERM with `LYNDRIX_DRAIN_SECONDS > 0`: `/api/ready` flips to 503, the instance waits for the
-load balancer to notice, closes every SSE stream with an `event: reconnect`, releases its leases
-and only then lets uvicorn shut down. A second SIGTERM forces an immediate exit.
+Heartbeat, lease renewal and preflight are three independent loops. The heartbeat does nothing but
+write the registry row and read the peer view at a fixed rate; it never waits for a preflight check
+or for the storage mount (the marker file is written by a dedicated thread, one job at a time).
+
+On SIGTERM with `LYNDRIX_DRAIN_SECONDS > 0`, immediately: `/api/ready` flips to 503, one heartbeat
+publishes `draining`, and the leases are handed over (`lost` callbacks, a bounded wait for async
+ones, release, broadcast) — a peer is leader and runs the leased work about a second later, while
+this instance still finishes in-flight requests. Then it waits for the load balancer to notice,
+closes every SSE stream with an `event: reconnect`, leaves its tombstone and lets uvicorn shut
+down. A second SIGTERM forces an immediate exit. Because the hand-over happens first, a container
+runtime that kills the process at the end of the drain no longer leaves leases behind.
 
 ## Shared short-lived state
 

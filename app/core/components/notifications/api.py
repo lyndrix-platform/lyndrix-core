@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import hmac
 from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 
-from core.api.security import ApiIdentity, require_api_auth
+from core.api.security import ApiIdentity, constant_time_equals, require_api_auth
 from core.logger import get_logger
 from .logic.notification_service import notification_service
 
 log = get_logger("Core:NotificationAPI")
 
 
-def _require_webhook_token(presented: str) -> None:
+async def _require_webhook_token(presented: str) -> None:
     """Validate the GitLab webhook token, failing closed when unset.
 
     Returns nothing on success; raises 503 when no token is provisioned (so the
@@ -20,13 +19,15 @@ def _require_webhook_token(presented: str) -> None:
     constant time to avoid leaking the secret via timing.
     """
     ctx = notification_service.ctx
-    configured = ctx.get_secret("gitlab_webhook_token") if ctx else None
+    # Vault read (sync hvac) off the event loop — this runs per webhook call.
+    configured = await ctx.aget_secret("gitlab_webhook_token") if ctx else None
     if not configured:
         raise HTTPException(
             status_code=503,
             detail="Webhook token not configured; ingress disabled",
         )
-    if not hmac.compare_digest((presented or "").strip(), str(configured)):
+    # Bytes-safe comparison: a non-ASCII header value must be a 401, not a 500.
+    if not constant_time_equals((presented or "").strip(), str(configured)):
         raise HTTPException(status_code=401, detail="Invalid webhook token")
 
 
@@ -82,7 +83,7 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
         if not ctx:
             raise HTTPException(status_code=503, detail="Notification service not initialized")
 
-        token_configured = bool(ctx.get_secret("gitlab_webhook_token"))
+        token_configured = bool(await ctx.aget_secret("gitlab_webhook_token"))
         return {
             "status": "ok",
             "service": "gitlab_notification_ingress",
@@ -111,7 +112,7 @@ def register_notification_fastapi_routes(fastapi_app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="Notification service not initialized")
 
         # Authenticate before doing any work (constant-time, fail-closed).
-        _require_webhook_token(x_gitlab_token)
+        await _require_webhook_token(x_gitlab_token)
 
         try:
             payload = await request.json()

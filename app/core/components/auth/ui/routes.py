@@ -9,6 +9,7 @@ from nicegui import ui
 from core.i18n import t
 
 from core.logger import get_logger
+from core.components.auth.logic.identity_link_service import IdentityLinkError
 from .login_ui import render_login_page
 from core.session import update_user_session
 
@@ -81,7 +82,16 @@ def register_auth_routes():
 
         # Identity 2.0: resolve the provider identity to the linked LOCAL
         # profile (creates/links User + UserIdentity; rewrites username/roles).
-        result = await provider_registry.link_identity(result)
+        # Fail closed: without a committed link there is no session — the
+        # provider's raw result names an EXTERNAL account and carries roles
+        # derived from IdP groups, neither of which may reach the session.
+        try:
+            result = await provider_registry.link_identity(result)
+        except IdentityLinkError as exc:
+            log.error(f"AUTH: /auth/complete — identity linking failed, login denied: {exc}")
+            ui.notify(t("auth.sso.handoff_failed"), type="negative")
+            ui.navigate.to("/login")
+            return
 
         update_user_session(
             {
@@ -158,8 +168,14 @@ def register_oidc_fastapi_routes(fastapi_app: FastAPI):
             # the cluster kv (shared DB) or in a redirect URL.
             from core.api.auth_api import create_sso_exchange_code
 
-            linked = await provider_registry.link_identity(result)
             oidc_provider.consume_result(state)  # burn the pending result
+            try:
+                linked = await provider_registry.link_identity(result)
+            except IdentityLinkError as exc:
+                # Fail closed: no exchange code (and so no token) for a login
+                # that is not bound to a local profile.
+                log.error(f"AUTH:OIDC: identity linking failed, login denied: {exc}")
+                return RedirectResponse("/login?error=link_failed")
 
             xc = await create_sso_exchange_code({
                 "username": linked.username,

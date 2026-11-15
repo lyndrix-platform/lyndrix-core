@@ -113,9 +113,9 @@ async def provider_health(
 def _serialize_config_field(cf) -> dict[str, Any]:
     """Serialize a ProviderConfigField for the API.
 
-    Unlike the NiceGUI (which pre-fills the editable input with the secret), the
-    API never returns sensitive values — it reports a ``configured`` flag instead,
-    and PATCH treats a blank sensitive value as "keep the stored one".
+    Like the NiceGUI settings page, the API never returns sensitive values — it
+    reports a ``configured`` flag instead, and PATCH treats a blank sensitive
+    value as "keep the stored one".
     """
     sensitive = bool(getattr(cf, "sensitive", False))
     return {

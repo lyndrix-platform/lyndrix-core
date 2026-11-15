@@ -239,6 +239,11 @@ class MessagingGateway:
 
     def register(self, adapter: GatewayAdapter) -> None:
         """Register a provider adapter and create its background retry worker."""
+        # Re-registration (plugin reload): stop the previous worker first, or
+        # its task keeps running — and retrying — against the replaced adapter.
+        previous = self._retry_workers.pop(adapter.provider_id, None)
+        if previous is not None:
+            previous.stop()
         self._adapters[adapter.provider_id] = adapter
         worker = _AdapterRetryWorker(adapter, max_retries=self._max_retries)
         self._retry_workers[adapter.provider_id] = worker

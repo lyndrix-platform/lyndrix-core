@@ -7,6 +7,7 @@ Run inside the lyndrix-core runtime:
 import pytest
 
 from config import settings
+from core.bus import bus
 from core.components.boot.logic.boot_service import (
     ACTION,
     CLUSTER_SERVICES,
@@ -35,7 +36,14 @@ def svc(monkeypatch):
     monkeypatch.setattr(db_instance, "connect_attempts", 0)
     monkeypatch.setattr(db_instance, "failure_reason", None)
     monkeypatch.setattr(db_instance, "was_connected", False)
-    return BootService()
+    service = BootService()
+    try:
+        yield service
+    finally:
+        # BootService subscribes itself in __init__; the bus delivers to every
+        # distinct subscriber, so a test instance must not stay behind.
+        bus.unsubscribe("iam:ready", service.on_core_ready)
+        bus.unsubscribe("iam:failed", service.on_iam_failed)
 
 
 def test_initial_snapshot_everything_waits_on_vault(svc):

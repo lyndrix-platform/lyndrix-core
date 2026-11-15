@@ -45,8 +45,11 @@ metadata:
 
 ## Core settings
 
-`LYNDRIX_TRUSTED_PROXIES=*` (the ingress pod IPs change) or the pod CIDR;
-`LYNDRIX_UI_ENGINE=react`.
+`LYNDRIX_TRUSTED_PROXIES=<pod CIDR of the ingress controller>` (the ingress pod
+IPs change, their CIDR does not); `LYNDRIX_UI_ENGINE=react`. `*` also works, but
+then every pod that can reach the core Service may forge `X-Forwarded-For` —
+use it only together with a NetworkPolicy that admits the ingress alone (the
+preflight reports `*` as a warning).
 
 ## Verify
 

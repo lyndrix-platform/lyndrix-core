@@ -8,7 +8,12 @@ terminationGracePeriodSeconds: 30    # ≥ LYNDRIX_DRAIN_SECONDS + uvicorn grace
 ```
 
 With `maxUnavailable: 0` a new pod must be ready (`/api/ready` → 200) before an old one is
-terminated. On termination the pod receives SIGTERM, drains (`/api/ready` → 503, the endpoint is
+terminated. Ready includes the plugins: a pod whose plugin directory is not shared (`emptyDir`)
+first pulls and activates the plugins recorded in `plugin_states` and answers 503
+`plugins:converging` until then (at most `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`, default 300 s) — so
+a rollout never replaces all old pods with pods that still serve 404 for every plugin route. Keep
+`progressDeadlineSeconds` well above that wait plus the image pull and boot time (the Kubernetes
+default 600 s fits the default wait). On termination the pod receives SIGTERM, drains (`/api/ready` → 503, the endpoint is
 removed), closes SSE streams and releases its leases — the same sequence as on Docker.
 
 Update the runner Deployment first, then the core Deployment:

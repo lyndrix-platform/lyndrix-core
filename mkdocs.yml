@@ -74,6 +74,7 @@ nav:
       - Operations:
           - Cluster status & preflight: ha/operations/cluster-status.md
           - Failover drills: ha/operations/failover-drills.md
+          - Cluster test plan: ha/operations/test-plan.md
           - Troubleshooting: ha/operations/troubleshooting.md
           - Backup & restore: ha/operations/backup-restore.md
       - For plugin developers: ha/plugin-development.md

@@ -1,6 +1,5 @@
 """LeaseKeeper transitions against a scripted coordinator."""
 import asyncio
-import time
 
 from core.components.cluster.logic.leases import LeaseKeeper
 
@@ -48,21 +47,26 @@ def test_acquired_fires_once_and_lost_on_takeover():
     asyncio.run(run())
 
 
-def test_unreachable_coordinator_fences_after_ttl():
-    coord, keeper = _keeper()
+def test_unreachable_coordinator_fences_before_the_ttl_is_over():
+    now = [1000.0]
+    coord = ScriptedCoordinator()
+    keeper = LeaseKeeper(coord, ttl=30, heartbeat_s=10, clock=lambda: now[0])
     events = []
     keeper.want("x", acquired=lambda: events.append("acq"), lost=lambda: events.append("lost"))
 
     async def run():
         await keeper.tick()
         coord.answers["x"] = RuntimeError("db down")
+        now[0] += 20
         await keeper.tick()
-        assert events == ["acq"] and keeper.holds("x")  # still ours within the TTL
-        keeper._held["x"] = time.monotonic() - 31  # pretend the last renewal was > TTL ago
+        assert events == ["acq"] and keeper.holds("x")  # still ours: 20 s since the last renewal
+        # ttl 30 s − margin 7.5 s: from 22.5 s on a peer may be about to take it
+        now[0] += 3
         await keeper.tick()
         assert events == ["acq", "lost"] and not keeper.holds("x")
 
     asyncio.run(run())
+    assert keeper.margin(30) == 7.5
 
 
 def test_late_registration_on_a_held_lease_fires_immediately():

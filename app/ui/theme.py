@@ -1,9 +1,12 @@
+import html
 import json
+import re
 
 from nicegui import ui
 
 from config import settings
 from core.theming import get_theme_engine
+from core.theming.schema import is_valid_css_color, is_valid_css_var_name
 from version import __version__
 
 class UIStyles:
@@ -194,6 +197,13 @@ def _metadata_script(title: str) -> str:
     """
 
 
+def _is_style_safe(value) -> bool:
+    """True when ``value`` cannot terminate the surrounding declaration or the
+    ``<style>`` element. Looser than ``is_safe_css_value`` on purpose: resolved
+    variables legitimately contain ``url("/api/themes/…")`` for the background."""
+    return isinstance(value, str) and not re.search(r'[<>{};\\\x00-\x1f]', value)
+
+
 def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_theme: str):
     # NiceGUI is dark-first: the --lx-* vars are consumed mostly under `.dark`,
     # and most callers use theme_pref='auto', so keep the dark palette as the
@@ -287,7 +297,15 @@ def _apply_style_overrides(theme_pref: str, body_bg: str, body_fg: str, active_t
             '--lx-badge-bg-opacity': '0.15',
             '--lx-badge-border-opacity': '0.30',
         }
-    _lx_var_lines = '\n'.join(f'                {k}: {v};' for k, v in _lx_vars.items())
+    # Defence in depth (SC-02): the engine already drops unsafe theme values, but
+    # nothing that could close the <style> block may be written here regardless
+    # of where a value came from.
+    _lx_var_lines = '\n'.join(
+        f'                {k}: {v};' for k, v in _lx_vars.items()
+        if is_valid_css_var_name(k) and _is_style_safe(v)
+    )
+    body_bg = body_bg if is_valid_css_color(body_bg) else '#0a0e1a'
+    body_fg = body_fg if is_valid_css_color(body_fg) else '#f0f6ff'
     ui.add_head_html(f'''
         <script>
             (function() {{
@@ -673,13 +691,13 @@ def apply_theme(theme_pref: str = 'auto', page_title: str | None = None, theme_i
     full_title = _full_title(page_title)
     asset_version = __version__
     ui.add_head_html(f'''
-        <title id="lyndrix-title">{full_title}</title>
+        <title id="lyndrix-title">{html.escape(full_title)}</title>
         <link id="lyndrix-favicon-32" rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32x32.png?v={asset_version}" />
         <link id="lyndrix-favicon-16" rel="icon" type="image/png" sizes="16x16" href="/assets/icons/favicon-16x16.png?v={asset_version}" />
         <link id="lyndrix-favicon-ico" rel="icon" href="/favicon.ico?v={asset_version}" />
         <link id="lyndrix-apple-touch" rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png?v={asset_version}" />
         <link id="lyndrix-manifest" rel="manifest" href="/site.webmanifest?v={asset_version}" />
-        <meta name="theme-color" content="{body_bg}" />
+        <meta name="theme-color" content="{html.escape(body_bg, quote=True)}" />
         <script>{_metadata_script(full_title)}</script>
     ''')
 

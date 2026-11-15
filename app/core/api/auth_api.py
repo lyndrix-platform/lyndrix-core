@@ -10,61 +10,15 @@ from pydantic import BaseModel
 
 from config import settings
 from core.api.security import ApiIdentity, require_api_auth, require_permission
-from core.components.vault.logic.rate_limit import SlidingWindowRateLimiter
+from core.components.vault.logic.rate_limit import SlidingWindowRateLimiter, normalize_client_address
 from core.logger import get_logger
 
 log = get_logger("Core:AuthAPI")
 
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
-# Per-(username, client IP) throttle for failed login attempts. Argon2's cost
-# makes an unthrottled login endpoint a CPU-exhaustion amplifier — 5 failures
-# within 60s locks that key out, independent of the vault unseal limiter.
-# Only FAILED attempts are recorded; a successful login never counts against
-# the budget.
-_LOGIN_MAX_FAILURES = 5
-_LOGIN_WINDOW_S = 60
-# Kept for the single-process fallback when the cluster KV is unavailable.
-_login_limiter = SlidingWindowRateLimiter(max_attempts=_LOGIN_MAX_FAILURES, window_seconds=_LOGIN_WINDOW_S)
-
-
-def _login_rate_limit_key(username: str, request: Request) -> str:
-    # request.client.host is the real client only when uvicorn trusts the proxy
-    # (LYNDRIX_TRUSTED_PROXIES → FORWARDED_ALLOW_IPS); otherwise it is the LB.
-    ip = request.client.host if request.client else "unknown"
-    return f"{username.strip().lower()}|{ip}"
-
-
-def _login_bucket(rl_key: str) -> tuple[str, int]:
-    """Fixed-window counter key shared by every core instance via the cluster KV."""
-    import time as _time
-
-    now = int(_time.time())
-    window_start = now - now % _LOGIN_WINDOW_S
-    return f"login:fail:{rl_key}:{window_start}", _LOGIN_WINDOW_S - (now - window_start)
-
-
-async def _login_retry_after(rl_key: str) -> int:
-    """Seconds until another attempt is allowed (0 = allowed). Cluster-wide counter;
-    falls back to the in-process sliding window when the KV is unreachable."""
-    from core.components.cluster.logic.cluster_service import cluster_service
-
-    key, remaining = _login_bucket(rl_key)
-    try:
-        count = int(await cluster_service.kv_get(key) or 0)
-    except Exception:
-        return _login_limiter.retry_after(rl_key)
-    return max(1, remaining) if count >= _LOGIN_MAX_FAILURES else 0
-
-
-async def _login_record_failure(rl_key: str) -> None:
-    from core.components.cluster.logic.cluster_service import cluster_service
-
-    key, remaining = _login_bucket(rl_key)
-    try:
-        await cluster_service.kv_incr(key, ttl=max(1, remaining))
-    except Exception:
-        _login_limiter.record(rl_key)
+# Login throttling lives in core.components.auth.logic.login_guard — the one
+# choke point shared with HTTP Basic and the NiceGUI login form.
 
 
 # Per-user background images live on the filesystem (no DB change). Existence on
@@ -123,6 +77,19 @@ class AuthConfigUpdate(BaseModel):
 # Vault keys whose values must never be returned in plaintext over the API.
 _SECRET_CONFIG_KEYS = {"ldap_bind_password", "oidc_client_secret"}
 
+# endpoint field → the stored secret the core SENDS to that endpoint on the
+# next login (LDAP service bind / OIDC token request). Whoever may re-point the
+# endpoint must also know the secret — otherwise changing the URL is a way to
+# have a secret delivered that the API never shows (AZ-14).
+_SECRET_DESTINATIONS = {
+    "ldap_url": "ldap_bind_password",
+    "oidc_issuer": "oidc_client_secret",
+}
+
+
+def _same_endpoint(a: str, b: str) -> bool:
+    return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
+
 
 class LoginResponse(BaseModel):
     token: str
@@ -173,6 +140,15 @@ def _describe_client(request: Request) -> str:
     return f"{browser} on {os_name}" if os_name else browser
 
 
+def _link_failed_response() -> HTTPException:
+    """503 for a login whose identity could not be linked to a local profile."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Login is temporarily unavailable: your account could not be linked to a local profile. Please try again.",
+        headers={"Retry-After": "2"},
+    )
+
+
 @auth_router.post("/login", response_model=LoginResponse, summary="Obtain a session token")
 async def login(payload: LoginRequest, request: Request):
     """
@@ -182,25 +158,34 @@ async def login(payload: LoginRequest, request: Request):
     UserApiKey row and returns the raw key once; the React frontend stores it
     as a bearer token. Providers run credential checks off the event loop.
 
-    Rate-limited per (username, client IP): more than 5 FAILED attempts within
-    60s reject with 429 before the provider chain (and its Argon2 cost) ever
-    runs — an unthrottled login is a CPU-exhaustion amplifier.
+    Throttled through ``login_guard`` (shared with HTTP Basic and the NiceGUI
+    form): after 5 FAILED attempts within 60s for one account from one address
+    — and on the account-wide / per-address budgets — the answer is 429 +
+    ``Retry-After`` before any provider (and its Argon2 cost) runs. 503 +
+    ``Retry-After`` means "not evaluated, try again": every verification slot
+    was busy, or the identity could not be linked.
     """
+    from core.components.auth.logic.identity_link_service import IdentityLinkError
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
     from core.components.auth.logic.providers.registry import provider_registry
     from core.components.auth.logic.api_key_service import api_key_service
 
-    rl_key = _login_rate_limit_key(payload.username, request)
-    retry = await _login_retry_after(rl_key)
-    if retry > 0:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(retry)},
+    try:
+        result = await provider_registry.authenticate(
+            payload.username, payload.password, client_ip=client_host(request)
         )
-
-    result = await provider_registry.authenticate(payload.username, payload.password)
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+    except IdentityLinkError:
+        # The credentials were fine but no local profile could be bound to the
+        # login. Deny it (no token for an unlinked identity) without counting a
+        # failed attempt; the client may simply retry.
+        raise _link_failed_response()
     if result is None:
-        await _login_record_failure(rl_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -286,29 +271,94 @@ async def list_auth_providers():
     return {"status": "ok", "providers": providers}
 
 
+# Every /oidc/start stores a login state for five minutes (a database row in
+# cluster mode) without any authentication: bound how many a client — and all
+# clients together — can create. Generous for people clicking "Sign in with …".
+_OIDC_START_PER_ADDRESS = SlidingWindowRateLimiter(max_attempts=30, window_seconds=60)
+_OIDC_START_GLOBAL = SlidingWindowRateLimiter(max_attempts=600, window_seconds=60)
+
+
+def _safe_next_path(next_path: str) -> str:
+    """The in-app path to land on after the login, or ``/``.
+
+    ``//host`` and ``/\\host`` are other SITES to a browser, and browsers drop
+    tabs/newlines inside a URL (``/<tab>/host`` becomes ``//host``) — none of
+    them may travel through the login as "a path".
+    """
+    candidate = next_path or ""
+    if (
+        not candidate.startswith("/")
+        or candidate.startswith(("//", "/\\"))
+        or any(ord(ch) < 0x20 or ch == "\x7f" for ch in candidate)
+    ):
+        return "/"
+    return candidate
+
+
+def _validated_redirect_uri(redirect_uri: str) -> str:
+    """``redirect_uri`` if it is a plain URL on an allowed origin, else 400.
+
+    The one-time login code is appended to this URL. Its origin must be in
+    CORS_ALLOWED_ORIGINS, and nothing in it may make a browser or a parser go
+    elsewhere or carry the code along: no userinfo (``allowed@evil``), no
+    backslash/whitespace tricks, no query (an open redirect on an allowed
+    origin would forward the code) and no fragment.
+    """
+    from urllib.parse import urlsplit
+
+    def reject(reason: str) -> HTTPException:
+        return HTTPException(status_code=400, detail=f"redirect_uri {reason}")
+
+    raw = redirect_uri or ""
+    if any(ord(ch) <= 0x20 or ch in "\\\x7f" for ch in raw):
+        raise reject("must not contain whitespace, control characters or backslashes")
+    try:
+        parsed = urlsplit(raw)
+        has_userinfo = parsed.username is not None or parsed.password is not None
+    except ValueError:
+        raise reject("is not a valid URL")
+    if not parsed.scheme or not parsed.netloc:
+        raise reject("must be an absolute URL")
+    if has_userinfo or "@" in parsed.netloc:
+        raise reject("must not contain credentials")
+    if parsed.query or parsed.fragment or "?" in raw or "#" in raw:
+        raise reject("must not contain a query or fragment")
+    origin = f"{parsed.scheme}://{parsed.netloc}".lower()
+    if origin not in {str(o).rstrip("/").lower() for o in settings.CORS_ALLOWED_ORIGINS}:
+        raise reject("origin not allowed")
+    return raw
+
+
 @auth_router.get("/oidc/start", summary="Begin the OIDC flow for the React SPA")
-async def oidc_start_react(redirect_uri: str, next: str = "/"):
+async def oidc_start_react(request: Request, redirect_uri: str, next: str = "/"):
     """Redirect the browser to the IdP (PKCE + state bound to this flow).
 
     ``redirect_uri`` is the SPA's absolute /auth/callback URL; its origin MUST
-    be in CORS_ALLOWED_ORIGINS (open-redirect protection). ``next`` is the
-    in-app path to land on after the exchange.
+    be in CORS_ALLOWED_ORIGINS and it must carry no credentials, query or
+    fragment (open-redirect / code-leak protection). ``next`` is the in-app
+    path to land on after the exchange. Rate-limited per client address (429).
     """
-    from urllib.parse import urlparse
     from fastapi.responses import RedirectResponse
-    from config import settings
+    from core.components.auth.logic.login_guard import client_host
     from core.components.auth.logic.providers.registry import provider_registry
 
-    parsed = urlparse(redirect_uri)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    if origin not in set(settings.CORS_ALLOWED_ORIGINS):
-        raise HTTPException(status_code=400, detail="redirect_uri origin not allowed")
-    if not next.startswith("/"):
-        next = "/"
+    redirect_uri = _validated_redirect_uri(redirect_uri)
+    next = _safe_next_path(next)
 
     provider = provider_registry.get("oidc")
     if provider is None or not provider.is_configured():
         raise HTTPException(status_code=404, detail="No OIDC provider configured")
+
+    # Only now a state would be created — count it (per address first, so one
+    # client cannot use up the global budget of everybody else).
+    retry = _OIDC_START_PER_ADDRESS.hit(normalize_client_address(client_host(request)))
+    retry = retry or _OIDC_START_GLOBAL.hit("all")
+    if retry > 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(retry)},
+        )
 
     url = await provider.build_login_url(
         flow="react", redirect=f"{redirect_uri}|{next}"
@@ -437,6 +487,15 @@ def update_auth_config(
     the stored key (same semantics as the NiceGUI page)."""
     from core.components.auth.logic.auth_config import auth_config_service, _SPEC_MAP
 
+    # Only the documented fields: anything else would be merged into the
+    # core/auth secret unseen (and unvalidated).
+    unknown = sorted(k for k in payload.updates if k not in _SPEC_MAP)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown auth config key(s): {', '.join(unknown)} — see GET /api/auth/config for the fields",
+        )
+
     effective = auth_config_service.get_all_effective()
 
     # Reject up-front if any requested field is env-locked.
@@ -448,6 +507,35 @@ def update_auth_config(
         raise HTTPException(
             status_code=409,
             detail={"error": "env_locked", "locked_fields": sorted(locked)},
+        )
+
+    # Re-pointing an endpoint that receives a stored secret needs that secret
+    # in the same request (the shell re-sends unchanged fields — only a real
+    # change of the address counts, and clearing it sends the secret nowhere).
+    for endpoint_key, secret_key in _SECRET_DESTINATIONS.items():
+        if endpoint_key not in payload.updates:
+            continue
+        new_endpoint = str(payload.updates[endpoint_key] or "").strip()
+        current_endpoint, _ = effective[endpoint_key]
+        secret_value, secret_source = effective[secret_key]
+        if not new_endpoint or not secret_value or _same_endpoint(new_endpoint, current_endpoint):
+            continue
+        if str(payload.updates.get(secret_key) or "").strip():
+            continue  # re-entered: the caller knows it
+        secret_label, endpoint_label = _SPEC_MAP[secret_key].label, _SPEC_MAP[endpoint_key].label
+        if secret_source == "env":
+            hint = (
+                f"the {secret_label} comes from the environment ({_SPEC_MAP[secret_key].env_var}); "
+                f"change {_SPEC_MAP[endpoint_key].env_var} there as well"
+            )
+        else:
+            hint = f"enter the {secret_label} ('{secret_key}') again in the same request"
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Changing the {endpoint_label} ('{endpoint_key}') would send the stored "
+                f"{secret_label} to the new address — {hint}."
+            ),
         )
 
     # Skip blank sensitive values so a masked secret is kept, not deleted.
@@ -484,6 +572,7 @@ def reload_auth_providers(identity: ApiIdentity = Depends(require_permission("ad
 @auth_router.get("/me", summary="Current user profile")
 def me(identity: ApiIdentity = Depends(require_api_auth)):
     """Returns full profile for the authenticated user (sync DB read → threadpool)."""
+    from core.components.auth.logic.models import email_is_trusted
     from core.components.auth.logic.user_service import user_service
 
     user = user_service.get_by_username(identity.username)
@@ -492,6 +581,7 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
             "username": identity.username,
             "full_name": None,
             "email": None,
+            "email_trusted": False,
             "roles": identity.roles,
             "groups": [],
             "extra_permissions": identity.extra_permissions,
@@ -502,6 +592,7 @@ def me(identity: ApiIdentity = Depends(require_api_auth)):
         "username": str(user.username),
         "full_name": str(user.full_name or "") or None,
         "email": str(user.email or "") or None,
+        "email_trusted": email_is_trusted(user),
         "roles": list(user.roles or []),
         "groups": list(user.groups or []),
         "extra_permissions": list(user.extra_permissions or []),
@@ -524,14 +615,18 @@ def my_access(identity: ApiIdentity = Depends(require_api_auth)):
     from core.components.auth.logic import access_service
     from core.components.auth.logic.user_service import user_service
 
-    is_superadmin = identity.is_system or ("superadmin" in identity.roles)
+    # What THIS credential may do: a scope-restricted key reports its scoped
+    # view (and is never "superadmin"), a session the owner's full view.
+    is_superadmin = identity.is_superadmin
     effective = access_service.get_effective_permissions(identity.username)
+    if identity.is_scoped:
+        effective = frozenset(p for p in effective if identity.allows(p))
 
     user = user_service.get_by_username(identity.username)
     groups = list(getattr(user, "groups", None) or []) if user else []
 
     def _allowed(perm: str) -> bool:
-        return is_superadmin or access_service.has_permission(effective, perm)
+        return identity.allows(perm)
 
     plugins: Dict[str, dict] = {}
     try:

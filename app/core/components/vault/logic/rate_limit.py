@@ -6,11 +6,41 @@ identity (client IP or NiceGUI client id). Keeping the state keyed per source
 avoids the cross-session lockout problem of a single global counter.
 """
 
+import ipaddress
 import time
 from collections import defaultdict
+from typing import Optional
+
+
+def normalize_client_address(host: Optional[str]) -> str:
+    """Limiter key for a client address (``request.client.host``).
+
+    * IPv6 is reduced to its /64 network: one subscriber controls a whole /64,
+      so per-address budgets keyed on single addresses would be free to dodge.
+    * An IPv4-mapped IPv6 address counts as the IPv4 address.
+    * Anything that is not an IP address (unix socket, test client) is kept as
+      an opaque, length-bounded name; a missing address is ``"unknown"``.
+
+    The address is whatever uvicorn resolved from the trusted proxies
+    (``LYNDRIX_TRUSTED_PROXIES``); this function never looks at headers itself.
+    """
+    raw = (host or "").strip()
+    if not raw:
+        return "unknown"
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw[:64].lower()
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network((ip, 64), strict=False))
+    return str(ip)
 
 
 class SlidingWindowRateLimiter:
+    _MAX_KEYS = 10000
+
     def __init__(self, max_attempts: int, window_seconds: int) -> None:
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
@@ -31,7 +61,15 @@ class SlidingWindowRateLimiter:
 
     def record(self, key: str) -> None:
         """Record an attempt for *key*."""
-        self._attempts[key].append(time.time())
+        now = time.time()
+        self._attempts[key].append(now)
+        if len(self._attempts) > self._MAX_KEYS:
+            # Keys are client-chosen (addresses): forget the idle ones so a
+            # caller rotating them cannot grow this table without bound.
+            for stale in [k for k, ts in self._attempts.items() if not ts or now - ts[-1] >= self.window_seconds]:
+                del self._attempts[stale]
+            for oldest in list(self._attempts)[: max(0, len(self._attempts) - self._MAX_KEYS)]:
+                del self._attempts[oldest]
 
     def hit(self, key: str) -> int:
         """
@@ -46,5 +84,29 @@ class SlidingWindowRateLimiter:
         return 0
 
 
-# Shared limiter for Vault unseal/init attempts (per source identity).
+# Vault init/unseal attempts are unauthenticated and each one costs an Argon2
+# key derivation. Two budgets:
+#   * per source (client address): 5 per minute, as before;
+#   * all sources together: 20 per minute — rotating addresses (or a forged
+#     X-Forwarded-For) cannot multiply the attempts.
+# The per-source budget is a quarter of the global one on purpose: one address
+# — e.g. everything behind a load balancer the core does not trust — can never
+# use up the global budget, so the operator always gets an attempt in from
+# another address (a port-forward arrives as 127.0.0.1).
 unseal_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60)
+unseal_global_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60)
+_ALL_SOURCES = "all"
+
+
+def unseal_retry_after(source: str) -> int:
+    """Admit (and count) one init/unseal attempt from ``source``.
+
+    Returns 0 when admitted, else the seconds to wait. A refused attempt is
+    not counted against either budget.
+    """
+    retry = unseal_limiter.retry_after(source) or unseal_global_limiter.retry_after(_ALL_SOURCES)
+    if retry > 0:
+        return retry
+    unseal_limiter.record(source)
+    unseal_global_limiter.record(_ALL_SOURCES)
+    return 0

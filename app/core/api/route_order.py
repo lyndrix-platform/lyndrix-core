@@ -17,8 +17,19 @@ from core.logger import get_logger
 log = get_logger("Core:RouteOrder")
 
 
+def path_under_prefix(path: str, prefix: str) -> bool:
+    """True when ``path`` is ``prefix`` itself or lies below it.
+
+    A plain ``startswith`` also matches siblings that merely share the leading
+    characters (``/api/plugins/lyndrix.plugin.ai`` vs ``…ai_assistant``), so the
+    match must end at a ``/`` boundary.
+    """
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
 def move_routes_before_catchall(app, prefix: str) -> int:
-    """Move every route whose path starts with ``prefix`` to just before the
+    """Move every route at or below ``prefix`` to just before the
     NiceGUI root catch-all (``path == ""``), preserving their relative order.
 
     Returns the number of routes moved. If no catch-all is found (NiceGUI absent
@@ -27,7 +38,7 @@ def move_routes_before_catchall(app, prefix: str) -> int:
     shadows them.
     """
     routes = list(app.router.routes)
-    target = [r for r in routes if getattr(r, "path", "").startswith(prefix)]
+    target = [r for r in routes if path_under_prefix(getattr(r, "path", ""), prefix)]
     if not target:
         return 0
 

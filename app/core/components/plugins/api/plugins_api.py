@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from core.api.security import ApiIdentity, require_permission
 from core.bus import bus
 from core.logger import get_logger
+from core.components.plugins.logic import git_providers
 
 log = get_logger("Core:PluginsAPI")
 
@@ -151,7 +152,7 @@ async def enable_plugin(
     mgr = _manager()
     if plugin_id not in mgr.registry:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-    ok = mgr.toggle_module(plugin_id, True)
+    ok = await mgr.set_module_active(plugin_id, True)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to enable '{plugin_id}'")
     bus.emit("plugin:state_changed", {"plugin_id": plugin_id, "is_active": True})
@@ -167,7 +168,7 @@ async def disable_plugin(
     mgr = _manager()
     if plugin_id not in mgr.registry:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
-    ok = mgr.toggle_module(plugin_id, False)
+    ok = await mgr.set_module_active(plugin_id, False)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to disable '{plugin_id}'")
     bus.emit("plugin:state_changed", {"plugin_id": plugin_id, "is_active": False})
@@ -206,13 +207,29 @@ async def install_plugin(
     # background task afterwards, where a raised error would only be logged.
     try:
         ref = svc.validate_repo_url(payload.url)
+        git_providers.validate_ref_name(payload.version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    repo_name = ref.repo.replace("-", "_")
+    # Refuse a duplicate up front instead of opening an operation nothing will
+    # ever work on: the install would short-circuit ("already installed"), and
+    # a second operation for a repo that is being installed right now would
+    # never receive a report (reports attach to the newest running operation).
+    if (svc.plugin_dir / repo_name / "entrypoint.py").exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Plugin '{ref.repo}' is already installed — use upgrade to change its version.",
+        )
+    if await asyncio.to_thread(_tracker().has_running, repo_name=repo_name):
+        raise HTTPException(
+            status_code=409,
+            detail=f"An install/upgrade of '{ref.repo}' is already in progress — wait for it to finish.",
+        )
     log.info(f"API: Install queued for '{payload.url}' v{payload.version} by '{identity.username}'.")
     # Cluster-wide operation (core 1.8): every live instance reports its outcome,
     # the operator gets one notification when all did.
     op_id = await asyncio.to_thread(
-        _tracker().start, plugin_id=None, repo_name=ref.repo.replace("-", "_"), action="install",
+        _tracker().start, plugin_id=None, repo_name=repo_name, action="install",
         version=payload.version, requested_by=identity.username,
     )
     background_tasks.add_task(svc.install_plugin, payload.url, payload.version, False)
@@ -237,6 +254,7 @@ async def upgrade_plugin(
     svc = _plugin_service()
     try:
         svc.validate_repo_url(repo_url)
+        git_providers.validate_ref_name(payload.version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     log.info(f"API: Upgrade queued for '{plugin_id}' v{payload.version} by '{identity.username}'.")
@@ -384,7 +402,8 @@ async def get_plugin_settings(
     schema = [f.model_dump() for f in schema_fields]
 
     # read_secret_dict returns {} for "no settings yet" and logs real Vault errors.
-    values: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
+    # Sync hvac call → off the event loop.
+    values: Dict[str, Any] = await asyncio.to_thread(read_secret_dict, f"plugins/{plugin_id}/settings")
 
     for field in schema_fields:
         if field.kind == "action":
@@ -418,7 +437,8 @@ def coerce_plugin_settings(schema_fields, values: Dict[str, Any], existing: Dict
 
     Raises ``HTTPException(400)`` for unknown keys, structured values, action
     fields (buttons, not values), bad ints and select values outside ``options``.
-    Blank secrets keep their stored value.
+    Blank secrets keep their stored value; a blank secret that has no stored
+    value is left out of the result (never persisted as ``""``).
     """
     schema_by_key = {f.key: f for f in schema_fields}
     coerced: Dict[str, Any] = {}
@@ -434,8 +454,12 @@ def coerce_plugin_settings(schema_fields, values: Dict[str, Any], existing: Dict
             raise HTTPException(status_code=400, detail=f"'{key}' must be a scalar value, not an object/array")
         if field.kind == "secret":
             new_val = "" if raw is None else str(raw)
-            # Blank submission means "unchanged" — keep the stored secret.
-            coerced[key] = new_val if new_val.strip() else existing.get(key, "")
+            # Blank submission means "unchanged" (the GET masks secrets): keep the
+            # stored value, and when there is none do not invent an empty one.
+            if new_val.strip():
+                coerced[key] = new_val
+            elif key in existing:
+                coerced[key] = existing[key]
             continue
         if field.kind == "bool":
             coerced[key] = bool(raw) if isinstance(raw, bool) else str(raw).lower() in ("1", "true", "yes", "on")
@@ -459,7 +483,9 @@ async def update_plugin_settings(
     payload: PluginSettingsUpdate,
     identity: ApiIdentity = Depends(require_permission("admin:write")),
 ):
-    from core.components.vault.logic.kv_helper import read_secret_dict, write_secret_dict
+    from core.components.vault.logic.kv_helper import (
+        VaultReadError, VaultWriteError, update_secret_dict,
+    )
 
     mgr = _manager()
     entry = mgr.registry.get(plugin_id)
@@ -469,13 +495,33 @@ async def update_plugin_settings(
     manifest = entry["manifest"]
     schema_fields = getattr(manifest, "settings_schema", [])
 
-    # Existing stored values — used to preserve secrets that are submitted blank
-    # (the GET masks them, so a round-trip without retyping must not wipe them).
-    existing: Dict[str, Any] = read_secret_dict(f"plugins/{plugin_id}/settings")
-    coerced = coerce_plugin_settings(schema_fields, payload.values, existing)
+    # Validate once against "nothing stored" so a bad payload is a 400 even
+    # while Vault is down (and before any Vault round trip).
+    coerce_plugin_settings(schema_fields, payload.values, {})
 
-    if not write_secret_dict(f"plugins/{plugin_id}/settings", coerced):
-        raise HTTPException(status_code=503, detail="Vault unavailable — settings were not persisted")
+    coerced: Dict[str, Any] = {}
+
+    def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        # Runs with the values actually stored (again on a CAS retry): blank
+        # secrets keep them, and keys the client did not submit are preserved —
+        # the PUT is a merge, not a replacement of the whole secret.
+        coerced.clear()
+        coerced.update(coerce_plugin_settings(schema_fields, payload.values, existing))
+        return {**existing, **coerced}
+
+    try:
+        # Strict read + check-and-set, off the event loop (sync hvac).
+        await asyncio.to_thread(update_secret_dict, f"plugins/{plugin_id}/settings", _merge)
+    except VaultReadError as exc:
+        # Stored values unknown → writing now would wipe masked secrets.
+        log.error(f"API: Settings for '{plugin_id}' not saved — Vault read failed: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Vault unavailable — current settings could not be read, nothing was saved",
+        ) from exc
+    except VaultWriteError as exc:
+        log.error(f"API: Settings for '{plugin_id}' not saved — Vault write failed: {exc}")
+        raise HTTPException(status_code=503, detail="Vault unavailable — settings were not persisted") from exc
 
     log.info(f"API: Settings updated for '{plugin_id}' by '{identity.username}'.")
     # Every instance (this one included) re-reads the plugin's settings — the

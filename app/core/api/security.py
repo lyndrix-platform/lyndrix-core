@@ -12,11 +12,17 @@ caller:
                          If neither is configured the method is DISABLED: no empty
                          or implicit key is ever accepted, so a fresh install with
                          the key unset is simply inaccessible via API key.
-  2. HTTP Basic       — ``Authorization: Basic <base64(user:pass)>`` validated
-                         against the local IAM via ``auth_service.authenticate_user``.
-  3. Session cookie   — an already-authenticated NiceGUI dashboard session
-                         (``core.session.is_authenticated``), when the request is
-                         processed inside NiceGUI's storage context.
+  2. Per-user API key — same headers, a ``lyk_…`` key or session token from the
+                         key store (``api_key_service``).
+  3. HTTP Basic       — ``Authorization: Basic <base64(user:pass)>`` validated
+                         against the LOCAL accounts via
+                         ``auth_service.verify_local_login``. Throttled like the
+                         login form (429/503 + ``Retry-After`` instead of 401
+                         when an attempt is not evaluated), only on routes that
+                         REQUIRE authentication, and switched off with
+                         ``LYNDRIX_API_BASIC_AUTH=false``. Not advertised in
+                         ``WWW-Authenticate`` — a browser must never prompt for
+                         it and then replay the password with every request.
 
 Usage in a route::
 
@@ -45,6 +51,9 @@ from core.logger import get_logger
 
 log = get_logger("Core:ApiSecurity")
 
+# Retry-After (seconds) when the API-key store cannot be read (database down).
+AUTH_BACKEND_RETRY_AFTER_S = 5
+
 _VAULT_PATH = "core/settings"
 _VAULT_MOUNT = "lyndrix"
 _VAULT_KEY = "system_api_key"
@@ -54,16 +63,33 @@ _ENV_VAR = "LYNDRIX_SYSTEM_API_KEY"
 # request does not trigger a fresh hvac round-trip every time. Env-var resolution
 # is not cached (cheap + always authoritative). Bust explicitly on settings update.
 _KEY_CACHE_TTL_SECONDS = 30.0
+# After a failed Vault read the next attempt is allowed this soon (retry throttle).
+_KEY_ERROR_RETRY_SECONDS = 2.0
 _key_cache: dict = {"value": None, "expires": 0.0}
+
+
+def constant_time_equals(presented: Optional[str], expected: Optional[str]) -> bool:
+    """Timing-safe comparison of two secrets given as text — never raises.
+
+    ``hmac.compare_digest`` accepts ``str`` only when both are pure ASCII and
+    raises ``TypeError`` otherwise. Header values are attacker-controlled, so a
+    single non-ASCII byte in ``X-API-Key`` turned every route (public ones
+    included) into a 500. Comparing the UTF-8 bytes has no such precondition.
+    """
+    if presented is None or expected is None:
+        return False
+    return hmac.compare_digest(
+        str(presented).encode("utf-8", "surrogatepass"),
+        str(expected).encode("utf-8", "surrogatepass"),
+    )
 
 
 def invalidate_system_api_key_cache() -> None:
     """Drop the cached Vault key so the next resolve re-reads from Vault.
 
-    Call after the system API key is changed via the settings UI/API.
-    TODO(agent): wire this into the settings-write path in
-    core/components/settings (out of this unit's scope) so the change is
-    instant rather than bounded by the cache TTL.
+    Called by ``system_config_service.apply`` whenever the key is written or
+    cleared, and on every peer instance through the bridged
+    ``settings:changed`` event, so a rotated key stops working at once.
     """
     _key_cache["value"] = None
     _key_cache["expires"] = 0.0
@@ -90,6 +116,21 @@ class ApiIdentity:
     # When set (non-None), the credential restricts access to this subset of
     # permissions (used by per-user API keys with explicit scopes).
     key_scopes: Optional[List[str]] = None
+    # Row id of the presented per-user key (None for other methods) — lets a
+    # route tell "this very credential" from the owner's other keys.
+    key_id: Optional[int] = None
+
+    @property
+    def is_scoped(self) -> bool:
+        """True for a credential that is limited to ``key_scopes``."""
+        return self.key_scopes is not None
+
+    @property
+    def is_superadmin(self) -> bool:
+        """The unbounded tier: the system key, or an UNSCOPED credential of an
+        account with the ``superadmin`` flag. A scoped key of such an account
+        is bounded by its scopes and never counts as superadmin."""
+        return self.is_system or ("superadmin" in (self.roles or []) and not self.is_scoped)
 
     def effective_permissions(self) -> frozenset:
         """The owner's effective permission set (resolving lazily if needed)."""
@@ -108,29 +149,29 @@ class ApiIdentity:
         Return True if this identity is authorized for ``permission``.
 
         - The master system key bypasses all permission checks.
-        - The ``superadmin`` system flag bypasses permission checks (break-glass).
+        - A scoped per-user key FIRST requires the permission to be within its
+          ``key_scopes`` (per-plugin fallback included) — whoever the owner
+          is. Scopes are the boundary of the credential, so they are applied
+          before the superadmin bypass: a superadmin's "read-only" key is
+          read-only.
+        - The ``superadmin`` system flag then bypasses the owner's permission
+          set (break-glass).
         - Otherwise the precomputed effective set decides, including the
           per-plugin fallback (global api:read/write satisfies plugin:*:api:*).
-        - A scoped per-user key additionally requires the permission to be
-          within its ``key_scopes`` (same fallback semantics).
         """
         if self.is_system:
-            return True
-
-        if "superadmin" in self.roles:
             return True
 
         try:
             from core.components.auth.logic import access_service
 
-            base_allowed = access_service.has_permission(
-                self.effective_permissions(), permission
-            )
-            if self.key_scopes is not None:
-                return base_allowed and access_service.has_permission(
-                    frozenset(self.key_scopes), permission
-                )
-            return base_allowed
+            if self.key_scopes is not None and not access_service.has_permission(
+                frozenset(self.key_scopes), permission
+            ):
+                return False
+            if "superadmin" in self.roles:
+                return True
+            return access_service.has_permission(self.effective_permissions(), permission)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(f"API authz check failed for '{permission}': {exc}")
             return False
@@ -158,18 +199,31 @@ def resolve_system_api_key() -> Optional[str]:
 
     value: Optional[str] = None
     try:
+        import hvac.exceptions
+
         from core.services import vault_instance
 
-        if vault_instance.is_connected:
+        if not vault_instance.is_connected:
+            # Vault state unknown (sealed / not up yet): answer "not configured"
+            # for THIS call only. Caching it would keep API-key auth off for the
+            # whole TTL after Vault is back.
+            return None
+        try:
             resp = vault_instance.client.secrets.kv.v2.read_secret_version(
                 path=_VAULT_PATH, mount_point=_VAULT_MOUNT
             )
-            vault_val = (resp.get("data", {}).get("data", {}) or {}).get(_VAULT_KEY)
+            vault_val = ((resp.get("data") or {}).get("data") or {}).get(_VAULT_KEY)
             if vault_val and str(vault_val).strip():
                 value = str(vault_val).strip()
+        except hvac.exceptions.InvalidPath:
+            value = None  # secret really absent → a cacheable "not configured"
     except Exception:
-        # Vault unavailable / key absent — fall through to "not configured".
-        value = None
+        # Read error (5xx, timeout, sealed): the key is UNKNOWN, not absent.
+        # Only throttle the retry briefly so a Vault outage does not cost one
+        # round trip per request — never hold "no key" for the full TTL.
+        _key_cache["value"] = None
+        _key_cache["expires"] = now + _KEY_ERROR_RETRY_SECONDS
+        return None
 
     _key_cache["value"] = value
     _key_cache["expires"] = now + _KEY_CACHE_TTL_SECONDS
@@ -216,7 +270,7 @@ def _try_api_key(request: Request) -> Optional[ApiIdentity]:
     if not configured:
         return None  # method disabled when no key is set
 
-    if hmac.compare_digest(presented.strip(), configured):
+    if constant_time_equals(presented.strip(), configured):
         return ApiIdentity(
             method="api_key",
             username="system",
@@ -236,39 +290,55 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
         from core.components.auth.logic.api_key_service import api_key_service
 
         resolved = api_key_service.verify(presented.strip())
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
+        # The key store (database) did not answer — that says nothing about the
+        # key. A 401 here made the React shell drop its token and send every
+        # signed-in user to the login page on each database blip (staging
+        # 2026-11-15, MariaDB restart). 503 + Retry-After lets clients retry.
         log.warning(f"API user-key check failed: {exc}")
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is temporarily unavailable (key store not reachable). Try again shortly.",
+            headers={"Retry-After": str(AUTH_BACKEND_RETRY_AFTER_S)},
+        ) from exc
 
     if resolved is None:
+        # Unknown, revoked, expired session — or the owner no longer exists.
         return None
-
-    roles: List[str] = []
-    extra: List[str] = []
-    try:
-        from core.components.auth.logic.user_service import user_service
-
-        owner = user_service.get_by_username(resolved.username)
-        if owner is not None:
-            roles = list(getattr(owner, "roles", None) or [])
-            extra = list(getattr(owner, "extra_permissions", None) or [])
-    except Exception:
-        pass
 
     return ApiIdentity(
         method="user_api_key",
         username=resolved.username,
-        roles=roles,
-        extra_permissions=extra,
+        roles=list(resolved.owner_roles),
+        extra_permissions=list(resolved.owner_extra_permissions),
         permissions=_resolve_effective(resolved.username),
         key_scopes=resolved.scopes or None,
+        key_id=resolved.id,
     )
 
 
+def basic_auth_enabled() -> bool:
+    """Whether HTTP Basic is accepted on API routes (``LYNDRIX_API_BASIC_AUTH``)."""
+    try:
+        from config import settings
+
+        return bool(getattr(settings, "LYNDRIX_API_BASIC_AUTH", True))
+    except Exception:  # pragma: no cover - defensive
+        return True
+
+
 def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
-    """Validate HTTP Basic credentials against the local IAM."""
+    """Validate HTTP Basic credentials against the local IAM.
+
+    Every attempt is one throttled login attempt (``login_guard``). When it is
+    not evaluated — too many failures, or no verification slot — this raises
+    429/503 with ``Retry-After``: answering 401 would tell a correctly
+    configured client that its password is wrong.
+    """
     auth = request.headers.get("Authorization", "")
     if not auth.lower().startswith("basic "):
+        return None
+    if not basic_auth_enabled():
         return None
 
     try:
@@ -280,10 +350,18 @@ def _try_basic_auth(request: Request) -> Optional[ApiIdentity]:
         return None
     username, password = raw.split(":", 1)
 
+    from core.components.auth.logic.login_guard import LoginRejected, client_host
+
     try:
         from core.components.auth.logic.auth_service import auth_service
 
-        user = auth_service.authenticate_user(username, password)
+        user = auth_service.verify_local_login(username, password, client_host(request))
+    except LoginRejected as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except Exception as exc:  # pragma: no cover - defensive
         log.warning(f"API basic-auth check failed: {exc}")
         return None
@@ -325,15 +403,23 @@ def _try_session(request: Request) -> Optional[ApiIdentity]:
     return None
 
 
-def authenticate_request(request: Request) -> Optional[ApiIdentity]:
+def authenticate_request(request: Request, *, allow_basic: bool = True) -> Optional[ApiIdentity]:
     """
     Attempt every supported auth method and return the first identity found.
 
-    Returns ``None`` when the request carries no valid credentials.
+    Returns ``None`` when the request carries no valid credentials. A throttled
+    HTTP Basic attempt raises ``HTTPException`` (429/503 + ``Retry-After``).
+
+    ``allow_basic=False`` skips HTTP Basic: routes that also answer anonymous
+    callers must not check passwords, or they become an oracle that tells
+    "right" from "wrong" without ever answering 401.
     """
     # TODO(agent): re-add a session method here once React has a proper
     # JWT/cookie session that works outside the NiceGUI storage context.
-    for method in (_try_api_key, _try_user_api_key, _try_basic_auth):
+    methods = [_try_api_key, _try_user_api_key]
+    if allow_basic:
+        methods.append(_try_basic_auth)
+    for method in methods:
         identity = method(request)
         if identity is not None:
             return identity
@@ -355,14 +441,26 @@ def require_api_auth(request: Request) -> ApiIdentity:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
-            headers={"WWW-Authenticate": 'Bearer, Basic realm="Lyndrix"'},
+            # Bearer only: advertising Basic makes browsers prompt for a
+            # password and attach it to every later request to this origin.
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return identity
 
 
 def optional_api_auth(request: Request) -> Optional[ApiIdentity]:
-    """FastAPI dependency: return an identity if present, otherwise ``None``."""
-    return authenticate_request(request)
+    """FastAPI dependency: return an identity if present, otherwise ``None``.
+
+    API keys and session tokens only. HTTP Basic is deliberately ignored here
+    (the caller is treated as anonymous): these routes never answer 401, so
+    checking a password on them would be an unthrottled yes/no oracle.
+    """
+    try:
+        return authenticate_request(request, allow_basic=False)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            return None  # key store unreachable: these routes serve anonymous callers anyway
+        raise
 
 
 def require_permission(permission: str):

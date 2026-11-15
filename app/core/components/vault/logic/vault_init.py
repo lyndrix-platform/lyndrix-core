@@ -1,7 +1,6 @@
 import hvac
-import os
 
-from .crypto import encrypt_vault_keys, KEY_FILE
+from .crypto import encrypt_vault_keys, write_key_file
 
 
 class VaultAlreadyInitializedError(RuntimeError):
@@ -41,8 +40,7 @@ class VaultInitializer:
 
         # Encrypt and store (encrypt_vault_keys enforces the master-key policy)
         blob = encrypt_vault_keys(master_key, keys)
-        os.makedirs(os.path.dirname(KEY_FILE), exist_ok=True)
-        with open(KEY_FILE, 'wb') as f:
-            f.write(blob)
+        # Owner-only and atomic: the blob carries the root token (SC-01).
+        write_key_file(blob)
 
         return keys

@@ -161,3 +161,54 @@ def test_instances_that_left_the_cluster_do_not_block_an_operation(tracker, even
     assert fin["operation_id"] == op_id and fin["status"] == "done" and fin["done"] == 1 and fin["total"] == 1
     op = t.get(op_id)
     assert {i["instance_id"]: i["status"] for i in op["instances"]} == {"a": "done", "b": "gone"}
+
+
+def test_lead_that_dies_while_installing_does_not_keep_the_operation_open(tracker, events, monkeypatch):
+    """CL-14: only ``pending`` participants were ever marked gone — a lead that
+    reported ``installing`` and died kept the operation open for the 10-minute
+    idle sweep and then closed it as partial."""
+    t, Session = tracker
+    op_id = t.start(plugin_id="p.dead", repo_name="dead", action="upgrade", version="2", requested_by="admin")
+    t.report(plugin_id="p.dead", repo_name=None, status="installing")              # a (lead) starts …
+    monkeypatch.setattr(t, "live_instances", lambda: ["b"])                        # … and dies
+    monkeypatch.setattr(t, "instance_id", lambda: "b")
+    t.report(plugin_id="p.dead", repo_name=None, status="done")                    # b finishes right away
+    assert t.get(op_id)["status"] == "running"       # a reported seconds ago: maybe just between heartbeats
+    with Session() as s:                              # … a full TTL later it still has not
+        row = s.get(PluginOperationInstance, {"operation_id": op_id, "instance_id": "a"})
+        row.updated_at = row.updated_at - timedelta(seconds=31)
+        s.commit()
+    assert t.sweep_timeouts(max_age_s=600) == 1
+    fin = events[FINISHED_TOPIC][-1]
+    assert fin["operation_id"] == op_id and fin["status"] == "done" and fin["done"] == 1 and fin["total"] == 1
+    assert {i["instance_id"]: i["status"] for i in t.get(op_id)["instances"]} == {"a": "gone", "b": "done"}
+
+
+def test_an_instance_without_a_cluster_view_marks_nobody_gone(tracker, events, monkeypatch):
+    """A fresh pod whose registry view is empty used to mark every other
+    participant gone on its first report and close the operation as done 1/1."""
+    t, _ = tracker
+    op_id = t.start(plugin_id="p.blind", repo_name="blind", action="upgrade", version="2", requested_by="admin")
+    monkeypatch.setattr(t, "live_instances", lambda: None)                         # view not usable
+    monkeypatch.setattr(t, "instance_id", lambda: "c")                             # a third instance reports
+    t.report(plugin_id="p.blind", repo_name=None, status="done")
+    op = t.get(op_id)
+    assert op["status"] == "running" and events[FINISHED_TOPIC] == []
+    assert {i["instance_id"]: i["status"] for i in op["instances"]} == {"a": "pending", "b": "pending", "c": "done"}
+    # opening an operation without a view starts with this instance only
+    other = t.start(plugin_id="p.solo", repo_name="solo", action="install", version="1", requested_by="admin")
+    assert [i["instance_id"] for i in t.get(other)["instances"]] == ["c"]
+
+
+def test_live_instances_is_unknown_while_the_registry_view_is_not_ready(monkeypatch):
+    import types
+
+    t = OperationTracker()
+    monkeypatch.setattr(t, "instance_id", lambda: "me")
+    view = types.SimpleNamespace(is_cluster=True, view_ready=False, _instances=[], ttl=30)
+    monkeypatch.setattr(OperationTracker, "_cluster", staticmethod(lambda: view))
+    assert t.live_instances() is None
+    view.view_ready = True
+    view._instances = [types.SimpleNamespace(instance_id="peer", alive=True),
+                       types.SimpleNamespace(instance_id="old", alive=False)]
+    assert t.live_instances() == ["peer", "me"]

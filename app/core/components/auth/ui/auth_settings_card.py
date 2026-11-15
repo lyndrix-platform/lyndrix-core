@@ -16,6 +16,7 @@ from nicegui import ui
 from core.logger import get_logger
 from core.i18n import t
 from ui.theme import UIStyles
+from ui.secret_fields import entered_secret, is_configured, secret_hint
 from core.components.auth.logic.auth_config import (
     auth_config_service,
     PROVIDER_CHAIN_SPEC,
@@ -75,6 +76,12 @@ def _field_row(spec: FieldSpec, value: str, source: str, inputs: dict) -> None:
                 if locked and spec.sensitive:
                     display = ""
                     placeholder = t("auth.settings.env_set_via", env_var=spec.env_var)
+                elif spec.sensitive:
+                    # SC-08: a stored secret (LDAP bind password, OIDC client
+                    # secret) is never prefilled — password=True only hides the
+                    # rendering, the value would still be sent to the browser.
+                    display = ""
+                    placeholder = secret_hint(is_configured(value))
                 else:
                     display = value
                     placeholder = spec.label
@@ -87,7 +94,7 @@ def _field_row(spec: FieldSpec, value: str, source: str, inputs: dict) -> None:
                     'w-full' + (' opacity-50' if locked else '')
                 )
                 if not locked:
-                    inputs[spec.vault_key] = ('str', inp)
+                    inputs[spec.vault_key] = ('secret' if spec.sensitive else 'str', inp)
 
             if spec.hint:
                 ui.label(spec.hint).classes(
@@ -137,6 +144,11 @@ async def render_auth_settings_card() -> None:
         for key, (typ, widget) in inputs.items():
             if typ == 'bool':
                 result[key] = 'true' if widget.value else 'false'
+            elif typ == 'secret':
+                # Blank = keep the stored secret (same contract as the REST API).
+                secret = entered_secret(widget.value)
+                if secret is not None:
+                    result[key] = secret
             else:
                 result[key] = widget.value or ''
         return result

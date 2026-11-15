@@ -105,20 +105,101 @@ Authorization is **group-based RBAC**, resolved server-side for every request
 - **Per-plugin API scoping**: prefer `plugin:<id>:api:read` / `:api:write` (and plugin-declared custom permissions) over the broad global `api:read` / `api:write`, so a token/group can be limited to individual plugins.
 - **Notification visibility** can be gated per endpoint by permission id, so sensitive events (e.g. plugin lifecycle) are only visible to admins.
 
+### Password logins
+
+Every password check goes through one choke point (`login_guard`): the login
+form (`POST /api/auth/login`, NiceGUI), HTTP Basic on API routes and "confirm
+your current password". Only **verified wrong passwords** are counted; an
+attempt that was turned away never extends a block, so every block ends by
+itself. The response is `429` + `Retry-After` (never `401`) while blocked.
+
+| Budget | Limit | Purpose |
+|---|---|---|
+| account + client address | 5 failures / minute, 10 / 10 minutes | plain guessing from one address |
+| account, addresses that already failed on it | 20 failures / 10 minutes | guessing spread over a few addresses |
+| account, addresses without a failure of their own | 10 more / 10 minutes | room for the real user while the account is under attack |
+| client address, any account | 30 failures / minute | one password sprayed over many accounts; load on the directory |
+
+Rules that keep legitimate clients working:
+
+- An account + address that produced the **correct** password within the last 30 days is only checked against its own budget (first row) — other people's failures do not block it.
+- The **same wrong password** repeated (a script with an outdated password) counts once per 10 minutes and costs one Argon2 run, so it does not block the account for correctly configured clients.
+- A confirmed password is remembered while it keeps being used (5 minutes idle, bound to the stored hash), so HTTP Basic costs one Argon2 run, not one per request.
+- An unreachable directory is not a wrong password: such attempts use the address budget only, so an LDAP outage does not leave its users blocked afterwards. A local account's wrong password counts regardless.
+- At most `LYNDRIX_LOGIN_VERIFY_CONCURRENCY` (4) Argon2 verifications run at once; the rest wait up to 5 s and then get `503` + `Retry-After`.
+
+What an attacker can still do — the price of a hard ceiling on guesses per account:
+
+- **Many addresses** (botnet, or a forgeable `X-Forwarded-For`, see below): about 30 guesses per account, 10 minutes and instance. While that budget is full, the account's password login is refused from addresses that never logged in successfully — for as long as the attack lasts plus at most 10 minutes. Known-good addresses, existing sessions and API keys keep working.
+- **One shared address** (clients behind a load balancer the core does not trust, NAT): they share the account + address budget, so anybody there can keep an account's password login blocked *from that address* while they keep failing. Configure `LYNDRIX_TRUSTED_PROXIES` so the core sees real client addresses.
+- The counters are **per instance** (only the login form's 5-per-minute counter is shared through the cluster coordinator): with N instances behind the balancer the budgets are up to N times larger.
+
+`LYNDRIX_TRUSTED_PROXIES=*` makes the core believe `X-Forwarded-For` from every
+sender. That is fine while only the load balancer can open a connection to the
+core; if the core port is reachable in any other way (other pods, a published
+port), a client chooses the address the limiters see, and only the per-account
+ceiling above holds. Prefer the balancer's address or CIDR; the preflight
+reports `*` as a warning.
+
 ### External identity linking
 
 Each login resolves to one local profile via a stable identity link
 (`UserIdentity`). Auto-matching an external account to an existing user by email
 only happens when the provider **vouches** for it — AD/LDAP directory mail, or an
 OIDC `email_verified: true` claim. An unverified or ambiguous email never merges
-accounts; a new profile is created instead (spoofing protection). The OIDC
-redirect flow uses **PKCE + a session-bound state**.
+accounts; a new profile is created instead (spoofing protection). Auto-matching
+additionally needs a local email that an administrator or a provider put on the
+profile — an address a user typed in themselves is never a link target.
+
+The OIDC redirect flow uses **PKCE between the core and the IdP** and a
+single-use, server-side state. The SPA start endpoint only accepts a plain
+callback URL on an allowed origin (no credentials, query or fragment), an
+in-app `next` path, and is rate-limited. Not yet bound to the browser that
+started the flow (login CSRF): PKCE between SPA and core and a nonce cookie for
+the NiceGUI flow are open.
 
 ### Session tokens
 
 Web logins mint a `UserApiKey` labelled `web-session · <browser> on <os> · <time>`.
 Users can review and revoke their **active sessions** individually (or "sign out
 all other sessions") from Settings → Profile, separate from long-lived API keys.
+
+- A login session expires `LYNDRIX_SESSION_MAX_AGE_HOURS` after it was created
+  (default 720 = 30 days, `0` = never): the token then answers `401` and the
+  shell returns to the login page. Named API keys do not expire. The label
+  prefix `web-session` is reserved for sessions.
+- **Sessions from before the rule are grandfathered.** The first boot of a core
+  that knows the max-age (≥ 1.12) records that instant once for the whole
+  deployment (table `auth_markers`, row `session_max_age_enforced_from`; written
+  under the bootstrap lock, never changed afterwards, the same for every
+  instance). A session created before it is a *legacy* session and
+  `LYNDRIX_SESSION_MAX_AGE_LEGACY` decides what the max-age means for it:
+
+  | Value | Legacy sessions |
+  |---|---|
+  | `exempt` (default) | never expire by age — an upgrade signs nobody out and a session token used by a script keeps working |
+  | `from_enforcement` | age counts from the recorded instant: they all end one max-age after the upgrade |
+  | `strict` | like any other session: age counts from creation, old ones end with their next request |
+
+  The exemption covers the age only — revoking the session, a password change
+  and deleting the account end a legacy session like any other. While the
+  instant cannot be read (bootstrap not finished, table missing) no session is
+  expired, except with `strict`, which does not need it. `GET
+  /api/users/{username}/api-keys` shows it per row: `is_session`, `expires_at`
+  (null = does not expire by age) and `expiry` (`max_age`, `legacy_exempt`,
+  `legacy_from_enforcement`, `disabled`, `unknown`). To end the exemption later,
+  set `from_enforcement` (announced end) or `strict` (immediately) on every
+  instance; long-lived automation should use a named API key either way.
+- A password change (own, admin reset, environment rotation) ends the account's
+  other login sessions; API keys are kept.
+- Deleting an account removes its API keys, sessions, linked identities and
+  preferences in the same transaction; a key whose owner is gone is rejected and
+  is never inherited by a later account of the same name.
+- An account without a local password (SSO/LDAP-only) cannot set one itself —
+  an administrator can.
+- **Scoped API keys** are bounded by their scopes whoever owns them (also for a
+  superadmin) and cannot create keys, change a password or an email address, or
+  revoke anything but themselves.
 
 ## Hardening recommendations
 

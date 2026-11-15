@@ -12,9 +12,10 @@ import httpx
 import re
 from pathlib import Path
 from config import settings
-from core.logger import get_logger
+from core.logger import get_logger, mask_text
 from core.bus import bus
 from . import git_providers
+from .requirements_guard import check_requirements, pip_environment
 
 log = get_logger("Core:PluginService")
 
@@ -23,10 +24,43 @@ log = get_logger("Core:PluginService")
 # git-manager stores repos under /data/storage/git_repos/{repo_id}.
 # Source URL is configurable via LYNDRIX_PLUGIN_COLLECTION_URL (defaults to the
 # lyndrix-platform org); see config.Settings.
-COLLECTION_REPO_URL = settings.LYNDRIX_PLUGIN_COLLECTION_URL
-COLLECTION_REPO_ID = COLLECTION_REPO_URL.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-COLLECTION_LOCAL_PATH = Path("/data/storage/git_repos") / COLLECTION_REPO_ID
-COLLECTION_JSON_PATH = COLLECTION_LOCAL_PATH / "plugin-directory" / "plugins.json"
+# The URL is an editable setting hydrated from Vault AFTER this module is
+# imported, so it must be read when used — as module constants (computed at
+# import) the "Plugin Collection URL" setting never took effect.
+def collection_repo_url() -> str:
+    return settings.LYNDRIX_PLUGIN_COLLECTION_URL
+
+
+def collection_repo_id() -> str:
+    return collection_repo_url().rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def collection_json_path() -> Path:
+    return Path("/data/storage/git_repos") / collection_repo_id() / "plugin-directory" / "plugins.json"
+
+
+def collection_fallback_url() -> str:
+    """HTTP fallback (used when the local clone is not yet available).
+    Override via PLUGIN_COLLECTION_URL env var, else derived from the collection URL."""
+    return os.environ.get("PLUGIN_COLLECTION_URL") or _raw_collection_fallback_url(collection_repo_url())
+
+
+# Backwards-compatible module attributes (COLLECTION_REPO_URL, …): resolved on
+# access so importers also see the current setting.
+_LAZY_COLLECTION_ATTRS = {
+    "COLLECTION_REPO_URL": collection_repo_url,
+    "COLLECTION_REPO_ID": collection_repo_id,
+    "COLLECTION_LOCAL_PATH": lambda: collection_json_path().parent.parent,
+    "COLLECTION_JSON_PATH": collection_json_path,
+    "COLLECTION_FALLBACK_URL": collection_fallback_url,
+}
+
+
+def __getattr__(name: str):
+    resolver = _LAZY_COLLECTION_ATTRS.get(name)
+    if resolver is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return resolver()
 
 
 def _raw_collection_fallback_url(git_url: str) -> str:
@@ -40,15 +74,56 @@ def _raw_collection_fallback_url(git_url: str) -> str:
         )
     return base
 
-# HTTP fallback (used when the local clone is not yet available).
-# Override via PLUGIN_COLLECTION_URL env var, else derived from the collection URL.
-COLLECTION_FALLBACK_URL = os.environ.get(
-    "PLUGIN_COLLECTION_URL",
-    _raw_collection_fallback_url(COLLECTION_REPO_URL),
-)
-
 # How often to check for new commits on main (seconds).
 COLLECTION_POLL_INTERVAL = int(os.environ.get("PLUGIN_COLLECTION_POLL_INTERVAL", "900"))  # 15 min
+
+class PluginInstallError(RuntimeError):
+    """An install/upgrade step failed and the plugin must not be swapped in.
+
+    ``transient`` marks a failure that says nothing about the plugin: the
+    package index or the network did not answer (see ``is_transient_failure``).
+    The attempt still fails; the cluster reconcile retries it soon instead of
+    backing off for minutes.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
+
+
+# pip prints these (on its retry warnings and final errors) when the index or
+# the network failed — as opposed to "No matching distribution found" for a
+# requirement that does not exist, which no retry will fix. Matched against
+# pip's stderr in lower case; a version/requirement problem WITHOUT one of
+# these stays permanent.
+_PIP_TRANSIENT_MARKERS = (
+    "connection broken", "newconnectionerror", "connecttimeouterror", "readtimeouterror",
+    "connection refused", "connection reset", "connection aborted", "remote end closed connection",
+    "temporary failure in name resolution", "name or service not known", "failed to resolve",
+    "network is unreachable", "no route to host", "max retries exceeded", "read timed out",
+    "connection timed out", "proxyerror", "sslerror", "ssleoferror", "incompleteread",
+    "protocolerror", "http error 429", "http error 500", "http error 502", "http error 503",
+    "http error 504", "429 client error", "500 server error", "502 server error",
+    "503 server error", "504 server error",
+)
+
+
+def pip_failure_is_transient(stderr_text: str) -> bool:
+    """Did pip fail because the index/network did not answer?"""
+    text = (stderr_text or "").lower()
+    return any(marker in text for marker in _PIP_TRANSIENT_MARKERS)
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """True for install failures worth a quick retry: a pip run that could not
+    reach its index, and a provider (archive/API) request that failed in
+    transport or with 429/5xx."""
+    if isinstance(exc, PluginInstallError):
+        return bool(exc.transient)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TransportError, asyncio.TimeoutError))
+
 
 class PluginService:
     def __init__(self):
@@ -59,6 +134,11 @@ class PluginService:
         self.github_api_base = "https://api.github.com/repos"
         # Per-repo install serialization (see install_plugin).
         self._install_locks: dict = {}
+        # repo folder name → was the latest failed install of it transient?
+        # (entry removed by the next successful install). Read by the cluster
+        # reconcile to choose between a quick retry and the long back-off.
+        self._install_failures: dict = {}
+        self._warned_ambiguous_gitlab_host = False
         
         # Cache für Marketplace-Daten
         self._marketplace_cache = []
@@ -219,7 +299,10 @@ class PluginService:
             from .models import PluginVersionHistory
             if not db_instance.engine:
                 return
-            PluginVersionHistory.__table__.create(bind=db_instance.engine, checkfirst=True)
+            # Once per engine, under the cluster bootstrap lock (was: a checkfirst
+            # round trip per call, racing between instances).
+            from core.components.database.logic.tx import ensure_table_once
+            ensure_table_once(PluginVersionHistory.__table__)
             with db_instance.SessionLocal() as session:
                 session.add(PluginVersionHistory(
                     module_id=module_id, repo_name=repo_name, version=version,
@@ -281,7 +364,7 @@ class PluginService:
         """
         try:
             result = subprocess.run(
-                ["git", "ls-remote", COLLECTION_REPO_URL, "HEAD"],
+                ["git", "ls-remote", collection_repo_url(), "HEAD"],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0 and result.stdout:
@@ -294,8 +377,8 @@ class PluginService:
         """Emit git:sync so the git-manager plugin clones/pulls the collection."""
         log.info("COLLECTION: Requesting git-manager to sync plugin collection...")
         bus.emit("git:sync", {
-            "repo_id": COLLECTION_REPO_ID,
-            "url": COLLECTION_REPO_URL,
+            "repo_id": collection_repo_id(),
+            "url": collection_repo_url(),
             "auth_type": "none",  # public repo — no token needed
         })
 
@@ -501,7 +584,7 @@ class PluginService:
         """Called when git-manager emits git:status_update.
         Invalidates the marketplace cache so the next fetch reads fresh data.
         """
-        if payload.get("repo_id") != COLLECTION_REPO_ID:
+        if payload.get("repo_id") != collection_repo_id():
             return
         if payload.get("status") == "synced":
             log.info("COLLECTION: git-manager sync complete — invalidating marketplace cache.")
@@ -613,7 +696,7 @@ class PluginService:
     def _get_headers(self, include_auth: bool = True) -> dict:
         """Build GitHub request headers (used for the public collection fallback).
 
-        Provider-aware install/version requests use :meth:`_auth_headers_for`.
+        Provider-aware install/version requests use :meth:`_request_headers`.
         """
         headers = {
             "User-Agent": "Lyndrix-Core/1.0",
@@ -645,11 +728,39 @@ class PluginService:
             return os.environ.get("GITHUB_TOKEN") or self._read_vault_setting("github_token")
         return os.environ.get("GITLAB_TOKEN") or self._read_vault_setting("gitlab_token")
 
-    def _resolve_token(self, url: str, provider: str) -> str | None:
-        """Resolve the token for a repo URL.
+    def _gitlab_token_host(self) -> str | None:
+        """The one host the global GitLab token belongs to (SC-07).
 
-        Order: per-repo override (Vault, via the custom repo row) → global
-        provider token (env/Vault) → None (anonymous).
+        ``LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST`` names it explicitly. Without it the
+        token is bound to the only non-GitHub host on the allowlist — the common
+        single-GitLab setup keeps working unchanged. With several candidates the
+        token is sent to none of them: guessing would hand an internal PAT to
+        every allowlisted host.
+        """
+        configured = str(getattr(settings, "LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST", "") or "").strip()
+        if configured:
+            return configured
+        candidates = [
+            host for host in self._allowed_repo_hosts()
+            if git_providers.provider_for_host(host) == git_providers.GITLAB
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1 and not self._warned_ambiguous_gitlab_host:
+            self._warned_ambiguous_gitlab_host = True
+            log.warning(
+                "SECURITY: several GitLab hosts are allowed for plugins but "
+                "LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST is not set — the global GitLab "
+                "token is not sent to any of them."
+            )
+        return None
+
+    def _resolve_token(self, url: str, ref: "git_providers.RepoRef") -> str | None:
+        """Resolve the token for a repo reference.
+
+        Order: per-repo override (Vault, via the custom repo row — matched by
+        the exact repository URL) → global provider token (env/Vault), which is
+        only used for the host it is configured for → None (anonymous).
         """
         try:
             from .custom_repo_service import custom_repo_service
@@ -660,22 +771,134 @@ class PluginService:
                     return token
         except Exception:
             pass
-        return self._global_token(provider)
+        if ref.provider == git_providers.GITHUB:
+            # GitHub requests only ever go to (api.)github.com — hard-coded URLs.
+            return self._global_token(git_providers.GITHUB)
+        if git_providers.token_allowed_for(ref, self._gitlab_token_host()):
+            return self._global_token(git_providers.GITLAB)
+        return None
 
-    def _auth_headers_for(self, url: str, provider: str) -> dict:
-        """Provider-appropriate request headers, including auth when available.
+    def _request_headers(self, url: str, ref: "git_providers.RepoRef") -> tuple[dict, dict]:
+        """``(base_headers, auth_headers)`` for requests about ``ref``.
 
-        Only ever called after :meth:`validate_repo_url` has passed for ``url``
-        (see ``get_plugin_versions``/``install_plugin``), so a token is never
-        attached to a request going to a host outside the configured allowlist
-        — trust comes from that allowlist, never from the URL alone.
+        Kept apart on purpose: the auth header is passed per request and only
+        to the origin it belongs to, never as a client default that would ride
+        along on a redirect (httpx only strips ``Authorization`` cross-origin,
+        GitLab's ``PRIVATE-TOKEN`` survived). Only ever called after
+        :meth:`validate_repo_url` passed for ``url``. Raises ``ValueError`` when
+        a token would have to travel over plain http.
         """
-        headers = {"User-Agent": "Lyndrix-Core/1.0"}
-        headers.update(git_providers.accept_header(provider))
-        token = self._resolve_token(url, provider)
-        if token:
-            headers.update(git_providers.auth_header(provider, token))
-        return headers
+        base = {"User-Agent": "Lyndrix-Core/1.0"}
+        base.update(git_providers.accept_header(ref.provider))
+        token = self._resolve_token(url, ref)
+        if not token:
+            return base, {}
+        if ref.provider != git_providers.GITHUB and ref.scheme != "https":
+            raise ValueError(
+                f"Refusing to send the access token for '{ref.host}' over "
+                f"{ref.scheme}:// — use an https:// repository URL"
+            )
+        return base, git_providers.auth_header(ref.provider, token)
+
+    @staticmethod
+    def _limit_bytes(setting: str, default_mb: int) -> int:
+        """A size limit setting (MB) in bytes; a non-positive value falls back to the default."""
+        try:
+            megabytes = int(getattr(settings, setting, default_mb) or default_mb)
+        except (TypeError, ValueError):
+            megabytes = default_mb
+        return (megabytes if megabytes > 0 else default_mb) * 1024 * 1024
+
+    @classmethod
+    async def _get_archive(cls, client, url: str, ref: "git_providers.RepoRef", auth: dict,
+                           dest: Path, max_redirects: int = 5):
+        """Download an archive URL into ``dest``, following redirects by hand.
+
+        Redirects (SC-07): same-origin keeps the auth header. A redirect to one
+        of the provider's known download hosts (GitHub → codeload.github.com)
+        is followed without it. Anything else is refused: the token must not
+        follow a 3xx to another host and the installer must not be steered to
+        an arbitrary one.
+
+        Size (SC-13): the body is streamed to disk and cut off at
+        ``LYNDRIX_PLUGIN_MAX_ARCHIVE_MB`` instead of being held in memory in
+        full. Only a 200 response is written; for every other status the
+        (closed) response is returned so the caller can try its fallbacks.
+        """
+        max_bytes = cls._limit_bytes("LYNDRIX_PLUGIN_MAX_ARCHIVE_MB", 200)
+        origin = url
+        headers = dict(auth)
+        for _ in range(max_redirects + 1):
+            request = client.build_request("GET", url, headers=headers)
+            response = await client.send(request, stream=True, follow_redirects=False)
+            try:
+                if response.status_code == 200:
+                    await cls._stream_to_file(response, dest, max_bytes)
+                    return response
+                location = response.headers.get("location")
+                if response.status_code not in (301, 302, 303, 307, 308) or not location:
+                    return response
+            finally:
+                await response.aclose()
+
+            target = str(response.url.join(location))
+            if not git_providers.same_origin(origin, target):
+                target_parts = httpx.URL(target)
+                allowed = git_providers.ARCHIVE_REDIRECT_HOSTS.get(ref.provider, frozenset())
+                if target_parts.scheme != "https" or (target_parts.host or "").lower() not in allowed:
+                    raise PluginInstallError(
+                        f"archive download was redirected to an unexpected host "
+                        f"('{target_parts.host}') — refused"
+                    )
+                headers = {}  # signed download URL: no token beyond the origin
+            url = target
+        raise PluginInstallError("archive download: too many redirects")
+
+    @staticmethod
+    async def _stream_to_file(response, dest: Path, max_bytes: int) -> None:
+        """Write a streamed response body to ``dest``; abort beyond ``max_bytes``."""
+        too_large = PluginInstallError(
+            f"plugin archive is larger than {max_bytes // (1024 * 1024)} MB "
+            f"(LYNDRIX_PLUGIN_MAX_ARCHIVE_MB)"
+        )
+        declared = response.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise too_large
+        written = 0
+        # Blocking file IO stays off the event loop, chunk by chunk.
+        handle = await asyncio.to_thread(open, dest, "wb")
+        try:
+            async for chunk in response.aiter_bytes(chunk_size=256 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise too_large
+                await asyncio.to_thread(handle.write, chunk)
+        finally:
+            await asyncio.to_thread(handle.close)
+
+    @classmethod
+    def _check_archive_limits(cls, zip_ref: zipfile.ZipFile) -> None:
+        """Refuse a zip bomb before a single file is extracted (SC-13).
+
+        ``zipfile`` never writes more than an entry's declared size, so checking
+        the declared sizes bounds what extraction can put on disk.
+        """
+        entries = zip_ref.infolist()
+        try:
+            max_files = int(getattr(settings, "LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES", 20000) or 20000)
+        except (TypeError, ValueError):
+            max_files = 20000
+        if len(entries) > max_files:
+            raise PluginInstallError(
+                f"plugin archive has {len(entries)} entries, more than the allowed "
+                f"{max_files} (LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES)"
+            )
+        max_extracted = cls._limit_bytes("LYNDRIX_PLUGIN_MAX_EXTRACTED_MB", 1024)
+        if sum(entry.file_size for entry in entries) > max_extracted:
+            raise PluginInstallError(
+                f"plugin archive would extract to more than "
+                f"{max_extracted // (1024 * 1024)} MB (LYNDRIX_PLUGIN_MAX_EXTRACTED_MB)"
+            )
 
     def _allowed_repo_hosts(self) -> list[str]:
         """Configured git host allowlist (``LYNDRIX_PLUGIN_REPO_HOSTS``)."""
@@ -724,11 +947,11 @@ class PluginService:
 
         api_url = git_providers.tags_url(ref)
         try:
-            headers = self._auth_headers_for(github_url, ref.provider)
+            headers, auth = self._request_headers(github_url, ref)
             # No redirects here: this is a pure provider-API (tags) call, so a
             # 3xx would only ever mean something unexpected is happening.
             async with httpx.AsyncClient(headers=headers, follow_redirects=False) as client:
-                resp = await client.get(api_url)
+                resp = await client.get(api_url, headers=auth)
                 if resp.status_code == 200:
                     raw_tags = git_providers.tag_names(ref.provider, resp.json())
                     def parse_v(t):
@@ -768,6 +991,16 @@ class PluginService:
             lock = self._install_locks[safe_repo_name] = asyncio.Lock()
         return lock
 
+    def last_failure_was_transient(self, repo_url: str) -> bool:
+        """Whether the latest install attempt for ``repo_url`` failed for a
+        transient reason (network / package index). False when it succeeded,
+        failed for another reason or was never tried."""
+        try:
+            name = self.validate_repo_url(repo_url).repo.replace("-", "_")
+        except Exception:
+            return False
+        return bool(self._install_failures.get(name, False))
+
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False,
                              notify: bool = True, lead: bool = True):
         """Downloads, extracts and registers a new plugin from GitHub or GitLab.
@@ -800,6 +1033,10 @@ class PluginService:
         async with self._install_lock(safe_repo_name):
             if not upgrade and (self.plugin_dir / safe_repo_name / "entrypoint.py").exists():
                 log.info(f"INSTALL: '{safe_repo_name}' is already installed — duplicate install request skipped.")
+                # Nothing gets loaded, so nobody else would ever report: without
+                # this an operation opened for the request sat "running" until
+                # the timeout sweep closed it as "install failed / no report".
+                await self._report_operation_outcome(safe_repo_name, "done", "already installed")
                 return True
             return await self._install_plugin_unlocked(github_url, version=version, upgrade=upgrade,
                                                        notify=notify, lead=lead)
@@ -812,8 +1049,19 @@ class PluginService:
             # SSRF host allowlist rejection (or an unparseable URL) — every
             # caller (API background task, reconcile-on-boot, NiceGUI) treats
             # a False return the same way an install failure always has.
-            log.error(f"INSTALL: rejected repo URL '{github_url}': {exc}")
-            bus.emit("plugin:install_failed", {"repo": github_url, "error": str(exc)})
+            # A rejected URL may be rejected precisely because it carries
+            # credentials — it goes through the masker, never raw.
+            safe_url = mask_text(str(github_url))
+            log.error(f"INSTALL: rejected repo URL '{safe_url}': {exc}")
+            bus.emit("plugin:install_failed", {"repo": safe_url, "error": str(exc)})
+            return False
+        try:
+            # The version becomes part of provider URLs (SC-10).
+            version = git_providers.validate_ref_name(version)
+        except ValueError as exc:
+            log.error(f"INSTALL: rejected version for '{ref.repo}': {exc}")
+            bus.emit("plugin:install_failed", {"repo": ref.repo, "error": str(exc)})
+            await self._report_operation_failure(ref.repo.replace("-", "_"), str(exc))
             return False
         repo = ref.repo
         provider = ref.provider
@@ -834,19 +1082,25 @@ class PluginService:
 
         if plugin_path.exists() and not upgrade:
             log.warning(f"CONFLICT: Plugin directory '{safe_repo_name}' already exists. Operation aborted")
+            await self._report_operation_failure(
+                safe_repo_name, f"plugin directory '{safe_repo_name}' already exists (no entrypoint.py) — remove it first",
+            )
             return False
 
+        # Set once the old version has been moved aside (filled from the swap thread).
+        swap_started: list[bool] = []
+
         try:
-            headers = self._auth_headers_for(github_url, provider)
-            # Default to no redirects: the auth header (possibly a PAT) must
-            # never silently follow a 3xx to a host outside the allowlist.
-            # GitHub's archive URLs are a known, deliberate exception — they
-            # redirect to codeload.github.com — so those two GETs opt back in
-            # explicitly below.
+            headers, auth = self._request_headers(github_url, ref)
+            # No automatic redirects and no auth header on the client itself:
+            # the token is passed per request, and archive redirects are
+            # followed by hand (_get_archive) so it never travels to another
+            # host. GitHub's archive URLs redirect to codeload.github.com —
+            # that hop is allowed, without the token.
             async with httpx.AsyncClient(follow_redirects=False, headers=headers) as client:
                 # 1. Fetch Repository Metadata (to discover the default branch)
                 api_url = git_providers.metadata_url(ref)
-                resp = await client.get(api_url)
+                resp = await client.get(api_url, headers=auth)
 
                 if resp.status_code == 403:
                     log.warning("INSTALL: Rate limit hit for metadata. Assuming 'main' branch.")
@@ -862,7 +1116,7 @@ class PluginService:
                 zip_url = git_providers.archive_url(ref, ref_name, is_tag=not is_latest)
 
                 log.info(f"DOWNLOAD: Fetching source from {zip_url}")
-                response = await client.get(zip_url, follow_redirects=True)
+                response = await self._get_archive(client, zip_url, ref, auth, zip_path)
 
                 # GitHub fallback: many repos default to 'master' instead of 'main'.
                 if (
@@ -873,7 +1127,7 @@ class PluginService:
                 ):
                     log.info("DOWNLOAD: 'main' not found, trying 'master'...")
                     zip_url = git_providers.archive_url(ref, "master", is_tag=False)
-                    response = await client.get(zip_url, follow_redirects=True)
+                    response = await self._get_archive(client, zip_url, ref, auth, zip_path)
 
                 # Tag-form fallback: plugin_states stores the manifest version
                 # ("1.1.2") while many repos only tag "v1.1.2" (or the other way
@@ -883,15 +1137,13 @@ class PluginService:
                     for alt in self._alternate_tag_forms(version):
                         alt_url = git_providers.archive_url(ref, alt, is_tag=True)
                         log.info(f"DOWNLOAD: tag '{version}' not found, trying '{alt}'...")
-                        response = await client.get(alt_url, follow_redirects=True)
+                        response = await self._get_archive(client, alt_url, ref, auth, zip_path)
                         if response.status_code != 404:
                             zip_url = alt_url
                             break
 
+                # A 200 body has already been streamed into zip_path (size-capped).
                 response.raise_for_status()
-
-                # File write is blocking; keep it off the event loop.
-                await asyncio.to_thread(zip_path.write_bytes, response.content)
 
             # 3. Safe Extraction into Staging (ZIP Slip protected)
             log.info("FILESYSTEM: Extracting archive into hidden staging area...")
@@ -903,6 +1155,7 @@ class PluginService:
                     # This is a larger architectural change (signing keys + source
                     # allowlist + dependency sandboxing) deferred out of this pass;
                     # the ZIP-slip and requirements checks below are the interim guards.
+                    self._check_archive_limits(zip_ref)
                     staging_resolved = staging_base.resolve()
                     root_folder = zip_ref.namelist()[0].split('/')[0]
                     # Validate all paths stay within staging_base. Use is_relative_to
@@ -918,12 +1171,13 @@ class PluginService:
             # Extraction is CPU + IO heavy for large archives — run it off the loop.
             extracted_dir = await asyncio.to_thread(_extract_archive)
 
-            # 4. Dependency Management in Staging
-            await self._install_requirements(extracted_dir)
-
-            # 4b. Identity verification — when upgrading an existing plugin we
+            # 4. Identity verification — when upgrading an existing plugin we
             # know the expected manifest.id from the installed copy. Refuse the
-            # swap if the freshly downloaded archive declares a different id.
+            # archive if it declares a different id. This runs BEFORE the
+            # dependency install on purpose (SC-03): pip may execute build code
+            # of the archive's dependencies, and that must not happen for an
+            # archive that is not the plugin being upgraded. The check is
+            # static (AST), so it needs no dependencies.
             if upgrade and plugin_path.exists():
                 expected_id = self._read_manifest_id(plugin_path)
                 if expected_id and not self._verify_plugin_identity(
@@ -940,6 +1194,9 @@ class PluginService:
                     await self._report_operation_failure(safe_repo_name, "identity_mismatch")
                     return False
 
+            # 4b. Dependency Management in Staging
+            await self._install_requirements(extracted_dir)
+
             # 5. ATOMIC SWAP (Protects against dev server hot-reload crashes).
             # Runs off the event loop: staging is a tempdir that may be on a
             # different filesystem than /app/plugins, so shutil.move can be a full
@@ -953,6 +1210,9 @@ class PluginService:
                     if backup_path.exists():
                         shutil.rmtree(backup_path, ignore_errors=True)
                     plugin_path.rename(backup_path)
+                    # From here on a leftover backup belongs to THIS attempt
+                    # (see _restore_after_failed_install).
+                    swap_started.append(True)
 
                 shutil.move(str(extracted_dir), str(plugin_path))
 
@@ -982,18 +1242,23 @@ class PluginService:
                 bus.emit("plugin:installed", {"repo": repo, "path": str(plugin_path)})
             else:
                 log.info(f"INSTALL: '{repo}' installed by reconcile — no user notification.")
+            self._install_failures.pop(safe_repo_name, None)
             return True
 
         except Exception as e:
+            self._install_failures[safe_repo_name] = is_transient_failure(e)
             log.error(f"INSTALL_ERROR: Installation failed for {repo}: {str(e)}", exc_info=True)
             
-            # Revert from backup if swap failed midway
+            # Put the plugin directory back into a consistent state (off the
+            # loop: removing a half-copied tree is IO-heavy).
             backup_path = self.plugin_dir / f".backup_{safe_repo_name}"
-            if backup_path.exists() and not plugin_path.exists():
-                backup_path.rename(plugin_path)
-                
-            if plugin_path.exists() and not upgrade:
-                shutil.rmtree(plugin_path, ignore_errors=True)
+            try:
+                await asyncio.to_thread(
+                    self._restore_after_failed_install,
+                    plugin_path, backup_path, upgrade, bool(swap_started),
+                )
+            except OSError:
+                log.error(f"INSTALL_ERROR: could not restore '{safe_repo_name}' after the failure", exc_info=True)
             bus.emit("plugin:install_failed", {"repo": repo, "error": str(e)})
             await self._report_operation_failure(safe_repo_name, str(e))
             return False
@@ -1002,18 +1267,49 @@ class PluginService:
                 shutil.rmtree(staging_base, ignore_errors=True)
 
     @staticmethod
+    def _restore_after_failed_install(
+        plugin_path: Path, backup_path: Path, upgrade: bool, swap_started: bool
+    ) -> None:
+        """Undo a swap that failed midway (BG-10).
+
+        Once the old version was moved aside (``swap_started``) and the backup
+        is still there, the new one did not make it completely: whatever sits
+        at ``plugin_path`` is a partial copy (``shutil.move`` across filesystems
+        is copy+delete). Remove it and put the backup back — previously the
+        partial directory blocked the restore and the backup stayed orphaned.
+        A stale backup of an earlier crash is never restored over a working
+        directory. A failed fresh install leaves nothing behind, so a retry is
+        not skipped as "already installed".
+        """
+        if swap_started and backup_path.exists():
+            if plugin_path.exists():
+                shutil.rmtree(plugin_path, ignore_errors=True)
+            backup_path.rename(plugin_path)
+        elif backup_path.exists() and not plugin_path.exists():
+            backup_path.rename(plugin_path)
+        elif plugin_path.exists() and not upgrade:
+            shutil.rmtree(plugin_path, ignore_errors=True)
+
+    @staticmethod
     async def _report_operation_failure(repo_name: str, message: str) -> None:
         """This instance could not even get the files in place — tell the
         cluster-wide operation (core 1.8) so it does not wait for a load report."""
+        await PluginService._report_operation_outcome(repo_name, "failed", message)
+
+    @staticmethod
+    async def _report_operation_outcome(repo_name: str, status: str, message: str) -> None:
+        """Report this instance's outcome for an install that ends before the
+        ModuleManager's load handler (the usual reporter) ever runs. A no-op
+        when no operation tracks the repo."""
         try:
             from .operations import operation_tracker
 
             await asyncio.to_thread(
                 operation_tracker.report, plugin_id=None, repo_name=repo_name,
-                status="failed", message=message[:500],
+                status=status, message=message[:500],
             )
         except Exception:
-            log.debug("OPS: failure report skipped", exc_info=True)
+            log.debug("OPS: outcome report skipped", exc_info=True)
 
     @staticmethod
     def _announces_updates() -> bool:
@@ -1033,32 +1329,21 @@ class PluginService:
         if not req_file.exists():
             return
 
-        # Validate requirements file doesn't contain suspicious entries. This is a
-        # best-effort guard; full supply-chain safety (hash-pinning + sandboxing)
-        # is tracked below.
-        req_content = req_file.read_text()
-        for line in req_content.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
-                continue
-            lowered = stripped.lower()
-            # Block local paths, parent-dir refs, direct VCS/URL installs and
-            # PEP 508 "pkg @ <url>" specs, plus pip option lines (-e/--*) — all of
-            # which can pull code from outside trusted package indexes.
-            if (
-                stripped.startswith('/')
-                or stripped.startswith('..')
-                or stripped.startswith('-')
-                or '@' in stripped
-                or '://' in lowered
-                or lowered.startswith(('git+', 'http:', 'https:', 'file:'))
-            ):
-                log.error(f"SECURITY: Blocked suspicious requirement entry: {stripped}")
-                return
+        # Allowlist, not blocklist (SC-03): every line must be a plain requirement
+        # specifier. See requirements_guard for what pip would otherwise accept.
+        req_content = await asyncio.to_thread(req_file.read_text, encoding="utf-8", errors="replace")
+        problems = check_requirements(req_content)
+        if problems:
+            detail = "; ".join(problems[:5])
+            log.error(f"SECURITY: Blocked requirements of {plugin_path.name}: {detail}")
+            # BG-10: a plugin without its dependencies must not be swapped in.
+            raise PluginInstallError(f"requirements.txt rejected: {detail}")
 
         # TODO(agent): require hash-pinned requirements and isolate dependency
         # installs in a sandboxed runtime (CORE-AUTH-PLUGINS-008). Deferred —
-        # needs a sandbox/runtime design beyond this pass.
+        # needs a sandbox/runtime design beyond this pass. --only-binary=:all:
+        # would stop sdist build code at install time but breaks plugins whose
+        # dependencies ship no wheel (e.g. docker-py) — revisit with SC-04.
 
         log.info(f"DEPENDENCIES: Installing requirements for {plugin_path.name} into private vendor directory...")
         vendor_dir = plugin_path / "vendor"
@@ -1079,26 +1364,58 @@ class PluginService:
                     cache_args = ["--cache-dir", str(cache_dir)]
                 except OSError as exc:
                     log.warning(f"DEPENDENCIES: pip cache dir {cache_dir} unusable ({exc}); installing without cache.")
+            # Optional package index (internal mirror). --isolated ignores PIP_*
+            # variables and user config, so this setting is the only way in.
+            index_args: list[str] = []
+            index_url = str(getattr(settings, "LYNDRIX_PLUGIN_PIP_INDEX_URL", "") or "").strip()
+            if index_url:
+                index_args = ["--index-url", index_url]
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", *cache_args,
+                sys.executable, "-m", "pip", "install",
+                # --isolated: no pip.conf / PIP_* influence on where code comes from.
+                "--isolated", "--no-input", "--disable-pip-version-check",
+                *index_args, *cache_args,
                 "--target", str(vendor_dir),
-                "--no-input",
                 "-r", str(req_file),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                # pip and sdist build backends must not inherit the core's
+                # secrets (DB password, master key, provider tokens).
+                env=pip_environment(),
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout
             )
-            if process.returncode != 0:
-                log.error(f"PIP_ERROR: Dependency installation failed: {stderr.decode()[:500]}")
-                shutil.rmtree(vendor_dir, ignore_errors=True)
-            else:
-                log.info("SUCCESS: All dependencies resolved into private vendor directory.")
         except asyncio.TimeoutError:
             log.error(f"TIMEOUT: pip install for {plugin_path.name} exceeded {timeout}s. Killing process.")
-            process.kill()
+            # Kill AND reap: without the wait the child stays a zombie and its
+            # pipes stay open until the core exits.
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass  # exited on its own between the timeout and the kill
+            await process.wait()
             shutil.rmtree(vendor_dir, ignore_errors=True)
+            # A pip that hangs is waiting for the index, not for the plugin.
+            raise PluginInstallError(
+                f"dependency installation timed out after {timeout}s", transient=True
+            ) from None
+
+        if process.returncode != 0:
+            # pip output can echo index URLs; the logger masks credentials in them.
+            pip_output = stderr.decode(errors="replace")
+            # Classified on the whole output: the connection warnings come
+            # first, the logged excerpt may not reach them.
+            transient = pip_failure_is_transient(pip_output)
+            pip_error = pip_output[:500]
+            log.error(f"PIP_ERROR: Dependency installation failed: {pip_error}")
+            shutil.rmtree(vendor_dir, ignore_errors=True)
+            raise PluginInstallError(
+                f"dependency installation failed (pip exit code {process.returncode}"
+                + (", package index/network not reachable)" if transient else ")"),
+                transient=transient,
+            )
+        log.info("SUCCESS: All dependencies resolved into private vendor directory.")
 
     async def uninstall_plugin(self, module_id: str, repo_name: str):
         """Löscht den Plugin-Ordner physisch."""
@@ -1145,20 +1462,21 @@ class PluginService:
         data = None
 
         # 1. Prefer the local git clone — fast, no network, no tokens.
-        if COLLECTION_JSON_PATH.exists():
+        json_path = collection_json_path()
+        if json_path.exists():
             try:
-                data = json.loads(COLLECTION_JSON_PATH.read_text(encoding="utf-8"))
-                log.debug(f"MARKETPLACE: Loaded collection from local clone ({COLLECTION_JSON_PATH})")
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                log.debug(f"MARKETPLACE: Loaded collection from local clone ({json_path})")
             except Exception as exc:
                 log.warning(f"MARKETPLACE: Failed to read local collection JSON: {exc}")
 
         # 2. Fall back to HTTP if the clone isn't available yet.
         if data is None:
-            log.info(f"MARKETPLACE: Local clone not ready, falling back to HTTP ({COLLECTION_FALLBACK_URL})")
+            log.info(f"MARKETPLACE: Local clone not ready, falling back to HTTP ({collection_fallback_url()})")
             try:
                 # Public raw.githubusercontent.com URL — no auth headers needed.
                 async with httpx.AsyncClient(headers=self._get_headers(include_auth=False), follow_redirects=True) as client:
-                    resp = await client.get(COLLECTION_FALLBACK_URL, timeout=5.0)
+                    resp = await client.get(collection_fallback_url(), timeout=5.0)
                     resp.raise_for_status()
                     data = resp.json()
             except Exception as exc:
