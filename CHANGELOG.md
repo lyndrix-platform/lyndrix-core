@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The core is released as the image `ghcr.io/lyndrix-platform/lyndrix-core:<version>`; the version is
 `app/version.py` (a push to `main` builds the image and creates the tag `v<version>`).
 
-## [1.12.0] - unreleased
+## [1.12.0] - 2026-11-16
 Result of the 2026-11 core audit (cluster, security, bugs, tests). Plugin API **1.14.0** (was 1.13.0).
 Read **Upgrade notes** before rolling out — several defaults became stricter.
 
