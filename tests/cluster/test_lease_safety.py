@@ -640,3 +640,68 @@ def test_scope_ttl_is_validated_like_any_lease():
         return ka._held["short"].ttl
 
     assert asyncio.run(run()) == 4.0                              # raised to two heartbeat intervals
+
+
+# --- N1: a one-shot acquire that answers after its timeout ---------------------------
+
+class _ThreadCoordinator(TableCoordinator):
+    """Like the db driver: the call runs in a worker thread, so giving up on
+    the await does not stop it."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        import threading
+
+        self.db_answers = threading.Event()
+
+    async def try_acquire(self, name, ttl=None):
+        def blocking():
+            self.db_answers.wait(10)                 # the database is slow, not dead
+            self.table.rows[name] = (self.instance_id, self.clock() + (ttl or TTL))
+            return True
+
+        return await asyncio.get_running_loop().run_in_executor(None, blocking)
+
+
+def test_a_one_shot_acquire_that_is_granted_after_its_timeout_is_released():
+    """The scope was told "not acquired" after the timeout, but the call went
+    on in its thread and took the lease: nobody on this instance knew, nobody
+    renewed or released it, and the peers were locked out for a full TTL."""
+    clock = FakeClock()
+    table = LeaseTable()
+    ca, cb = _ThreadCoordinator(table, "A", clock), TableCoordinator(table, "B", clock)
+    ka = LeaseKeeper(ca, ttl=TTL, heartbeat_s=0.05, clock=clock)
+    kb = LeaseKeeper(cb, ttl=TTL, heartbeat_s=0.05, clock=clock)
+
+    async def run():
+        assert await ka.acquire_scoped("nightly") is False       # gave up after the timeout (1 s)
+        assert "nightly" not in table.rows
+        ca.db_answers.set()                                      # … and now the database grants it
+        for _ in range(200):
+            if "nightly" in ca.released:
+                break
+            await asyncio.sleep(0.01)
+        await ka.wait_released()
+        assert ca.released == ["nightly"] and "nightly" not in table.rows
+        assert not ka.holds("nightly")
+        assert await kb.acquire_scoped("nightly") is True        # the peer is not locked out for a TTL
+        await kb.release_scoped("nightly")
+
+    asyncio.run(run())
+
+
+def test_a_late_grant_is_kept_when_the_instance_wants_the_lease_by_then():
+    clock = FakeClock()
+    table = LeaseTable()
+    ca = _ThreadCoordinator(table, "A", clock)
+    ka = LeaseKeeper(ca, ttl=TTL, heartbeat_s=0.05, clock=clock)
+
+    async def run():
+        assert await ka.acquire_scoped("nightly") is False
+        ka.want("nightly")                                       # a standing interest registered meanwhile
+        ca.db_answers.set()
+        await asyncio.sleep(0.1)
+        await ka.wait_released()
+        assert ca.released == [] and table.rows["nightly"][0] == "A"
+
+    asyncio.run(run())

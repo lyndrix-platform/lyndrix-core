@@ -38,6 +38,7 @@ Safety rules (the order of events is the whole point of a lease):
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import random
 import time
@@ -343,18 +344,43 @@ class LeaseKeeper:
         ttl = self._effective_ttl(name, ttl)
         self._scoped[name] = ttl          # reserved before the await: concurrent scopes see it
         started = self._clock()
+        granted, token = None, None
+        # Not ``wait_for``: cancelling the await does not stop the coordinator
+        # call (it runs in a worker thread) — it only throws its answer away.
+        # A call that outlives the timeout may still take the lease, and then
+        # nobody here knew about it: the peers were locked out for a full TTL.
+        attempt = asyncio.ensure_future(self._call_acquire(name, ttl, True))
         try:
-            granted, token = await asyncio.wait_for(
-                self._call_acquire(name, ttl, True), timeout=max(1.0, float(self.heartbeat_s)))
-        except Exception as exc:
-            log.debug("LEASE: one-shot acquire of '%s' failed: %s", name, exc)
-            granted, token = None, None
+            done, _ = await asyncio.wait({attempt}, timeout=max(1.0, float(self.heartbeat_s)))
+        except asyncio.CancelledError:
+            self._scoped.pop(name, None)
+            attempt.add_done_callback(functools.partial(self._late_scoped_answer, name))
+            raise
+        if not done:
+            log.debug("LEASE: one-shot acquire of '%s' timed out", name)
+            attempt.add_done_callback(functools.partial(self._late_scoped_answer, name))
+        else:
+            try:
+                granted, token = attempt.result()
+            except Exception as exc:
+                log.debug("LEASE: one-shot acquire of '%s' failed: %s", name, exc)
         if not granted or name not in self._scoped:
             self._scoped.pop(name, None)
             return False
         self._held[name] = _Holding(since=started, ttl=ttl, token=token)
         self._transition(name)
         return True
+
+    def _late_scoped_answer(self, name: str, attempt: "asyncio.Future") -> None:
+        """The coordinator answered a one-shot acquire after its caller gave
+        up. If it granted the lease and nobody here holds, wants or is about
+        to take it, give it back at once."""
+        if attempt.cancelled() or attempt.exception() is not None:
+            return
+        granted, _token = attempt.result()
+        if granted and name not in self._held and name not in self._scoped and name not in self._wanted:
+            log.info("LEASE: late grant of '%s' after the one-shot acquire timed out — releasing it", name)
+            self._release_in_background(name)
 
     async def release_scoped(self, name: str) -> None:
         """End a scope opened with :meth:`acquire_scoped` and free the lease."""
