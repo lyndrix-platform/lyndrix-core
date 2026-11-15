@@ -25,6 +25,9 @@ _MARKER = r"[A-Za-z0-9_.\"'<>=!~()\s-]{1,200}"
 _REQUIREMENT_RE = re.compile(
     rf"^{_NAME}\s*(?:{_EXTRAS})?\s*(?:{_SPECIFIERS})?\s*(?:;\s*{_MARKER})?$"
 )
+# A whitespace-separated token starting with "-" (pip option), also unquoted
+# inside a marker.
+_OPTION_TOKEN_RE = re.compile(r"(?:^|\s)-")
 # pip treats "#" as a comment start at the beginning of a line or after whitespace.
 _COMMENT_RE = re.compile(r"(^|\s+)#.*$")
 
@@ -52,6 +55,13 @@ def check_requirements(text: str) -> list[str]:
             continue
         line = _COMMENT_RE.sub("", raw).strip()
         if not line:
+            continue
+        # pip splits a line at its first token that starts with "-" and reads
+        # everything from there as per-requirement options
+        # (--config-settings, --global-option, -i …). The marker alphabet
+        # allows "-" and spaces, so such a token must be refused explicitly.
+        if _OPTION_TOKEN_RE.search(line):
+            problems.append(f"line {number}: pip options are not allowed")
             continue
         if not _REQUIREMENT_RE.fullmatch(line):
             problems.append(

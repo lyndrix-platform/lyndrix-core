@@ -93,6 +93,17 @@ def test_continuation_hidden_in_a_comment_is_rejected():
     assert check_requirements("requests # harmless \\\n--index-url https://evil.example/\n")
 
 
+@pytest.mark.parametrize("line", [
+    'six ; python_version >= "3" --config-settings=--build-option=--x',
+    'six ; os_name == "posix" --global-option=build_ext',
+    'six ; os_name == "posix" -i evilhost',
+])
+def test_options_behind_a_marker_are_rejected(line):
+    """B-2 (opus review): the marker alphabet allows "-" and spaces; pip reads
+    everything from the first "-" token on as per-requirement options."""
+    assert check_requirements(line) == ["line 1: pip options are not allowed"]
+
+
 def test_oversized_file_is_rejected():
     assert check_requirements("requests\n" * 500)
 
