@@ -16,9 +16,21 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 ### Upgrade notes
 - **Login sessions expire** 30 days after creation (`LYNDRIX_SESSION_MAX_AGE_HOURS`, default `720`, `0` =
   never). Older sessions end at the first request after the upgrade; scripts that stored a
-  `/api/auth/login` token must log in again or use a named API key (those never expire).
-- **Changing your own password needs `current_password`** (`PATCH /api/users/{u}`, 422 without it). The
-  React shell must send it — until then the profile tab cannot change the own password.
+  `/api/auth/login` token must log in again or use a named API key (those never expire). The sessions
+  live in the shared DB, so during a rolling update they end on the 1.11 instances too — create the
+  named key for operator scripts **before** the first 1.12 instance starts (or start the rollout with
+  `LYNDRIX_SESSION_MAX_AGE_HOURS=0` and set it afterwards).
+- **Changing your own password needs `current_password`** (`PATCH /api/users/{u}`, 422 without it).
+  lyndrix-ui ≥ 1.8.0 already sends it from the profile (`POST /api/users/{u}/password`); only an admin
+  changing their *own* password in the user detail panel (PATCH without `current_password`) gets 422
+  — use the profile for that.
+- **Environment passwords sign out**: when a seeded account's password from the environment
+  (`LYNDRIX_ADMIN_PASSWORD`, `LYNDRIX_BOT_PASSWORD`) differs from the stored one, the boot updates it *and* ends that
+  account's sessions. Every instance must carry the same value, or instances booting with different
+  values sign the account out in turns.
+- **`LYNDRIX_TRUSTED_PROXIES`**: with `*` any client can set `X-Forwarded-For` and pick the address the
+  per-address login budgets count against; set the load balancer address/CIDR (k3s: the pod CIDR, e.g.
+  `10.42.0.0/16`).
 - **Config precedence**: a value in `.env` now wins over a Vault override of the same editable setting
   (documented order OS env > `.env` > Vault > default; before, Vault won over `.env`).
 - **`LOG_LEVEL` is honoured from startup**: with the default `INFO` the file log and the in-memory log
@@ -40,7 +52,12 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - **Cluster**: set `stop_grace_period: 30s` (Docker) / check `progressDeadlineSeconds` (k3s); a new pod is
   not ready until its plugins are loaded (`plugins:converging`, capped by
   `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`); `LYNDRIX_INSTANCE_ID` must be unique among running processes;
-  rotating `STORAGE_SECRET` needs a restart of all instances. Schema changes are additive and safe next
+  rotating `STORAGE_SECRET` needs a restart of all instances. `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` defaults
+  to 300 (keep `progressDeadlineSeconds` above it). An instance with role `api` that does not share
+  `STORAGE_DIR` (e.g. a Compose core next to the k3s pods) is a permanent preflight `storage: warn` —
+  keep it out of the user-facing balancer and narrow `LYNDRIX_STORAGE_SHARED_ROLES`, or share the
+  volume. Do not start a rolling restart (`POST /api/system/restart`) or plugin upgrades while 1.11
+  and 1.12 instances run side by side. Schema changes are additive and safe next
   to 1.11.x instances during a rolling update (`cluster_leases.token`, `cluster_instances.incarnation`,
   `cluster_instances.stopped_at`, `users.email_trusted`).
 - **Disabled plugins lose their REST routes** (404 until re-enabled); `PUT` plugin settings is a merge.
@@ -89,8 +106,16 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - Event bridge: no permanently skipped late-committed ids, ordered publishing with a bounded outbox that
   survives a DB outage, 64 kB payload cap; plugins activated by a peer-triggered reconcile can publish
   cluster events again.
-- Rolling restart restarts one instance at a time, leader last; storage preflight checks marker
-  content among the roles that must share storage (`LYNDRIX_STORAGE_SHARED_ROLES`).
+- Rolling restart restarts one instance at a time, leader last — also when it was requested on a
+  non-leader (the leader's per-instance commands are no longer dropped as "derived from a relayed
+  event"); storage preflight checks marker content among the roles that must share storage
+  (`LYNDRIX_STORAGE_SHARED_ROLES`).
+- Lease hand-over: a hand-over requested by a peer announces the free lease; a keeper tick or a
+  `ctx.lease()` scope during an explicit hand-over (admin release, drain) can no longer take the lease
+  back while its release is pending (two holders for up to one heartbeat).
+- Preflight: an undecided check gets at most five quick re-runs — heartbeat-triggered ones included
+  (before, a permanent `storage: warn` re-ran the preflight on every heartbeat) — then
+  `LYNDRIX_PREFLIGHT_INTERVAL_SECONDS` (300); an unchanged warning is logged once.
 - Plugin operations: a version that failed verification is backed off (10 min … 24 h) instead of being
   re-installed on every reconcile pass, reverts announce themselves, backed-off instances report at
   once, dead participants are marked `gone`.
@@ -115,6 +140,9 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
 - Event bus delivers every distinct callback (bound methods of two instances, closures); blocking
   DB/Vault calls moved off the event loop on the login, SSE, plugin lifecycle and webhook paths.
 - Preferences lost-update race; bootstrap DDL under the cluster lock; desired-plugin pins match exactly.
+- The `users` column migration waits at most 5 s per attempt for the table's metadata lock (6 attempts)
+  instead of MariaDB's default of a day, during which every login would queue behind it.
+- `requirements.txt`: pip options hidden behind an environment marker are refused.
 
 ### Added (plugin API 1.14.0)
 - `ctx.aget_secret`, `ctx.aset_secret`, `ctx.aget_setting`, `ctx.aget_all_settings`.
@@ -125,7 +153,8 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
   `LYNDRIX_PLUGIN_GITLAB_TOKEN_HOST`, `LYNDRIX_PLUGIN_PIP_INDEX_URL`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_MB`,
   `LYNDRIX_PLUGIN_MAX_EXTRACTED_MB`, `LYNDRIX_PLUGIN_MAX_ARCHIVE_FILES`, `LYNDRIX_THEME_MAX_ZIP_MB`,
   `LYNDRIX_RESTART_GRACE_SECONDS`, `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`, `LYNDRIX_STORAGE_SHARED_ROLES`,
-  `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS` — see `docs/ha/configuration.md`.
+  `LYNDRIX_RESTART_INSTANCE_TIMEOUT_SECONDS`, `LYNDRIX_PREFLIGHT_INTERVAL_SECONDS` — see
+  `docs/ha/configuration.md`.
 
 ### Known limits
 - MariaDB/Galera-, NFS- and Vault-specific paths (READ COMMITTED sessions, `GET_LOCK` skip,
