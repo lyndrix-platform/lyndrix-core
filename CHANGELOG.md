@@ -150,6 +150,17 @@ Read **Upgrade notes** before rolling out — several defaults became stricter.
   pool of 15, was 16).
 
 ### Fixed
+- **A database outage no longer signs everybody out.** While the API-key store could not be read, every bearer request
+  was answered 401; the React shell drops its token on 401, so each database blip sent all users to the login page.
+  The answer is now 503 with `Retry-After: 5`; routes with optional authentication keep serving anonymous callers.
+  (Found on the staging cluster, S-3.)
+- **No false "dead" verdicts after an outage of our own.** The first instance that reconnected after a cluster-wide
+  database outage declared all peers dead (`cluster:instance_lost` for live instances, `instance_state`/`role_state`
+  = `dead`). After its own heartbeat failed, an instance now withholds "dead" for one lease TTL plus one beat
+  (reported as `unknown`). (Staging, S-2.)
+- The preflight reports a coordinator that is still starting as a warning and re-checks, instead of logging
+  `PREFLIGHT [coordinator] FAIL … unknown error` on every instance start; a real start error stays a failure.
+  (Staging, S-1.)
 - Disabling a plugin unmounts its REST routes; a failed import leaves no modules/ORM classes behind;
   async `setup()` runs once; unload/reload awaits `teardown()` (bounded by
   `LYNDRIX_PLUGIN_TEARDOWN_TIMEOUT`) before tasks are cancelled and leases released; several routers
