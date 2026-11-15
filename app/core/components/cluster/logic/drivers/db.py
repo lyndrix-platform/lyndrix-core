@@ -81,7 +81,32 @@ _EVENT_REREAD_WINDOW = 500
 _RELEASED_LEASE_RETENTION = timedelta(hours=24)
 # Worker threads for coordinator SQL. Sized for: one renewal per lease (twice
 # while calls hang), heartbeat, event poll, publisher, kv calls of requests.
+# This is the upper bound; the actual number stays below the size of the
+# database connection pool (see ``coordinator_threads``).
 _EXECUTOR_THREADS = 16
+_EXECUTOR_THREADS_MIN = 2
+
+
+def coordinator_threads(pool) -> int:
+    """How many worker threads the coordinator may use with ``pool``.
+
+    Every coordinator thread holds one pooled connection while it runs. With
+    more threads than the pool has connections (it was 16 against SQLAlchemy's
+    default 5 + 10 overflow), a hanging database let the coordinator occupy
+    the whole pool — every API request then waited for a connection until the
+    pool timeout. A quarter of the pool (at least two connections) is left to
+    everything else. Pools without a fixed size (SQLite in tests, an unlimited
+    overflow) get the upper bound.
+    """
+    try:
+        size, overflow = int(pool.size()), int(getattr(pool, "_max_overflow"))
+    except Exception:
+        return _EXECUTOR_THREADS
+    if overflow < 0 or size <= 0:      # unlimited overflow / unlimited pool
+        return _EXECUTOR_THREADS
+    capacity = size + overflow
+    reserved = max(2, capacity // 4)
+    return max(_EXECUTOR_THREADS_MIN, min(_EXECUTOR_THREADS, capacity - reserved))
 # Columns added after the tables first shipped (core 1.4) — all nullable, so
 # older instances that never mention them keep inserting and updating rows.
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
@@ -189,7 +214,14 @@ class DbCoordinator:
     async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
         """Run blocking coordinator SQL on this driver's own worker threads."""
         if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=_EXECUTOR_THREADS, thread_name_prefix="lyndrix-coord")
+            try:
+                workers = coordinator_threads(self._engine_getter().pool)
+            except Exception:
+                # No engine yet: the call fails by itself and says so. Do not
+                # size the executor before the pool is known.
+                return await asyncio.get_running_loop().run_in_executor(None, functools.partial(fn, *args))
+            self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lyndrix-coord")
+            log.debug("COORDINATOR: %s worker thread(s) for coordinator SQL", workers)
         return await asyncio.get_running_loop().run_in_executor(self._executor, functools.partial(fn, *args))
 
     def refresh_connections(self, reason: str = "") -> bool:
