@@ -151,8 +151,9 @@ def _age(auth_db, label, hours):
         s.commit()
 
 
-def test_login_session_expires_after_the_maximum_age(client, auth_db, mint_key, bearer):
+def test_login_session_expires_after_the_maximum_age(client, auth_db, mint_key, bearer, enforced_since):
     assert settings.LYNDRIX_SESSION_MAX_AGE_HOURS == 720                 # 30 days by default
+    enforced_since(24 * 365)      # the rule has applied for a year: these are not legacy sessions
     session = bearer(mint_key("viewer", label=SESSION_LABEL))
     api_key = bearer(mint_key("viewer", label="ci"))
     _age(auth_db, SESSION_LABEL, 719)

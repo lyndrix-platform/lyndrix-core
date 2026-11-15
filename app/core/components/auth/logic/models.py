@@ -148,3 +148,17 @@ class UserApiKey(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_used_at = Column(DateTime, nullable=True)
     revoked = Column(Boolean, default=False)
+
+
+class AuthMarker(Base):
+    """A point in time the whole deployment agrees on (one row per name).
+
+    Written once by the first instance that needs it and never changed
+    afterwards, so every instance — and every later version — reads the same
+    value from the shared database. ``session_policy`` keeps the instant from
+    which the login-session max-age is enforced here.
+    """
+    __tablename__ = "auth_markers"
+
+    name = Column(String(64), primary_key=True)
+    at = Column(DateTime, nullable=False)

@@ -169,6 +169,12 @@ class ApiKeyOut(BaseModel):
     created_at: Optional[str]
     last_used_at: Optional[str]
     revoked: bool
+    # Additive (core 1.12): login sessions carry when they end by age.
+    # ``expiry`` = "max_age" | "legacy_exempt" | "legacy_from_enforcement" |
+    # "disabled" | "unknown"; ``expires_at`` null = does not expire by age.
+    is_session: bool = False
+    expires_at: Optional[str] = None
+    expiry: Optional[str] = None
 
 
 def _user_service():
@@ -250,6 +256,9 @@ def _key_to_out(k) -> ApiKeyOut:
         created_at=k.created_at.isoformat() if k.created_at else None,
         last_used_at=k.last_used_at.isoformat() if k.last_used_at else None,
         revoked=bool(k.revoked),
+        is_session=bool(getattr(k, "is_session", False)),
+        expires_at=k.expires_at.isoformat() if getattr(k, "expires_at", None) else None,
+        expiry=getattr(k, "expiry", None),
     )
 
 

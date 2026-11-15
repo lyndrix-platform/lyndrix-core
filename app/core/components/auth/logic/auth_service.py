@@ -7,7 +7,8 @@ from core.bus import bus
 from core.logger import get_logger
 from core.components.database.logic.db_service import Base, db_instance
 from .hashing import hash_password, verify_password
-from .models import User, Group, UserApiKey, UserPreference  # noqa: F401 — imports ensure tables are created
+from . import session_policy
+from .models import AuthMarker, User, Group, UserApiKey, UserPreference  # noqa: F401 — imports ensure tables are created
 
 log = get_logger("Core:AuthService")
 
@@ -120,6 +121,9 @@ class AuthService:
             Base.metadata.create_all(bind=db_instance.engine)
             log.debug("DB: IAM tables checked/created.")
             self._migrate_schema()
+            # First boot of a core that knows the session max-age: remember
+            # the instant, so sessions from before it are not expired (R1).
+            session_policy.ensure_enforcement_start()
             self._seed_default_groups()
             self._ensure_admin_permissions()
             self._seed_users()

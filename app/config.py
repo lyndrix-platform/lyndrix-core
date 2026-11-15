@@ -161,6 +161,15 @@ class Settings(BaseSettings):
     # in hours; after that the token answers 401 and the user signs in again.
     # 0 = never expires. Named API keys a user creates are NOT affected.
     LYNDRIX_SESSION_MAX_AGE_HOURS: int = 720
+    # What the max-age means for LEGACY sessions — those created before this
+    # deployment first ran a core that knows the rule (the instant is recorded
+    # once in the database, table auth_markers):
+    #   exempt            they never expire by age (default: an upgrade signs
+    #                     nobody out and breaks no script that uses a session token)
+    #   from_enforcement  their age counts from the recorded instant
+    #   strict            like any other session (age counts from creation)
+    # Revocation, a password change and deleting the account end them regardless.
+    LYNDRIX_SESSION_MAX_AGE_LEGACY: str = "exempt"
     # Open event streams (GET /api/events, one per browser tab) a single user
     # may hold on one instance; further ones get 429 and the shell falls back
     # to polling until one closes. Streams without a login are limited per
@@ -427,6 +436,17 @@ class Settings(BaseSettings):
         if self.VAULT_SKIP_VERIFY:
             violations.append("VAULT_SKIP_VERIFY (Vault TLS verification disabled)")
         return violations
+
+    @model_validator(mode="after")
+    def _validate_session_policy(self) -> "Settings":
+        mode = (self.LYNDRIX_SESSION_MAX_AGE_LEGACY or "exempt").strip().lower()
+        if mode not in ("exempt", "from_enforcement", "strict"):
+            raise ValueError(
+                "LYNDRIX_SESSION_MAX_AGE_LEGACY must be 'exempt', 'from_enforcement' or 'strict', "
+                f"got {self.LYNDRIX_SESSION_MAX_AGE_LEGACY!r}"
+            )
+        self.LYNDRIX_SESSION_MAX_AGE_LEGACY = mode
+        return self
 
     @model_validator(mode="after")
     def _validate_cluster_mode(self) -> "Settings":

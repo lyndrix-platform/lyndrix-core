@@ -168,6 +168,28 @@ all other sessions") from Settings → Profile, separate from long-lived API key
   (default 720 = 30 days, `0` = never): the token then answers `401` and the
   shell returns to the login page. Named API keys do not expire. The label
   prefix `web-session` is reserved for sessions.
+- **Sessions from before the rule are grandfathered.** The first boot of a core
+  that knows the max-age (≥ 1.12) records that instant once for the whole
+  deployment (table `auth_markers`, row `session_max_age_enforced_from`; written
+  under the bootstrap lock, never changed afterwards, the same for every
+  instance). A session created before it is a *legacy* session and
+  `LYNDRIX_SESSION_MAX_AGE_LEGACY` decides what the max-age means for it:
+
+  | Value | Legacy sessions |
+  |---|---|
+  | `exempt` (default) | never expire by age — an upgrade signs nobody out and a session token used by a script keeps working |
+  | `from_enforcement` | age counts from the recorded instant: they all end one max-age after the upgrade |
+  | `strict` | like any other session: age counts from creation, old ones end with their next request |
+
+  The exemption covers the age only — revoking the session, a password change
+  and deleting the account end a legacy session like any other. While the
+  instant cannot be read (bootstrap not finished, table missing) no session is
+  expired, except with `strict`, which does not need it. `GET
+  /api/users/{username}/api-keys` shows it per row: `is_session`, `expires_at`
+  (null = does not expire by age) and `expiry` (`max_age`, `legacy_exempt`,
+  `legacy_from_enforcement`, `disabled`, `unknown`). To end the exemption later,
+  set `from_enforcement` (announced end) or `strict` (immediately) on every
+  instance; long-lived automation should use a named API key either way.
 - A password change (own, admin reset, environment rotation) ends the account's
   other login sessions; API keys are kept.
 - Deleting an account removes its API keys, sessions, linked identities and

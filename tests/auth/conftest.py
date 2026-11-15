@@ -15,7 +15,9 @@ from sqlalchemy.pool import StaticPool
 import core.services  # noqa: F401  (import order: services before core.api)
 from core.components.auth.logic import access_service
 from core.components.auth.logic.hashing import hash_password
+from core.components.auth.logic import session_policy
 from core.components.auth.logic.models import (
+    AuthMarker,
     Group,
     RoleGrantLedger,
     User,
@@ -78,7 +80,7 @@ def auth_db(monkeypatch):
     engine = create_engine(
         "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
-    for model in (User, Group, UserApiKey, UserIdentity, UserPreference, RoleGrantLedger):
+    for model in (User, Group, UserApiKey, UserIdentity, UserPreference, RoleGrantLedger, AuthMarker):
         model.__table__.create(bind=engine)
     # Same session options as DatabaseService (autoflush off changes flush order).
     session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -100,9 +102,32 @@ def auth_db(monkeypatch):
         s.commit()
 
     access_service.invalidate_cache()
+    # Like a deployment whose IAM bootstrap ran: the session max-age applies
+    # from "now" (tests that need an older deployment use ``enforced_since``).
+    session_policy.reset_for_tests()
+    session_policy.ensure_enforcement_start()
     yield session_factory
     access_service.invalidate_cache()
+    session_policy.reset_for_tests()
     engine.dispose()
+
+
+@pytest.fixture()
+def enforced_since(auth_db):
+    """Move the recorded max-age enforcement instant ``hours`` into the past
+    (``None`` removes the record: a database the bootstrap has not reached)."""
+    from datetime import datetime, timedelta
+
+    def _set(hours):
+        with auth_db() as s:
+            s.query(AuthMarker).delete()
+            if hours is not None:
+                s.add(AuthMarker(name=session_policy.MARKER_NAME,
+                                 at=datetime.utcnow() - timedelta(hours=hours)))
+            s.commit()
+        session_policy.reset_for_tests()
+
+    return _set
 
 
 @pytest.fixture()

@@ -19,6 +19,7 @@ from typing import List, Optional, Tuple
 
 from core.logger import get_logger
 from core.components.database.logic.db_service import db_instance
+from . import session_policy
 from .models import User, UserApiKey, UserPreference
 
 log = get_logger("Core:ApiKeyService")
@@ -40,14 +41,9 @@ def is_session_label(label: Optional[str]) -> bool:
 
 def session_max_age() -> Optional[timedelta]:
     """Absolute lifetime of a login session, or ``None`` for "never expires"
-    (``LYNDRIX_SESSION_MAX_AGE_HOURS``, 0 = never)."""
-    try:
-        from config import settings
-
-        hours = int(getattr(settings, "LYNDRIX_SESSION_MAX_AGE_HOURS", 0) or 0)
-    except Exception:  # pragma: no cover - defensive
-        hours = 0
-    return timedelta(hours=hours) if hours > 0 else None
+    (``LYNDRIX_SESSION_MAX_AGE_HOURS``, 0 = never). Which sessions it applies
+    to is decided by ``session_policy`` (sessions from before the rule existed)."""
+    return session_policy.max_age()
 
 
 @dataclass
@@ -76,6 +72,13 @@ class ApiKeyInfo:
     created_at: Optional[datetime]
     last_used_at: Optional[datetime]
     revoked: bool
+    # Login sessions only (see session_policy): whether this row is one, when
+    # it ends by age (None = it does not) and why — "max_age", "legacy_exempt"
+    # (created before the max-age rule applied to this deployment),
+    # "legacy_from_enforcement", "disabled" or "unknown".
+    is_session: bool = False
+    expires_at: Optional[datetime] = None
+    expiry: Optional[str] = None
 
 
 def _hash_key(raw: str) -> str:
@@ -150,7 +153,10 @@ class ApiKeyService:
         * the owner's account no longer exists (a key must die with its user,
           and must not come back to life for a later account of the same name);
         * it is a login session older than ``LYNDRIX_SESSION_MAX_AGE_HOURS``
-          (named API keys never expire). The expired row is removed.
+          (named API keys never expire). The expired row is removed. Sessions
+          created before the rule applied to this deployment follow
+          ``LYNDRIX_SESSION_MAX_AGE_LEGACY`` — exempt by default — and nothing
+          is expired while that cannot be decided (``session_policy``).
         """
         if not raw_key or not raw_key.startswith(_KEY_PREFIX):
             return None
@@ -167,8 +173,7 @@ class ApiKeyService:
             if rec is None:
                 return None
             is_session = is_session_label(rec.label)
-            max_age = session_max_age() if is_session else None
-            if max_age is not None and rec.created_at is not None and rec.created_at + max_age < datetime.utcnow():
+            if is_session and session_policy.lifetime(rec.created_at).expired():
                 try:
                     s.delete(rec)
                     s.commit()
@@ -266,6 +271,8 @@ class ApiKeyService:
 
     @staticmethod
     def _to_info(rec: UserApiKey) -> ApiKeyInfo:
+        is_session = is_session_label(rec.label)
+        life = session_policy.lifetime(rec.created_at) if is_session else None
         return ApiKeyInfo(
             id=int(rec.id),
             label=str(rec.label),
@@ -274,6 +281,9 @@ class ApiKeyService:
             created_at=rec.created_at,
             last_used_at=rec.last_used_at,
             revoked=bool(rec.revoked),
+            is_session=is_session,
+            expires_at=life.expires_at if life else None,
+            expiry=life.reason if life else None,
         )
 
 
