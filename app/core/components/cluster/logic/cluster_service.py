@@ -72,11 +72,15 @@ _STATE_RANK = {"alive": 4, "draining": 3, "restarting": 2, "unknown": 1, "dead":
 # emitted any more; when an old instance sends it during a rollout, the leader
 # answers with a sequential restart instead (see restart.py).
 RESTART_TOPIC = "system:restart_requested"
+# Default of LYNDRIX_PREFLIGHT_INTERVAL_SECONDS (periodic re-check of the contracts).
 _PREFLIGHT_REFRESH_S = 300
+_PREFLIGHT_MIN_REFRESH_S = 30
 # A check that could not decide (timeout, transient error, peer too young) asks
 # for a re-run after this many heartbeats instead of the full refresh interval;
-# after _PREFLIGHT_MAX_QUICK_RECHECKS in a row the normal interval applies again
-# (a permanent warning must not turn into a check every 20 seconds).
+# after _PREFLIGHT_MAX_QUICK_RECHECKS in a row (periodic and heartbeat-triggered
+# together) the normal interval applies again — a permanent warning (storage not
+# shared with an instance on another host) must not turn into a preflight run
+# on every heartbeat.
 _PREFLIGHT_RECHECK_BEATS = 2
 _PREFLIGHT_MAX_QUICK_RECHECKS = 5
 # Upper bound for one coordinator round trip made on behalf of an API request
@@ -192,6 +196,7 @@ class ClusterService:
         self._preflight_wake: Optional[asyncio.Event] = None
         self._preflight_recheck = False
         self._preflight_quick_rechecks = 0
+        self._preflight_logged: dict = {}      # check id → (status, message) last logged
         # All STORAGE_DIR I/O of the cluster layer: one job at a time, own thread.
         self.storage = StorageProbe(clock=lambda: self._clock())
         self.storage_last_error: Optional[str] = None
@@ -616,9 +621,13 @@ class ClusterService:
         self._hb_last_ok_started = started
         self.last_heartbeat_ok_at = _utcnow()
         self.last_heartbeat_error = None
-        if self._preflight_recheck:
+        if (self._preflight_recheck and self.preflight_at is not None
+                and self._preflight_quick_rechecks < _PREFLIGHT_MAX_QUICK_RECHECKS):
             # A check could not decide while the coordinator was struggling —
             # do not leave its warning on the Cluster page for five minutes.
+            # Counted like the loop's quick re-checks: a check that stays
+            # undecided falls back to the normal interval.
+            self._preflight_quick_rechecks += 1
             self.request_preflight()
 
     def _record_heartbeat_failure(self, error: str, started: float) -> None:
@@ -864,12 +873,21 @@ class ClusterService:
         finally:
             self._preflight_running = False
 
+    @staticmethod
+    def _preflight_refresh_s() -> float:
+        try:
+            value = float(getattr(settings, "LYNDRIX_PREFLIGHT_INTERVAL_SECONDS", _PREFLIGHT_REFRESH_S))
+        except (TypeError, ValueError):
+            value = float(_PREFLIGHT_REFRESH_S)
+        return max(float(_PREFLIGHT_MIN_REFRESH_S), value)
+
     def _preflight_delay(self) -> float:
         """Seconds until the next periodic run: the refresh interval, or a
         couple of heartbeats when the last run left something undecided."""
+        refresh = self._preflight_refresh_s()
         if self._preflight_recheck and self._preflight_quick_rechecks < _PREFLIGHT_MAX_QUICK_RECHECKS:
-            return float(_PREFLIGHT_RECHECK_BEATS * self.heartbeat_s)
-        return float(_PREFLIGHT_REFRESH_S)
+            return min(refresh, float(_PREFLIGHT_RECHECK_BEATS * self.heartbeat_s))
+        return refresh
 
     async def _preflight_loop(self) -> None:
         """Peers come and go; re-check the contracts every ~5 minutes (sooner
@@ -878,7 +896,7 @@ class ClusterService:
         self._preflight_wake = asyncio.Event()
         while True:
             delay = self._preflight_delay()
-            quick = delay < _PREFLIGHT_REFRESH_S
+            quick = delay < self._preflight_refresh_s()
             try:
                 await asyncio.wait_for(self._preflight_wake.wait(), timeout=delay)
                 quick = False  # asked for explicitly — not one of the automatic re-checks
@@ -1001,11 +1019,22 @@ class ClusterService:
         self._preflight_recheck = any(c.recheck for c in checks)
         if not self._preflight_recheck:
             self._preflight_quick_rechecks = 0
+        logged: dict = {}
         for check in checks:
-            if check.status == "fail":
-                log.error("PREFLIGHT [%s] FAIL: %s%s", check.id, check.message, f" — {check.hint}" if check.hint else "")
-            elif check.status == "warn":
-                log.warning("PREFLIGHT [%s] WARN: %s%s", check.id, check.message, f" — {check.hint}" if check.hint else "")
+            if check.status not in ("fail", "warn"):
+                continue
+            key = (check.status, check.message)
+            logged[check.id] = key
+            hint = f" — {check.hint}" if check.hint else ""
+            if self._preflight_logged.get(check.id) == key:
+                # The same finding as in the last run: once in the log is
+                # enough (the summary line below still counts it every run).
+                log.debug("PREFLIGHT [%s] %s (unchanged): %s", check.id, check.status.upper(), check.message)
+            elif check.status == "fail":
+                log.error("PREFLIGHT [%s] FAIL: %s%s", check.id, check.message, hint)
+            else:
+                log.warning("PREFLIGHT [%s] WARN: %s%s", check.id, check.message, hint)
+        self._preflight_logged = logged
         summary = self.preflight_summary()
         log.info("PREFLIGHT: %s ok, %s warn, %s fail, %s skipped",
                  summary["ok"], summary["warn"], summary["fail"], summary["skip"])

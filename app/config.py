@@ -283,6 +283,10 @@ class Settings(BaseSettings):
     # check compares only these instances; a runner-only instance on another
     # host is reported for information, not as a problem. Empty = nobody.
     LYNDRIX_STORAGE_SHARED_ROLES: str = "api"
+    # Cluster mode: the preflight re-checks the cluster contracts this often
+    # (seconds, at least 30). A check that could not decide gets up to five
+    # quick re-runs (every two heartbeats) first, then this interval applies.
+    LYNDRIX_PREFLIGHT_INTERVAL_SECONDS: int = 300
     # Cluster mode: /api/ready stays 503 ("plugins:converging") after boot until
     # the plugins recorded in plugin_states are installed and activated on this
     # instance — a fresh pod with an empty plugin directory would otherwise take
