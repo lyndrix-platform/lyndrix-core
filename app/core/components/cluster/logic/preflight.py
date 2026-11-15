@@ -160,8 +160,16 @@ async def run_checks(service: "ClusterService") -> list[Check]:
     # 1. coordinator — live state. /api/ready does not read this result.
     if not cluster:
         add("coordinator", "skip", "single-instance mode — coordinator driver 'local'")
+    elif not service.started and not getattr(service, "start_error", None):
+        # Boot completes while the first coordinator start (lease tick + first
+        # heartbeat) is still awaiting the DB: that is "starting", not a failure.
+        # A FAIL here logged an ERROR on every instance start (staging 2026-11-15).
+        # The service re-runs the preflight once it is online.
+        add("coordinator", "warn", "coordinator is still starting (first lease pass/heartbeat in progress)",
+            "Re-evaluated as soon as the coordinator is online; a start error turns this into a failure.",
+            recheck=True)
     elif not service.started:
-        add("coordinator", "fail", f"coordinator not started: {service.start_error or 'unknown error'}",
+        add("coordinator", "fail", f"coordinator not started: {service.start_error}",
             "Check DB connectivity; the cluster_* tables are created automatically on first start.")
     elif refresh_error is not None:
         add("coordinator", "warn",

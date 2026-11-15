@@ -249,3 +249,18 @@ def test_snapshot_shape():
     assert snap["instance"]["id"] == cluster_service.instance_id
     assert set(snap["leases"]) == {"held", "wanted"}
     assert "checks" in snap["preflight"] and "ok" in snap["preflight"]
+
+
+def test_coordinator_still_starting_is_a_warning_not_a_failure(monkeypatch):
+    """Staging 2026-11-15: boot_complete ran the preflight while the first
+    coordinator start was still awaiting the DB → 'coordinator not started:
+    unknown error' (FAIL, logged as ERROR) on every instance start."""
+    monkeypatch.setattr(preflight, "_pinned_roles", lambda: {})
+    svc = _FakeClusterService([_instance("a", ["api"], "fp-A")])
+    svc.started = False
+    svc.start_error = None
+    starting = _by_id(asyncio.run(run_checks(svc)))["coordinator"]
+    assert starting.status == "warn" and starting.recheck and "starting" in starting.message
+    svc.start_error = "(2003) Can't connect"
+    failed = _by_id(asyncio.run(run_checks(svc)))["coordinator"]
+    assert failed.status == "fail" and "Can't connect" in failed.message
