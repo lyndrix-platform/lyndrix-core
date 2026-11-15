@@ -293,6 +293,49 @@ def test_busy_lock_gives_up_after_bounded_rounds(db, registry, monkeypatch):
     assert _rows(db) == {}
 
 
+def test_a_sync_that_gave_up_is_retried_without_another_lifecycle_event(db, registry, monkeypatch):
+    """N7: after the bounded busy rounds the sync was dropped until the next
+    plugin lifecycle event — on a quiet system the endpoints of this instance
+    stayed unsynced indefinitely."""
+    registry.load("alerts")
+    svc = _service()
+    lock_free = {"value": False}
+
+    @contextmanager
+    def fake_lock(name, timeout=60, *, warn=True):
+        yield lock_free["value"]
+
+    monkeypatch.setattr(mod.db_instance, "advisory_lock", fake_lock, raising=False)
+    monkeypatch.setattr(svc, "_lock_is_mandatory", lambda: True)
+    monkeypatch.setattr(mod, "_BUSY_RETRY_SECONDS", (0.001, 0.002))
+    monkeypatch.setattr(mod, "_BUSY_DEFERRED_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(mod, "_SYNC_DEBOUNCE_SECONDS", 0.0)
+
+    async def run():
+        await svc.sync_declared_endpoints()          # gives up: the caller is not held forever
+        assert _rows(db) == {} and svc.sync_skipped_busy == mod._BUSY_MAX_ROUNDS
+        lock_free["value"] = True                    # the peer finished; nothing else happens
+        for _ in range(300):
+            if _rows(db):
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert set(_rows(db)) == {"alerts"}
+    assert svc._deferred_retries == 0                # a pass that ran resets the delay
+
+
+def test_the_deferred_retry_backs_off_while_the_lock_stays_busy(monkeypatch):
+    svc = _service()
+
+    async def run():
+        delays = [svc._defer_sync() for _ in range(6)]
+        svc._deferred_retry.cancel()
+        return delays
+
+    assert asyncio.run(run()) == [60, 120, 240, 480, 600, 600]
+
+
 class _FakeDriverError(Exception):
     pass
 

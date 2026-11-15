@@ -79,6 +79,11 @@ _LOCK_WAIT_SECONDS = 5
 # and give up after this many consecutive skips — the next trigger starts over.
 _BUSY_RETRY_SECONDS = (3.0, 8.0)
 _BUSY_MAX_ROUNDS = 6
+# After that many busy rounds the runner ends (callers waiting for it must
+# not hang), but the sync is still owed: it is asked for again after this
+# delay, doubling up to the maximum while the lock stays busy.
+_BUSY_DEFERRED_RETRY_SECONDS = 60.0
+_BUSY_DEFERRED_RETRY_MAX_SECONDS = 600.0
 
 
 class _SyncBusy(Exception):
@@ -101,6 +106,8 @@ class NotificationRouterService:
         # Coalescing state — only touched on the event loop.
         self._sync_dirty = False
         self._sync_task: asyncio.Task | None = None
+        self._deferred_retry: asyncio.TimerHandle | None = None
+        self._deferred_retries = 0     # consecutive give-ups (drives the delay)
         # Counters for diagnostics and tests.
         self.sync_runs = 0
         self.sync_skipped_busy = 0
@@ -229,19 +236,39 @@ class NotificationRouterService:
             outcome = await self._sync_pass()
             if outcome != "busy":
                 busy_rounds = 0
+                self._deferred_retries = 0
                 continue
             # A peer holds the sync lock. Do not run unlocked (that produced the
             # 1020/1205/1213 storms) — stay dirty and look again a bit later.
             busy_rounds += 1
             self.sync_skipped_busy += 1
             if busy_rounds >= _BUSY_MAX_ROUNDS:
+                # Giving up for good left this instance's endpoints unsynced
+                # until some later plugin lifecycle event — possibly never.
+                delay = self._defer_sync()
                 log.warning(
                     "ROUTER: endpoint sync skipped %d times (sync lock busy) — "
-                    "leaving it to the next plugin lifecycle event.", busy_rounds,
+                    "trying again in %.0f s.", busy_rounds, delay,
                 )
                 return
             self._sync_dirty = True
             await asyncio.sleep(random.uniform(*_BUSY_RETRY_SECONDS))
+
+    def _defer_sync(self) -> float:
+        """Ask for the owed sync again later; returns the delay in seconds."""
+        delay = min(_BUSY_DEFERRED_RETRY_SECONDS * (2 ** self._deferred_retries), _BUSY_DEFERRED_RETRY_MAX_SECONDS)
+        self._deferred_retries += 1
+        if self._deferred_retry is not None:
+            self._deferred_retry.cancel()
+        self._deferred_retry = asyncio.get_running_loop().call_later(delay, self._deferred_sync)
+        return delay
+
+    def _deferred_sync(self) -> None:
+        self._deferred_retry = None
+        try:
+            self.request_sync()
+        except Exception as exc:  # pragma: no cover - loop shutting down
+            log.debug(f"ROUTER: deferred endpoint sync could not be scheduled: {exc}")
 
     def _collect_declared(self) -> tuple[dict[tuple[str, str], NotificationEndpoint], set[str]]:
         """Refresh the in-memory endpoint registry from the loaded manifests.
