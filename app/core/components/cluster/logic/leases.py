@@ -118,6 +118,12 @@ class LeaseKeeper:
         # fenced like wanted leases, but never re-acquired once lost or released.
         self._scoped: dict[str, float] = {}
         self._releasing: set = set()      # background release tasks (see wait_released)
+        # Names an explicit hand-over (release_now, drain) is giving up right
+        # now: no tick and no scope may take them again before the release
+        # reached the coordinator — otherwise this instance re-acquires while
+        # its own release is pending, the release then frees the row behind
+        # its back and a peer holds the same lease next to it.
+        self._handing_over: set[str] = set()
         # name → counter bumped on every local transition (acquired, lost,
         # forgotten, released). An attempt only counts if it is unchanged.
         self._generation: dict[str, int] = {}
@@ -293,13 +299,24 @@ class LeaseKeeper:
             if self._held.pop(name, None) is None:
                 continue
             handed.append(name)
+            self._handing_over.add(name)
             self._transition(name)
             pending.extend(self._fire_all(name, "lost"))
             self._notify(name, False)
-        # One bounded wait for all of them, then the releases side by side: a
-        # drain hands five leases over in the time it takes to hand over one.
-        await self._settle(pending)
-        await asyncio.gather(*(self._release_and_announce(name, []) for name in handed))
+        try:
+            # One bounded wait for all of them, then the releases side by side:
+            # a drain hands five leases over in the time it takes to hand over one.
+            await self._settle(pending)
+            # Clean context: the release broadcast must reach the peers even
+            # when the hand-over runs in a relayed event's handler (a peer's
+            # "release this lease" request) — the bridge drops anything
+            # emitted from there.
+            await asyncio.gather(*(
+                bus.create_tracked_task(self._release_and_announce(name, []),
+                                        name=f"cluster:lease_handover:{name}", context=clean_context())
+                for name in handed))
+        finally:
+            self._handing_over.difference_update(handed)
 
     async def _settle(self, pending: list) -> None:
         """Wait (bounded) for async ``lost`` callbacks so the work has stopped
@@ -321,7 +338,7 @@ class LeaseKeeper:
         than the TTL. Exclusive within this instance as well: a second scope
         (or an ``on_lease`` holding) for the same name gets ``False``.
         """
-        if self._stopped or name in self._scoped or name in self._held:
+        if self._stopped or name in self._scoped or name in self._held or name in self._handing_over:
             return False
         ttl = self._effective_ttl(name, ttl)
         self._scoped[name] = ttl          # reserved before the await: concurrent scopes see it
@@ -457,7 +474,7 @@ class LeaseKeeper:
     def _start_attempt(self, name: str) -> Optional[asyncio.Task]:
         entry = self._wanted.get(name)
         ttl = entry.ttl if entry is not None else self._scoped.get(name)
-        if ttl is None or self._stopped:
+        if ttl is None or self._stopped or name in self._handing_over:
             return None
         if entry is None and name not in self._held:
             return None  # a scope that is still acquiring (or lost its lease): not the tick's business

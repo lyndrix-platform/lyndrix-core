@@ -43,6 +43,7 @@ from .bridge import ClusterBridge
 from .coordinator import Coordinator, InstanceIdConflict, InstanceInfo
 from .drain import DrainController
 from .leases import RELEASED_TOPIC, LeaseKeeper
+from .origin import clean_context
 from .restart import (
     RESTART_INSTANCE_TOPIC,
     RESTART_REQUEST_TOPIC,
@@ -1110,7 +1111,12 @@ class ClusterService:
             on_change=self._on_restart_progress,
         )
         self.restart_status = dict(run.status)
-        self._restart_task = bus.create_tracked_task(run.run(), name="cluster:rolling_restart")
+        # Clean context: a request forwarded by a peer starts this run inside
+        # the relayed event's handler, and the bridge drops everything emitted
+        # from there — the leader's "restart now" commands would never leave
+        # this instance and every step would time out.
+        self._restart_task = bus.create_tracked_task(run.run(), name="cluster:rolling_restart",
+                                                     context=clean_context())
 
     def _on_restart_progress(self, status: dict) -> None:
         self.restart_status = status
