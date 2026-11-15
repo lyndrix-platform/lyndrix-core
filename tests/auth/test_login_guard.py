@@ -220,6 +220,28 @@ def test_busy_verifier_answers_503_not_401(client, passwords, monkeypatch):
     assert basic.headers["retry-after"] == form.headers["retry-after"] == "2"
 
 
+def test_unreachable_key_store_answers_503_not_401(client, mint_key, monkeypatch):
+    """Staging 2026-11-15: during a MariaDB restart every Bearer request got
+    401, and the React shell answers 401 by dropping the token and sending the
+    user to the login page — each database blip signed everybody out."""
+    from sqlalchemy.exc import OperationalError
+
+    from core.components.auth.logic.api_key_service import api_key_service
+
+    key = mint_key("viewer")
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {key}"}).status_code == 200
+
+    def down(_raw):
+        raise OperationalError("SELECT 1", {}, Exception("(2003) Can't connect to MySQL server"))
+
+    monkeypatch.setattr(api_key_service, "verify", down)
+    r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 503 and r.headers["retry-after"] == "5"
+    # routes that also serve anonymous callers stay usable (treated as anonymous)
+    who = client.get("/api/auth/whoami", headers={"Authorization": f"Bearer {key}"})
+    assert who.status_code == 200 and who.json()["authenticated"] is False
+
+
 def test_request_without_a_client_address_is_handled(auth_db, mint_key, passwords, fast_argon2):
     """Plugins authenticate synthetic requests (no ``client`` in the scope)."""
     from starlette.requests import Request

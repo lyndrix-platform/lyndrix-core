@@ -51,6 +51,9 @@ from core.logger import get_logger
 
 log = get_logger("Core:ApiSecurity")
 
+# Retry-After (seconds) when the API-key store cannot be read (database down).
+AUTH_BACKEND_RETRY_AFTER_S = 5
+
 _VAULT_PATH = "core/settings"
 _VAULT_MOUNT = "lyndrix"
 _VAULT_KEY = "system_api_key"
@@ -287,9 +290,17 @@ def _try_user_api_key(request: Request) -> Optional[ApiIdentity]:
         from core.components.auth.logic.api_key_service import api_key_service
 
         resolved = api_key_service.verify(presented.strip())
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
+        # The key store (database) did not answer — that says nothing about the
+        # key. A 401 here made the React shell drop its token and send every
+        # signed-in user to the login page on each database blip (staging
+        # 2026-11-15, MariaDB restart). 503 + Retry-After lets clients retry.
         log.warning(f"API user-key check failed: {exc}")
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is temporarily unavailable (key store not reachable). Try again shortly.",
+            headers={"Retry-After": str(AUTH_BACKEND_RETRY_AFTER_S)},
+        ) from exc
 
     if resolved is None:
         # Unknown, revoked, expired session — or the owner no longer exists.
@@ -444,7 +455,12 @@ def optional_api_auth(request: Request) -> Optional[ApiIdentity]:
     (the caller is treated as anonymous): these routes never answer 401, so
     checking a password on them would be an unthrottled yes/no oracle.
     """
-    return authenticate_request(request, allow_basic=False)
+    try:
+        return authenticate_request(request, allow_basic=False)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            return None  # key store unreachable: these routes serve anonymous callers anyway
+        raise
 
 
 def require_permission(permission: str):
