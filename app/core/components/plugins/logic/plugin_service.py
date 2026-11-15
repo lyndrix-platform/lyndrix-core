@@ -78,7 +78,51 @@ def _raw_collection_fallback_url(git_url: str) -> str:
 COLLECTION_POLL_INTERVAL = int(os.environ.get("PLUGIN_COLLECTION_POLL_INTERVAL", "900"))  # 15 min
 
 class PluginInstallError(RuntimeError):
-    """An install/upgrade step failed and the plugin must not be swapped in."""
+    """An install/upgrade step failed and the plugin must not be swapped in.
+
+    ``transient`` marks a failure that says nothing about the plugin: the
+    package index or the network did not answer (see ``is_transient_failure``).
+    The attempt still fails; the cluster reconcile retries it soon instead of
+    backing off for minutes.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
+
+
+# pip prints these (on its retry warnings and final errors) when the index or
+# the network failed — as opposed to "No matching distribution found" for a
+# requirement that does not exist, which no retry will fix. Matched against
+# pip's stderr in lower case; a version/requirement problem WITHOUT one of
+# these stays permanent.
+_PIP_TRANSIENT_MARKERS = (
+    "connection broken", "newconnectionerror", "connecttimeouterror", "readtimeouterror",
+    "connection refused", "connection reset", "connection aborted", "remote end closed connection",
+    "temporary failure in name resolution", "name or service not known", "failed to resolve",
+    "network is unreachable", "no route to host", "max retries exceeded", "read timed out",
+    "connection timed out", "proxyerror", "sslerror", "ssleoferror", "incompleteread",
+    "protocolerror", "http error 429", "http error 500", "http error 502", "http error 503",
+    "http error 504", "429 client error", "500 server error", "502 server error",
+    "503 server error", "504 server error",
+)
+
+
+def pip_failure_is_transient(stderr_text: str) -> bool:
+    """Did pip fail because the index/network did not answer?"""
+    text = (stderr_text or "").lower()
+    return any(marker in text for marker in _PIP_TRANSIENT_MARKERS)
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """True for install failures worth a quick retry: a pip run that could not
+    reach its index, and a provider (archive/API) request that failed in
+    transport or with 429/5xx."""
+    if isinstance(exc, PluginInstallError):
+        return bool(exc.transient)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TransportError, asyncio.TimeoutError))
 
 
 class PluginService:
@@ -90,6 +134,10 @@ class PluginService:
         self.github_api_base = "https://api.github.com/repos"
         # Per-repo install serialization (see install_plugin).
         self._install_locks: dict = {}
+        # repo folder name → was the latest failed install of it transient?
+        # (entry removed by the next successful install). Read by the cluster
+        # reconcile to choose between a quick retry and the long back-off.
+        self._install_failures: dict = {}
         self._warned_ambiguous_gitlab_host = False
         
         # Cache für Marketplace-Daten
@@ -943,6 +991,16 @@ class PluginService:
             lock = self._install_locks[safe_repo_name] = asyncio.Lock()
         return lock
 
+    def last_failure_was_transient(self, repo_url: str) -> bool:
+        """Whether the latest install attempt for ``repo_url`` failed for a
+        transient reason (network / package index). False when it succeeded,
+        failed for another reason or was never tried."""
+        try:
+            name = self.validate_repo_url(repo_url).repo.replace("-", "_")
+        except Exception:
+            return False
+        return bool(self._install_failures.get(name, False))
+
     async def install_plugin(self, github_url: str, version: str = "latest", upgrade: bool = False,
                              notify: bool = True, lead: bool = True):
         """Downloads, extracts and registers a new plugin from GitHub or GitLab.
@@ -1184,9 +1242,11 @@ class PluginService:
                 bus.emit("plugin:installed", {"repo": repo, "path": str(plugin_path)})
             else:
                 log.info(f"INSTALL: '{repo}' installed by reconcile — no user notification.")
+            self._install_failures.pop(safe_repo_name, None)
             return True
 
         except Exception as e:
+            self._install_failures[safe_repo_name] = is_transient_failure(e)
             log.error(f"INSTALL_ERROR: Installation failed for {repo}: {str(e)}", exc_info=True)
             
             # Put the plugin directory back into a consistent state (off the
@@ -1336,17 +1396,24 @@ class PluginService:
                 pass  # exited on its own between the timeout and the kill
             await process.wait()
             shutil.rmtree(vendor_dir, ignore_errors=True)
+            # A pip that hangs is waiting for the index, not for the plugin.
             raise PluginInstallError(
-                f"dependency installation timed out after {timeout}s"
+                f"dependency installation timed out after {timeout}s", transient=True
             ) from None
 
         if process.returncode != 0:
             # pip output can echo index URLs; the logger masks credentials in them.
-            pip_error = stderr.decode(errors="replace")[:500]
+            pip_output = stderr.decode(errors="replace")
+            # Classified on the whole output: the connection warnings come
+            # first, the logged excerpt may not reach them.
+            transient = pip_failure_is_transient(pip_output)
+            pip_error = pip_output[:500]
             log.error(f"PIP_ERROR: Dependency installation failed: {pip_error}")
             shutil.rmtree(vendor_dir, ignore_errors=True)
             raise PluginInstallError(
-                f"dependency installation failed (pip exit code {process.returncode})"
+                f"dependency installation failed (pip exit code {process.returncode}"
+                + (", package index/network not reachable)" if transient else ")"),
+                transient=transient,
             )
         log.info("SUCCESS: All dependencies resolved into private vendor directory.")
 

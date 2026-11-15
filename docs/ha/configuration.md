@@ -83,7 +83,7 @@ most five times in a row, then at the normal interval). Each check is `ok`, `war
 | `vault` | Vault has not been opened yet (boot), or — only with `LYNDRIX_READY_REQUIRES_VAULT=true` — it was lost after the boot |
 | `draining` | SIGTERM received, the instance is leaving |
 | `coordinator` | cluster mode: the coordinator has not started yet (it retries with back-off) |
-| `plugins:converging` | cluster mode: boot finished, but the plugins of the cluster are still being installed/activated here (new pod with an empty plugin directory). Ends when they are, or after `LYNDRIX_READY_PLUGIN_WAIT_SECONDS` |
+| `plugins:converging` | cluster mode: boot finished, but the plugins of the cluster are still being installed/activated here (new pod with an empty plugin directory). Ends when they are, or after `LYNDRIX_READY_PLUGIN_WAIT_SECONDS`. An install that failed because the network or the package index did not answer counts as still converging while its quick retries (30/60/120/300 s) run |
 | `instance_id_conflict` | cluster mode: a process that started later registered under this `LYNDRIX_INSTANCE_ID`; this (older) process stands back until the other stops |
 | `heartbeat` | cluster mode: no heartbeat succeeded for a full lease TTL — the peers already count this instance as dead (no leases, no shards), so it must not receive traffic either. Clears with the next successful beat |
 | `preflight:storage_secret` | this instance's `STORAGE_SECRET` differs from the cluster's |

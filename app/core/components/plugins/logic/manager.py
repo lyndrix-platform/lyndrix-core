@@ -35,6 +35,11 @@ _LEGACY_PLUGIN_STATE_IDS = {
 # (10 min → 24 h) instead of on every pass.
 _RECONCILE_INSTALL_BACKOFF_BASE_S = 600
 _RECONCILE_INSTALL_BACKOFF_MAX_S = 86400
+# …except when the failure was transient (package index / network did not
+# answer): those are retried on this short schedule first — a fresh pod must
+# not miss a plugin for ten minutes because PyPI hiccuped for a few seconds.
+# Once the schedule is used up the long back-off above takes over.
+_RECONCILE_TRANSIENT_RETRY_S = (30, 60, 120, 300)
 
 
 class ModuleManager:
@@ -44,6 +49,11 @@ class ModuleManager:
         self._schema_lock = threading.Lock()
         # module_id → (failures, monotonic time of the next allowed install attempt)
         self._reconcile_install_backoff: dict = {}
+        # module_id → (quick retries used, monotonic time of the next one — or
+        # None once the short schedule is used up / the failure was permanent).
+        # Kept until an install succeeds, so the schedule runs once per streak.
+        self._reconcile_transient_retry: dict = {}
+        self._install_retry_task = None
         # (module_id, version) → (failures, monotonic time of the next allowed
         # attempt): versions that were installed here but failed verification.
         # In-memory on purpose — plugin_states keeps the version the cluster was
@@ -1014,7 +1024,13 @@ class ModuleManager:
         ``initializing`` (async ``setup()``, or loaded and waiting for their
         activation) and installs/upgrades in flight. A plugin whose install
         failed into back-off, or that ended ``failed``/``degraded``/``blocked``,
-        is NOT pending — a dead repo must not keep the instance unready."""
+        is NOT pending — a dead repo must not keep the instance unready.
+
+        An install that failed for a transient reason and waits for one of its
+        quick retries IS pending: the instance should not go ready without the
+        plugin because the package index hiccuped. Readiness itself is capped
+        (``LYNDRIX_READY_PLUGIN_WAIT_SECONDS``), so this never holds an
+        instance back longer than that."""
         pending = [
             module_id for module_id, entry in self.registry.items()
             if entry["manifest"].type == "PLUGIN" and entry.get("status") == "initializing"
@@ -1024,6 +1040,10 @@ class ModuleManager:
             if key.startswith("install:") and lock.locked()
         ]
         pending += [f"upgrade:{module_id}" for module_id in self._reconcile_upgrading]
+        pending += [
+            f"retry:{module_id}" for module_id, (_used, due) in self._reconcile_transient_retry.items()
+            if due is not None
+        ]
         return pending
 
     async def _watch_boot_convergence(self, poll_s: float = 0.5, retry_s: float = 15.0) -> None:
@@ -1450,10 +1470,15 @@ class ModuleManager:
                 log.error("RECONCILE: periodic cluster reconcile failed", exc_info=True)
 
     def _reconcile_install_allowed(self, module_id: str) -> bool:
+        import time as _time
+
+        retry = self._reconcile_transient_retry.get(module_id)
+        if retry is not None and retry[1] is not None:
+            # Waiting for a quick retry: that schedule decides alone.
+            return _time.monotonic() >= retry[1]
         entry = self._reconcile_install_backoff.get(module_id)
         if entry is None:
             return True
-        import time as _time
 
         failures, next_attempt = entry
         if _time.monotonic() >= next_attempt:
@@ -1461,9 +1486,25 @@ class ModuleManager:
         log.debug(f"RECONCILE: install of '{module_id}' is backed off ({failures} failure(s)).")
         return False
 
-    def _reconcile_install_failed(self, module_id: str) -> None:
+    def _reconcile_install_failed(self, module_id: str, *, transient: bool = False) -> bool:
+        """Remember a failed reconcile install. Returns True when a quick retry
+        was scheduled (transient failure, short schedule not used up) — the
+        caller then does not report the install as failed yet."""
         import time as _time
 
+        used = self._reconcile_transient_retry.get(module_id, (0, None))[0]
+        if transient and used < len(_RECONCILE_TRANSIENT_RETRY_S):
+            delay = _RECONCILE_TRANSIENT_RETRY_S[used]
+            self._reconcile_transient_retry[module_id] = (used + 1, _time.monotonic() + delay)
+            log.warning(
+                f"RECONCILE: install of '{module_id}' failed because the package index or the network "
+                f"did not answer — retry {used + 1}/{len(_RECONCILE_TRANSIENT_RETRY_S)} in {delay:g} s."
+            )
+            self._schedule_install_retry()
+            return True
+        # Permanent failure, or the quick retries are used up: no further quick
+        # retry in this streak, the long back-off decides.
+        self._reconcile_transient_retry[module_id] = (len(_RECONCILE_TRANSIENT_RETRY_S), None)
         failures = self._reconcile_install_backoff.get(module_id, (0, 0.0))[0] + 1
         delay = min(_RECONCILE_INSTALL_BACKOFF_BASE_S * (2 ** (failures - 1)), _RECONCILE_INSTALL_BACKOFF_MAX_S)
         self._reconcile_install_backoff[module_id] = (failures, _time.monotonic() + delay)
@@ -1471,6 +1512,59 @@ class ModuleManager:
             f"RECONCILE: install of '{module_id}' failed {failures}× — next attempt in {delay // 60} min. "
             f"If the plugin no longer exists, remove its plugin_states row."
         )
+        return False
+
+    def _reconcile_install_succeeded(self, module_id: str) -> None:
+        self._reconcile_install_backoff.pop(module_id, None)
+        self._reconcile_transient_retry.pop(module_id, None)
+
+    @staticmethod
+    def _install_failure_transient(plugin_service, repo_url: str) -> bool:
+        """Did the install that just returned False fail for a transient reason?"""
+        probe = getattr(plugin_service, "last_failure_was_transient", None)
+        try:
+            return bool(probe(repo_url)) if probe else False
+        except Exception:
+            return False
+
+    def _schedule_install_retry(self) -> None:
+        if self._install_retry_task is None or self._install_retry_task.done():
+            self._install_retry_task = bus.create_tracked_task(
+                self._install_retry_loop(), name="module_manager:install_retry",
+            )
+
+    async def _install_retry_loop(self) -> None:
+        """Run the cluster reconcile when a quick retry is due (the periodic
+        pass only comes every five minutes). Ends when nothing waits any more."""
+        import time as _time
+
+        while True:
+            waiting = {mid: due for mid, (_used, due) in self._reconcile_transient_retry.items() if due is not None}
+            if not waiting:
+                return
+            await asyncio.sleep(max(0.0, min(waiting.values()) - _time.monotonic()))
+            started = _time.monotonic()
+            skipped = False
+            try:
+                summary = await self.reconcile_cluster_state(trigger="install-retry")
+                skipped = isinstance(summary, dict) and bool(summary.get("skipped"))
+            except Exception:
+                skipped = True
+                log.error("RECONCILE: install-retry reconcile failed", exc_info=True)
+            now = _time.monotonic()
+            for mid, due in waiting.items():
+                current = self._reconcile_transient_retry.get(mid)
+                if due > started:
+                    continue  # was not due in this pass
+                if current is None or current[1] != due:
+                    continue  # retried: succeeded, rescheduled or handed to the long back-off
+                if skipped:
+                    # The reconcile could not run (database away): same step again, later.
+                    self._reconcile_transient_retry[mid] = (current[0], now + _RECONCILE_TRANSIENT_RETRY_S[0])
+                else:
+                    # The pass had nothing to install for it any more (loaded
+                    # from disk meanwhile, disabled, row removed).
+                    self._reconcile_transient_retry.pop(mid, None)
 
     @staticmethod
     def _verify_backoff_key(module_id: str, version) -> tuple:
@@ -1607,10 +1701,11 @@ class ModuleManager:
                             ok = False
                             log.error(f"RECONCILE: install of '{mid}' failed: {exc}")
                         if ok is False:
-                            self._reconcile_install_failed(mid)
-                            await self._report_operation(mid, None, "failed", f"download/install of {version} failed on this instance")
+                            transient = self._install_failure_transient(plugin_service, row["repo_url"])
+                            if not self._reconcile_install_failed(mid, transient=transient):
+                                await self._report_operation(mid, None, "failed", f"download/install of {version} failed on this instance")
                         else:
-                            self._reconcile_install_backoff.pop(mid, None)
+                            self._reconcile_install_succeeded(mid)
                             summary["installed"].append(mid)
                         continue  # the install path loads + activates via plugin:files_changed
                     else:
@@ -1768,10 +1863,11 @@ class ModuleManager:
         finally:
             self._reconcile_upgrading.discard(mid)
         if ok is False:
-            self._reconcile_install_failed(mid)
-            await self._report_operation(mid, None, "failed", f"download/install of {want} failed on this instance")
+            transient = self._install_failure_transient(plugin_service, row["repo_url"])
+            if not self._reconcile_install_failed(mid, transient=transient):
+                await self._report_operation(mid, None, "failed", f"download/install of {want} failed on this instance")
         else:
-            self._reconcile_install_backoff.pop(mid, None)
+            self._reconcile_install_succeeded(mid)
             summary.setdefault("upgraded", []).append(mid)
         return True
 
