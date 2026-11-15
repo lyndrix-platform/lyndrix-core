@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import logging
 from sqlalchemy import text
 from core.bus import bus
@@ -194,28 +195,51 @@ class AuthService:
             # behaviour before the column existed). See models.email_is_trusted.
             ("users", "email_trusted",      "BOOLEAN NULL"),
         ]
+        mysql = db_instance.engine.dialect.name in ("mysql", "mariadb")
         with db_instance.engine.connect() as conn:
             for table, column, col_def in migrations:
                 if self._column_exists(conn, table, column):
                     continue  # the normal case on every boot after the first: no DDL at all
-                try:
-                    conn.execute(
-                        text(
-                            f"ALTER TABLE `{table}` ADD COLUMN `{column}` {col_def}"
-                        )
-                    )
-                    conn.commit()
-                    log.info(f"MIGRATE: Added column `{table}.{column}`.")
-                except Exception as e:
-                    conn.rollback()
-                    err = str(e).lower()
-                    # MariaDB 1060 / SQLite "duplicate column name": a peer
-                    # instance added it between our check and the ALTER.
-                    if "duplicate column name" in err or "already exists" in err:
-                        pass
-                    else:
-                        log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
+                self._add_column(conn, table, column, col_def, mysql=mysql)
         self._migrate_users_id_type()
+
+    # A metadata lock the ALTER cannot get within this many seconds is not
+    # waited for (MariaDB's default is a day): a queued ALTER blocks every
+    # other statement on the table — on ``users`` that is every login and
+    # every API key check of every instance. Retried a few times instead.
+    _DDL_LOCK_WAIT_S = 5
+    _DDL_ATTEMPTS = 6
+
+    def _add_column(self, conn, table: str, column: str, col_def: str, *, mysql: bool) -> None:
+        for attempt in range(1, self._DDL_ATTEMPTS + 1):
+            try:
+                if mysql:
+                    conn.execute(text(f"SET SESSION lock_wait_timeout = {self._DDL_LOCK_WAIT_S}"))
+                try:
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {col_def}"))
+                    conn.commit()
+                finally:
+                    if mysql:
+                        conn.execute(text("SET SESSION lock_wait_timeout = DEFAULT"))
+                log.info(f"MIGRATE: Added column `{table}.{column}`.")
+                return
+            except Exception as e:
+                conn.rollback()
+                err = str(e).lower()
+                # MariaDB 1060 / SQLite "duplicate column name": a peer
+                # instance added it between our check and the ALTER.
+                if "duplicate column name" in err or "already exists" in err:
+                    return
+                # 1205: the metadata lock was held longer than the cap (a long
+                # transaction on the table) — try again shortly.
+                if "1205" in err or "lock wait timeout" in err:
+                    if attempt < self._DDL_ATTEMPTS:
+                        log.warning(f"MIGRATE: `{table}` is locked — adding `{column}` again "
+                                    f"({attempt}/{self._DDL_ATTEMPTS})")
+                        time.sleep(1.0)
+                        continue
+                log.warning(f"MIGRATE: Could not add `{table}.{column}`: {e}")
+                return
 
     @staticmethod
     def _column_exists(conn, table: str, column: str) -> bool:

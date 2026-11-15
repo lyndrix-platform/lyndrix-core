@@ -211,3 +211,45 @@ def test_old_core_inserts_without_the_column_still_work(legacy_engine):
     with db_instance.SessionLocal() as s:
         row = s.query(User).filter(User.username == "written-by-old-core").one()
         assert row.email_trusted is None and email_is_trusted(row) is True
+
+
+class _LockedConn:
+    """MariaDB stand-in: the first ``locked`` ALTERs hit lock_wait_timeout (1205)."""
+
+    def __init__(self, locked):
+        self.locked, self.statements, self.commits = locked, [], 0
+
+    def execute(self, statement):
+        sql = str(statement)
+        self.statements.append(sql)
+        if sql.startswith("ALTER") and self.locked:
+            self.locked -= 1
+            raise RuntimeError("(1205, 'Lock wait timeout exceeded; try restarting transaction')")
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def test_the_alter_waits_a_bounded_time_for_the_table_lock_and_retries(monkeypatch, caplog):
+    """N4 (opus review): on MariaDB a queued ALTER waits up to a day for the
+    metadata lock and blocks every login meanwhile."""
+    import core.components.auth.logic.auth_service as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    conn = _LockedConn(locked=2)
+    with caplog.at_level("WARNING"):
+        auth_service._add_column(conn, "users", "email_trusted", "BOOLEAN NULL", mysql=True)
+    alters = [s for s in conn.statements if s.startswith("ALTER")]
+    assert len(alters) == 3 and conn.commits == 1
+    assert conn.statements[0] == f"SET SESSION lock_wait_timeout = {auth_service._DDL_LOCK_WAIT_S}"
+    assert conn.statements.count("SET SESSION lock_wait_timeout = DEFAULT") == 3
+    assert "Could not add" not in caplog.text
+
+    stuck = _LockedConn(locked=99)
+    with caplog.at_level("WARNING"):
+        auth_service._add_column(stuck, "users", "email_trusted", "BOOLEAN NULL", mysql=True)
+    assert len([s for s in stuck.statements if s.startswith("ALTER")]) == auth_service._DDL_ATTEMPTS
+    assert "Could not add `users.email_trusted`" in caplog.text
