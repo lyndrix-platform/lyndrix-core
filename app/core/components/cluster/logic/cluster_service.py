@@ -171,6 +171,11 @@ class ClusterService:
         # "graceful", "announced"}. Feeds instance_state() for rows that are no
         # longer in the table and makes cluster:instance_lost fire exactly once.
         self._peers: dict[str, dict] = {}
+        # clock() until which "dead" verdicts about peers are withheld: set when a
+        # refresh succeeds while this instance's own heartbeat is failing — the
+        # database was unreachable for everyone, so every peer's heartbeat is as
+        # old as ours and "dead" would be a false alarm (staging 2026-11-15).
+        self._settle_until = 0.0
         # Set while another process uses this instance id (heartbeat refused).
         self.id_conflict: Optional[str] = None
         # clock() when boot completed — start of the wait for plugin convergence.
@@ -696,6 +701,11 @@ class ClusterService:
         self._instances = await self.coordinator.instances()
         self._instances_at = time.monotonic()
         self._instances_ok_at = self._clock()
+        if self._hb_failures:
+            # First good look after an outage of our own: the peers had no chance
+            # to beat either. Give them one lease TTL (+ one beat) to show up
+            # before anybody is declared dead.
+            self._settle_until = self._clock() + self.ttl + self.heartbeat_s
         after = {i.instance_id for i in self._instances if i.alive}
         delta = self._track_peers(fresh_before)
         if before != after or delta:
@@ -723,6 +733,15 @@ class ClusterService:
             return False
         return self._clock() - self._instances_ok_at <= self.ttl + self.heartbeat_s
 
+    @property
+    def _settling(self) -> bool:
+        return self._clock() < self._settle_until
+
+    def _peer_state(self, state: str) -> str:
+        """A peer's state as this instance may report it: ``dead`` is withheld
+        (``unknown``) while the view settles after our own outage."""
+        return "unknown" if state == "dead" and self._settling else state
+
     def _track_peers(self, view_was_fresh: bool) -> dict:
         """Fold the fresh instance list into what we remember about the peers;
         emits ``cluster:instance_lost`` for every peer that is dead now and has
@@ -735,6 +754,8 @@ class ClusterService:
         for iid, info in rows.items():
             peer = self._peers.setdefault(iid, {"announced": None})
             previous = peer.get("state")
+            if info.state == "dead" and self._settling:
+                continue                  # not a verdict yet — keep what we knew before the outage
             peer.update(state=info.state, incarnation=info.incarnation, roles=list(info.roles),
                         last_heartbeat=info.heartbeat_at, gone_at=None,
                         graceful=info.state == "restarting" or bool(info.meta.get("draining")))
@@ -809,7 +830,8 @@ class ClusterService:
             return out
         info = next((i for i in self._instances if i.instance_id == instance_id), None)
         if info is not None:
-            out.update(state=info.state, known=True, roles=list(info.roles), incarnation=info.incarnation,
+            out.update(state=self._peer_state(info.state), known=True, roles=list(info.roles),
+                       incarnation=info.incarnation,
                        last_heartbeat=info.heartbeat_at.isoformat() if isinstance(info.heartbeat_at, datetime) else None,
                        age_s=round(info.age_s, 1))
             return out
@@ -834,7 +856,7 @@ class ClusterService:
         if self.is_cluster and self.view_ready:
             for info in self._instances:
                 if not info.is_self and role in info.roles:
-                    states[info.instance_id] = info.state
+                    states[info.instance_id] = self._peer_state(info.state)
             for iid, peer in self._peers.items():
                 if iid not in states and role in (peer.get("roles") or []) and peer.get("state") == "restarting":
                     states[iid] = "restarting"

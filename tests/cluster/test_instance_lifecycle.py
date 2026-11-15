@@ -493,3 +493,40 @@ def test_a_heartbeat_after_stop_does_not_revive_but_a_restart_does(engine):
         return after_stop, await state()
 
     assert asyncio.run(run()) == ("restarting", "alive")
+
+
+def test_no_false_death_verdicts_after_a_database_outage_of_everyone(engine, ready_core, lost_events):
+    """Staging 2026-11-15: MariaDB down for ~80 s. The first instance whose
+    heartbeat came back saw every peer's heartbeat 90 s old and announced them
+    all dead (cluster:instance_lost for live instances, instance_state 'dead')
+    although they were only a few seconds behind with their own first beat."""
+    clock = ClusterClock()
+    api = make_service(engine, "pod-1", clock=clock)
+    runner = make_service(engine, "docker-auto-runner", clock=clock, roles=["runner"])
+
+    async def run():
+        await api._start_once()
+        await runner._start_once()
+        await api._heartbeat_once()
+        assert api.instance_state("docker-auto-runner")["state"] == "alive"
+
+        clock.advance(90)                       # the database was gone for everyone …
+        api._hb_failures = 8                    # … pod-1's beats failed meanwhile
+        await api._heartbeat_once()             # pod-1 is back first
+        assert api.instance_state("docker-auto-runner")["state"] == "unknown"
+        assert api.role_state("runner")["state"] == "unknown"
+        assert lost_events == []
+
+        await runner._heartbeat_once()          # the runner's next beat a few seconds later
+        clock.advance(5)
+        await api._heartbeat_once()
+        assert api.instance_state("docker-auto-runner")["state"] == "alive"
+        assert lost_events == []
+
+        clock.advance(TTL + 11)                 # a real death after the outage is still announced
+        await api._heartbeat_once()
+        assert api.instance_state("docker-auto-runner")["state"] == "dead"
+        assert [e["instance_id"] for e in lost_events] == ["docker-auto-runner"]
+        await api.stop()
+
+    asyncio.run(run())
