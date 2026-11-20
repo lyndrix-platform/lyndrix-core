@@ -86,7 +86,7 @@ from core.api import __api_version__, ModuleManifest
 
 Current stable API version:
 
-- `__api_version__ = "1.2.0"`
+- `__api_version__ = "1.14.0"`
 
 The goal is to give plugin authors a stable surface even when the internal core structure evolves.
 
@@ -496,6 +496,30 @@ def setup(ctx):
 - Rules for cluster-safe plugins (idempotent locked DDL, tolerate MariaDB 1020 on concurrent
   writes, no in-process state peers need, standby-aware `health()`):
   [High Availability → For plugin developers](ha/plugin-development.md).
+
+### Lease fencing and instance lifecycle (API 1.14)
+
+```python
+ctx.on_lease("x", acquired=lambda token: svc.start(token), lost=svc.stop)  # token only if declared
+ctx.lease_token("x")            # int while held here (grows with every acquisition), else None
+ctx.instance_state(iid)         # {"state", "known", "roles", "incarnation", "last_heartbeat", "age_s"}
+ctx.role_state("runner")        # {"role", "state", "instances": {id: state}}
+ctx.has_live_role("runner")     # False only when the role is known to be gone
+ctx.incarnation                 # boot nonce of this process, new on every start
+
+@ctx.subscribe("cluster:instance_lost")   # local event, once per dead peer on every live instance
+async def _lost(payload): ...             # {instance_id, roles, last_heartbeat, incarnation, graceful}
+```
+
+- `lost` fires *before* a peer can hold the lease (the holder fences itself ahead of the TTL).
+  Stamp writes with the token (`… WHERE lease_token <= :t`, 0 rows → stale holder).
+- A peer is `alive`, `draining`, `restarting` (stopped on purpose, expected back within
+  `LYNDRIX_RESTART_GRACE_SECONDS`), `dead` or `unknown`. `ctx.cluster_instances` entries also
+  carry `state`, `incarnation`, `heartbeat_at` and `age_s`.
+- Guard every call with `getattr(ctx, …)` on older cores. Details and patterns:
+  [High Availability → For plugin developers](ha/plugin-development.md).
+- `await ctx.aget_secret(key)`, `aset_secret`, `aget_setting`, `aget_all_settings` are the
+  off-loop variants of the synchronous Vault/settings helpers — use them in async handlers.
 
 ## Cluster-wide operations (core 1.8)
 
