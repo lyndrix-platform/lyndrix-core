@@ -1,24 +1,24 @@
 # Lyndrix Core
 
-Lyndrix Core ist der zentrale Runtime-Core für modulare Internal-Platform-Workloads auf Basis von **FastAPI**, **NiceGUI**, **MariaDB** und **HashiCorp Vault**.
+Lyndrix Core is the central runtime core for modular internal-platform workloads, built on **FastAPI**, **NiceGUI**, **MariaDB** and **HashiCorp Vault**.
 
-## Was aktuell drin ist
+## What is currently included
 
-- **Boot-Orchestrierung mit Zustandsphasen** (`waiting_core` → `loading_modules` → `ready`)
-- **Vault-first Secret Handling** mit Auto-Init/Auto-Unseal (optional über `LYNDRIX_MASTER_KEY`)
-- **Persistente Plugin-Lifecycle-Steuerung** (Install, Aktivieren/Deaktivieren, Reload, Uninstall)
-- **GitHub-basierte Plugin-Installation** inkl. Versionstags und sicherer ZIP-Extraktion
-- **Plugin-Abhängigkeiten mit Vendor-Ordnern** (`requirements.txt` → `vendor/` pro Plugin)
-- **Automatische Plugin-Reconciliation** über `LYNDRIX_PLUGINS_DESIRED`
-- **Auth-Provider-Chain** (`local`, `ldap`, `oidc` + Plugin-Provider via Bus)
-- **API-Authentifizierung** (System-API-Key, User-API-Keys, Permission-System + Swagger-Authorize)
-- **Messaging Gateway & Notification Router** (Zwei-Wege-Messaging über Provider-Adapter wie Discord; konfigurierbares Notification-Routing)
-- **Theming-Engine** (Token-/Component-Themes, Plugin-spezifische Overrides)
-- **Stabile Plugin-API-Oberfläche** über `core.api` (`__api_version__ = 1.2.0`)
+- **Boot orchestration with state phases** (`waiting_core` → `loading_modules` → `ready`)
+- **Vault-first secret handling** with auto-init/auto-unseal (optional via `LYNDRIX_MASTER_KEY`)
+- **Persistent plugin lifecycle control** (install, enable/disable, reload, uninstall)
+- **GitHub-based plugin installation** including version tags and safe ZIP extraction
+- **Plugin dependencies with vendor folders** (`requirements.txt` → `vendor/` per plugin)
+- **Automatic plugin reconciliation** via `LYNDRIX_PLUGINS_DESIRED`
+- **Auth provider chain** (`local`, `ldap`, `oidc` + plugin providers via the bus)
+- **API authentication** (system API key, user API keys, permission system + Swagger authorize)
+- **Messaging gateway & notification router** (two-way messaging via provider adapters such as Discord; configurable notification routing)
+- **Theming engine** (token/component themes, plugin-specific overrides)
+- **Stable plugin API surface** via `core.api` (`__api_version__ = 1.2.0`)
 
-## Schnellstart (Development)
+## Quick start (development)
 
-Voraussetzungen:
+Prerequisites:
 
 - Docker
 - Docker Compose
@@ -27,58 +27,58 @@ Voraussetzungen:
 git clone https://github.com/lyndrix-platform/lyndrix-core.git
 cd lyndrix-core
 
-# Optional: docker/.env.dev anpassen
+# Optional: adjust docker/.env.dev
 
-# Stack starten (App + DB + Vault + Docs)
+# Start the stack (App + DB + Vault + Docs)
 docker compose -f docker/docker-compose.dev.yml up -d --build
 ```
 
-Danach:
+Afterwards:
 
 - App: `http://localhost:8081`
-- Docs-Preview: `http://localhost:8000`
+- Docs preview: `http://localhost:8000`
 
-## Architektur (Kurz)
+## Architecture (short)
 
-- `app/main.py`: Entry-Point, Middleware, UI/FastAPI-Routing
-- `app/core/bus.py`: globaler Event-Bus (`subscribe`, `emit`, `create_tracked_task`)
-- `app/core/components/vault/*`: Vault-Health, Init/Unseal, Secret-Engine-Setup
-- `app/core/components/database/*`: DB-Initialisierung und Reconnect-Watchdog
-- `app/core/components/plugins/*`: Plugin-Manager, Plugin-Service, UI
+- `app/main.py`: entry point, middleware, UI/FastAPI routing
+- `app/core/bus.py`: global event bus (`subscribe`, `emit`, `create_tracked_task`)
+- `app/core/components/vault/*`: Vault health, init/unseal, secret engine setup
+- `app/core/components/database/*`: DB initialization and reconnect watchdog
+- `app/core/components/plugins/*`: plugin manager, plugin service, UI
 
-Detailliert: [docs/architecture.md](docs/architecture.md)
+Details: [docs/architecture.md](docs/architecture.md)
 
-## Plugin-Entwicklung (TL;DR)
+## Plugin development (TL;DR)
 
-1. Plugin-Ordner unter `/app/plugins/<plugin_name>` anlegen
-2. `entrypoint.py` mit `manifest` und `setup(ctx)` erstellen
+1. Create a plugin folder under `/app/plugins/<plugin_name>`
+2. Create `entrypoint.py` with `manifest` and `setup(ctx)`
 3. Optional:
    - `render_settings_ui(ctx)`
    - `render_dashboard_widget(ctx)`
    - `teardown(ctx)`
    - `requirements.txt`
-4. Über Plugin-Manager installieren/aktualisieren oder via `LYNDRIX_PLUGINS_DESIRED`
+4. Install/update via the plugin manager or via `LYNDRIX_PLUGINS_DESIRED`
 
-Komplette Anleitung: [docs/plugins.md](docs/plugins.md)
+Complete guide: [docs/plugins.md](docs/plugins.md)
 
-## Wichtige Konfiguration
+## Important configuration
 
-In `app/config.py` sind u. a. relevant:
+The following are relevant in `app/config.py`, among others:
 
 - `VAULT_URL`, `LYNDRIX_MASTER_KEY`
 - `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 - `LYNDRIX_PLUGINS_DESIRED`, `LYNDRIX_PLUGINS_AUTO_UPDATE`
 - `LYNDRIX_AUTH_PROVIDERS`
-- LDAP/OIDC Parameter (`LYNDRIX_LDAP_*`, `LYNDRIX_OIDC_*`)
+- LDAP/OIDC parameters (`LYNDRIX_LDAP_*`, `LYNDRIX_OIDC_*`)
 
-## Dokumentation
+## Documentation
 
-- [Docs Startseite](docs/index.md)
+- [Docs home](docs/index.md)
 - [Deployment](docs/deployment.md)
 - [Plugin Development](docs/plugins.md)
 - [Security](docs/security.md)
-- [Architektur](docs/architecture.md)
+- [Architecture](docs/architecture.md)
 
-## Lizenz
+## License
 
-MIT – siehe [LICENSE](LICENSE).
+MIT – see [LICENSE](LICENSE).

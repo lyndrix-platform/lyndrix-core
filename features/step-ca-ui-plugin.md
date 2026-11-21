@@ -1,47 +1,47 @@
-# Feature-Idee: `lyndrix-plugin-pki` — Web-UI für step-ca
+# Feature idea: `lyndrix-plugin-pki` — web UI for step-ca
 
-**Status:** 💡 Idee / Planned (noch kein Design, kein Code)
-**Angefragt:** Marvin, 2026-11-12
-**Betroffene Repos (neu):** `lyndrix-plugin-pki` (Arbeitstitel)
+**Status:** 💡 Idea / Planned (no design yet, no code)
+**Requested:** Marvin, 2026-11-12
+**Affected repos (new):** `lyndrix-plugin-pki` (working title)
 
 ---
 
 ## 1. Motivation
 
-Seit 2026-11-09 läuft im Homelab eine private CA auf `step-ca` (0.30.x, ACME-Provisioner
-für Traefik, Root-CA 10 Jahre). step-ca selbst hat **keine Web-UI** — alles läuft über die
-`step`-CLI und die HTTPS-API. Eine UI gibt es nur im kommerziellen Smallstep Certificate Manager.
+Since 2026-11-09 a private CA on `step-ca` (0.30.x, ACME provisioner
+for Traefik, root CA valid for 10 years) has been running in the homelab. step-ca itself has **no web UI** — everything runs through the
+`step` CLI and the HTTPS API. A UI only exists in the commercial Smallstep Certificate Manager.
 
-Geprüfte Open-Source-UIs (2026-11-11) passen nicht:
+Open-source UIs reviewed (2026-11-11) do not fit:
 
-| Projekt | Grund gegen Übernahme |
+| Project | Reason against adoption |
 |---|---|
-| `UncleFi1/step-ca-ui` (Go, GPL-3.0) | Kleinstprojekt, eigene User-Verwaltung + 3 Container, kein SSO |
-| `marcin-kruszynski/step-ui` (Next.js+Go, MIT) | ohne Auth, eigene SQLite-Inventarisierung, sehr früh |
-| `damhau/stepca-web` (Flask) | setzt step-ca mit PostgreSQL-Backend voraus (wir: Badger) |
+| `UncleFi1/step-ca-ui` (Go, GPL-3.0) | Very small project, own user management + 3 containers, no SSO |
+| `marcin-kruszynski/step-ui` (Next.js+Go, MIT) | No auth, own SQLite inventory, very early stage |
+| `damhau/stepca-web` (Flask) | Requires step-ca with PostgreSQL backend (we use Badger) |
 
-Lyndrix hat bereits Auth/RBAC (OIDC), Vault, Entity-Registry, Notifications und ITSM — eine
-PKI-UI als Plugin nutzt das alles mit, statt eine Insel daneben zu stellen.
+Lyndrix already has auth/RBAC (OIDC), Vault, entity registry, notifications and ITSM — a PKI
+UI as a plugin reuses all of that instead of setting up an island next to it.
 
-## 2. Grober Funktionsumfang (Diskussionsgrundlage)
+## 2. Rough feature scope (basis for discussion)
 
-- **Übersicht:** Root/Intermediate (Fingerprint, Laufzeit), Provisioner-Liste, CA-Health.
-- **Zertifikate:** ausgestellte Zertifikate inkl. ACME-Orders listen, Ablauf-Ampel,
-  Widerruf (revoke), manuelle Ausstellung/CSR-Signierung über JWK-Provisioner.
-- **Ablauf-Monitoring:** Notification/ITSM-Task vor Ablauf, Anbindung an `state_monitoring`.
-- **Entity-Registry:** Zertifikat ↔ Service-/Host-CI verknüpfen (welcher Traefik-Router nutzt was).
-- **Root-Verteilung:** Download Root-CA (PEM/DER) + Status des Trust-Rollouts auf den Hosts.
-- **RBAC:** Rollen viewer / operator (ausstellen) / admin (revoke, Provisioner).
+- **Overview:** root/intermediate (fingerprint, runtime), provisioner list, CA health.
+- **Certificates:** list issued certificates incl. ACME orders, expiry traffic light,
+  revocation (revoke), manual issuance/CSR signing via JWK provisioner.
+- **Expiry monitoring:** notification/ITSM task before expiry, connection to `state_monitoring`.
+- **Entity registry:** link certificate ↔ service/host CI (which Traefik router uses what).
+- **Root distribution:** download root CA (PEM/DER) + status of the trust rollout on the hosts.
+- **RBAC:** roles viewer / operator (issue) / admin (revoke, provisioners).
 
-## 3. Offene Fragen
+## 3. Open questions
 
-- Datenquelle: step-ca-Admin-API (Remote-Provisioner-Management muss aktiv sein) vs.
-  eigene Inventarisierung über ACME/Traefik-Storage vs. Badger-DB read-only?
-- Provisioner-Credentials in Vault; Rotation ist **nicht** Teil des Plugins.
-- Ein Plugin für mehrere CAs?
-- `placement`: CA-Kommunikation vom Runner oder von der Control-Plane?
+- Data source: step-ca admin API (remote provisioner management must be enabled) vs.
+  own inventory via ACME/Traefik storage vs. Badger DB read-only?
+- Provisioner credentials in Vault; rotation is **not** part of the plugin.
+- One plugin for multiple CAs?
+- `placement`: CA communication from the runner or from the control plane?
 
-## 4. Nicht-Ziele
+## 4. Non-goals
 
-- Kein Ersatz für step-ca, keine CA-Schlüssel im Plugin.
-- Keine Secret-Rotation/-Migration.
+- No replacement for step-ca, no CA keys in the plugin.
+- No secret rotation/migration.

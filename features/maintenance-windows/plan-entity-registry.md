@@ -1,23 +1,23 @@
-# Teilplan P5a: Entity Registry 0.3.0 — Read-Model `maintenance`, Scheme `iac.service`
+# Sub-plan P5a: Entity Registry 0.3.0 — read model `maintenance`, scheme `iac.service`
 
-Ausführung: Fable-Subagent. Grundlage: `analysis-entity-registry.md`, `00-ergebnis-p0.md`
-(Abschnitte 1–4). Repo `plugins/lyndrix-plugin-entity-registry` (kanonisches Layout).
-**Vor dem Orchestrator ausrollen** (Scheme `iac.service`). Core-Bibliothek optional:
-`try: from core.api import maintenance except ImportError: maintenance = None` → ohne
-Bibliothek werden nur Rohdaten geliefert (`active: null`).
+Execution: Fable subagent. Basis: `analysis-entity-registry.md`, `00-ergebnis-p0.md`
+(sections 1–4). Repo `plugins/lyndrix-plugin-entity-registry` (canonical layout).
+**Roll out before the orchestrator** (scheme `iac.service`). Core library optional:
+`try: from core.api import maintenance except ImportError: maintenance = None` → without
+the library only raw data is delivered (`active: null`).
 
-## 1. Manifest und Katalog
+## 1. Manifest and catalog
 
-- `entrypoint.py:75` `version="0.3.0"`; `min_core_version` bleibt `1.4.0`.
+- `entrypoint.py:75` `version="0.3.0"`; `min_core_version` stays `1.4.0`.
 - `permissions.subscribe` (94-103) + `maintenance:windows_published`,
   `maintenance:override_started`, `maintenance:override_ended`.
-- `catalog/entity_types.yml` `identifier_schemes`: neu
+- `catalog/entity_types.yml` `identifier_schemes`: new
   `{id: iac.service, label: IaC service instance, description: "<host>/<service-name> — a
-  service.yml deployed on one host", priority: 20}`. Kinds unverändert (`service` existiert).
-- CHANGELOG; `documentation.md` (DE): Tabellenübersicht (31), Bus-Tabelle (110ff), neue Route,
-  Abschnitt „Wartungsfenster am CI".
+  service.yml deployed on one host", priority: 20}`. Kinds unchanged (`service` exists).
+- CHANGELOG; `documentation.md` (DE): table overview (31), bus table (110ff), new route,
+  section "Maintenance windows on the CI".
 
-## 2. Datenmodell (`app/model/models.py`, DDL über `create_all` unter Advisory-Lock)
+## 2. Data model (`app/model/models.py`, DDL via `create_all` under advisory lock)
 
 ```
 registry_maintenance  id PK, entity_uuid String(36) FK→registry_entities.uuid idx,
@@ -30,70 +30,68 @@ registry_maintenance  id PK, entity_uuid String(36) FK→registry_entities.uuid 
                       UNIQUE (entity_uuid, source, kind, override_id)
 ```
 
-Keine Nutzung von `Entity.attributes` (Begründung analysis §9.1: kein Namespace, RMW-Race,
-Event-Rauschen).
+No use of `Entity.attributes` (reasoning analysis §9.1: no namespace, RMW race,
+event noise).
 
-## 3. Logik (`app/logic/service.py`, neue Methoden; alle über `self._write` mit Retry)
+## 3. Logic (`app/logic/service.py`, new methods; all via `self._write` with retry)
 
-- `apply_windows(source, items, replaces: bool)`: Transaktion: `replaces` → `DELETE … WHERE
-  source=? AND kind='window'`; je Item `_resolve_live(ci_id)` (Tombstones folgen, unbekannt →
-  still überspringen, Zähler ins Log) → INSERT (`windows`, `inherited_from`, `deploy_policy`,
-  `incidents`). Kind-Feld des Items wird ignoriert (Typ steht an der Entity). **Kein**
-  `entity_updated` je Entity; ein Sammel-Event `entity_registry:maintenance_changed
-  {source, count}` (neu in `permissions.emit`) für UIs.
-- `start_override(payload)`: Upsert je `(entity_uuid, source, 'override', override_id)` für jede
-  `ci_id` in `ci_ids`; `end_override(payload)`: `ended_at`, `linger_minutes` setzen (alle
-  Zeilen des `override_id`).
-- `maintenance_for(s, uuids: list[str], now) -> dict[uuid, dict]`: eine `IN`-Abfrage; je Entity
-  `windows` (alle Quellen), Overrides (nur aktive nach `override_active`), Ergebnis
+- `apply_windows(source, items, replaces: bool)`: transaction: `replaces` → `DELETE … WHERE
+  source=? AND kind='window'`; per item `_resolve_live(ci_id)` (tombstones follow, unknown → 
+  silently skip, counter into the log) → INSERT (`windows`, `inherited_from`, `deploy_policy`,
+  `incidents`). The kind field of the item is ignored (type is set on the entity). **No**
+  `entity_updated` per entity; one collective event `entity_registry:maintenance_changed
+  {source, count}` (new in `permissions.emit`) for UIs.
+- `start_override(payload)`: upsert per `(entity_uuid, source, 'override', override_id)` for every
+  `ci_id` in `ci_ids`; `end_override(payload)`: set `ended_at`, `linger_minutes` (all
+  rows of the `override_id`).
+- `maintenance_for(s, uuids: list[str], now) -> dict[uuid, dict]`: one `IN` query; per entity
+  `windows` (all sources), overrides (only active ones after `override_active`), result
   `{"active": bool|None, "until": iso|None, "source": "window"|"override"|None, "next_start":
   iso|None, "windows": [{source, windows, inherited_from}], "overrides": [{id, until, reason,
-  source}], "incidents": {...}|None, "deploy_policy": str|None}` über
-  `core.api.maintenance.effective_state`; ohne Bibliothek `active=None` und Rohdaten.
-- `purge_expired(now)`: Overrides mit `until + linger < now − 1 Tag` löschen; Aufruf
-  gelegentlich aus `end_override`/`start_override` (kein Timer im Plugin).
-- `_entity_detail` (156-190): Feld `maintenance`; `_summaries`/`list_entities` (233-236,
-  314-320): Feld `maintenance` kompakt (`active`, `until`, `source`) per Batch-Abfrage.
+  source}], "incidents": {...}|None, "deploy_policy": str|None}` via `core.api.maintenance.effective_state`; without library `active=None` and raw data.
+- `purge_expired(now)`: delete overrides with `until + linger < now − 1 day`; called occasionally from
+  `end_override`/`start_override` (no timer in the plugin).
+- `_entity_detail` (156-190): field `maintenance`; `_summaries`/`list_entities` (233-236,
+  314-320): field `maintenance` compact (`active`, `until`, `source`) via batch query.
 
-## 4. Bus-Handler (`entrypoint.py`, Muster `_on_relate` 275-293)
+## 4. Bus handler (`entrypoint.py`, pattern `_on_relate` 275-293)
 
-Drei `@ctx.subscribe`-Handler: Payload-Prüfung (`isinstance dict`, `items`/`override_id`),
-`svc.is_ready`, `asyncio.to_thread`, Fehler über `_fail`. Idempotent (Unique-Key, delete+insert
-je `source`). Lokale Zustellung reicht (Zustand in der DB, Plugin auf jeder Instanz).
+Three `@ctx.subscribe` handlers: payload check (`isinstance dict`, `items`/`override_id`),
+`svc.is_ready`, `asyncio.to_thread`, errors via `_fail`. Idempotent (unique key, delete+insert
+per `source`). Local delivery suffices (state in the DB, plugin on every instance).
 
 ## 5. API (`app/api/__init__.py`)
 
-| Methode | Pfad | Perm | Inhalt |
+| Method | Path | Perm | Content |
 |---|---|---|---|
-| GET | `/entities/{uuid}` | read | enthält `maintenance` (Abschnitt 3) |
-| GET | `/entities?in_maintenance=true` | read | Filter (nach Batch-Berechnung, Seite begrenzt) |
-| GET | `/maintenance?ci_ids=a,b,c` (max 200) | read | Batch-Read-Model für Konsumenten/UIs |
-| GET | `/entities/{uuid}/host` | read | Host-Entity über ausgehende `runs_on`-Relation, 404 wenn keine |
+| GET | `/entities/{uuid}` | read | contains `maintenance` (section 3) |
+| GET | `/entities?in_maintenance=true` | read | filter (after batch computation, page limited) |
+| GET | `/maintenance?ci_ids=a,b,c` (max 200) | read | batch read model for consumers/UIs |
+| GET | `/entities/{uuid}/host` | read | host entity via outgoing `runs_on` relation, 404 if none |
 
 ## 6. UI (`app/ui/react/PluginApp.tsx`, `lib/api.ts`, `locales/entity_registry.{de,en}.json`)
 
-- `MaintenanceBadge` (Klasse `lx-badge--maintenance`, Fallback `lx-badge--paused`, Icon
-  `engineering`, Tooltip Quelle/Ende) in der Typ-Zelle der Liste (207) und in der Detail-Kopfzeile
+- `MaintenanceBadge` (class `lx-badge--maintenance`, fallback `lx-badge--paused`, icon
+  `engineering`, tooltip source/end) in the type cell of the list (207) and in the detail header
   (285).
-- Detail: neue Karte „Wartung" vor der ITSM-Karte (367): aktuelles Fenster (bis), nächstes
-  Fenster (ab), Overrides (Grund, Ende, Quelle), Quellen der Fenster mit `inherited_from`,
-  Incident-Regel.
-- Typ `Entity` (`lib/api.ts:27ff`) + `maintenance?`. Bundle `app/ui/static/ui_bundle.js` neu
-  bauen und committen.
+- Detail: new card "Maintenance" before the ITSM card (367): current window (until), next
+  window (from), overrides (reason, end, source), sources of the windows with `inherited_from`,
+  incident rule.
+- Type `Entity` (`lib/api.ts:27ff`) + `maintenance?`. Rebuild and commit bundle `app/ui/static/ui_bundle.js`.
 
-## 7. Tests (`tests/test_registry.py` Fixture `svc`, neue Datei `tests/test_maintenance.py`)
+## 7. Tests (`tests/test_registry.py` fixture `svc`, new file `tests/test_maintenance.py`)
 
-- `apply_windows` ersetzt je `source`, lässt fremde Quellen stehen; unbekannte `ci_id`
-  übersprungen; Tombstone-UUID landet beim Ziel; doppelte Zustellung idempotent.
-- Override Start/Ende/Linger/Ablauf; `maintenance_for` mit und ohne Bibliothek (Monkeypatch
-  `maintenance = None`); `effective_state` mit gleichzeitigem Fenster und Override.
-- Detail und Liste enthalten `maintenance`; Filter `in_maintenance`; Batch-Route; `/host` über
-  `runs_on`; Katalog lädt `iac.service`; `identify` mit `iac.service` funktioniert.
-- Bus-Handler mit `_FakeCtx` (bisher ungetestet): ungültiger Payload → `ingest_failed`.
+- `apply_windows` replaces per `source`, leaves foreign sources in place; unknown `ci_id`
+  skipped; tombstone UUID lands on the target; duplicate delivery idempotent.
+- Override start/end/linger/expiry; `maintenance_for` with and without library (monkeypatch
+  `maintenance = None`); `effective_state` with simultaneous window and override.
+- Detail and list contain `maintenance`; filter `in_maintenance`; batch route; `/host` via
+  `runs_on`; catalog loads `iac.service`; `identify` with `iac.service` works.
+- Bus handler with `_FakeCtx` (previously untested): invalid payload → `ingest_failed`.
 
-Lauf im Dev-Core (`docker cp` + `PYTHONPATH=/app`), `ruff`, `black --check`.
+Run in the dev core (`docker cp` + `PYTHONPATH=/app`), `ruff`, `black --check`.
 
-## 8. Abnahme
+## 8. Acceptance
 
-Dev-Bench: Orchestrator 1.6.0 publiziert → `GET /entities/<host>` zeigt Fenster; Override aus
-dem Monitoring erscheint und verschwindet nach Linger. Tags `v0.3.0`/`0.3.0` nach Freigabe.
+Dev bench: orchestrator 1.6.0 publishes → `GET /entities/<host>` shows the window; an override from
+monitoring appears and disappears after linger. Tags `v0.3.0`/`0.3.0` after approval.

@@ -1,241 +1,241 @@
-# Analyse: Template Engine und iac-controller (P0-Sweep)
+# Analysis: template engine and iac-controller (P0 sweep)
 
-Stand: 2026-10-17. Read-only-Sweep (Sonnet) für den Plan `features/maintenance-windows.md`,
-Abschnitt 7.5. Keine Geheimnisse zitiert, kein Code geändert. Der Sweep lieferte den Text als
-Bericht zurück; diese Datei ist die unveränderte Ablage.
+State: 2026-10-17. Read-only sweep (Sonnet) for the plan `features/maintenance-windows.md`,
+section 7.5. No secrets quoted, no code changed. The sweep returned the text as a
+report; this file is the unchanged archive copy.
 
-Pfadkürzel: `TE` = `iac-environment/aac-platform/aac-template-engine`;
+Path abbreviations: `TE` = `iac-environment/aac-platform/aac-template-engine`;
 `CTRL` = `iac-environment/iac-platform/iac-controller`;
 `CORE` = `lyndrix-dev/plugins/lyndrix-plugin-iac-orchestrator/iac_core/app`;
 `ORCH` = `lyndrix-dev/plugins/lyndrix-plugin-iac-orchestrator`;
 `ANS` = `iac-environment/iac-platform/iac-ansible-automation`;
 `APPS` = `iac-environment/aac-platform/aac-application-defenitions/applications-repository`.
 
-## 1. Überblick
+## 1. Overview
 
-- **aac-template-engine v0.0.9** (`TE/version.py:3`). Rendert zur Deploy-Zeit pro Service und Host:
-  `service.yml` (+ Controller-Override) → `deployments/ansible_context.json` + Compose
-  (`TE/scripts/manifest_generator/main.py:101-104`). Enthält auch die Service-CI
+- **aac-template-engine v0.0.9** (`TE/version.py:3`). Renders at deploy time per service and host:
+  `service.yml` (+ controller override) → `deployments/ansible_context.json` + compose
+  (`TE/scripts/manifest_generator/main.py:101-104`). Also contains the service CI
   (`TE/templates/cicd/service-pipeline.yml`).
-- **iac-controller**: reines Daten-Repo. Die CI macht nur Pages + Webhook-Sync
-  (`CTRL/.gitlab-ci.yml:1-8,52-80`). Inventory/TF-State erzeugt ausschließlich der Orchestrator
+- **iac-controller**: pure data repo. The CI only does Pages + webhook sync
+  (`CTRL/.gitlab-ci.yml:1-8,52-80`). Inventory/TF state is produced exclusively by the orchestrator
   (`iac_core`, `NativeGenerateStage`).
-- **iac_core (Sync-Zeit)**: lädt den Controller-Baum pro Site/Stage → Jinja (2 Pässe) → Pydantic →
-  `inventory.yml`/`group_vars`/tfvars (`CORE/generator.py:115-134`). Liest **kein** `service.yml`.
-- **iac-ansible-automation** macht den eigentlichen Merge `service.yml` + Controller
-  `services[].config` und ruft die Engine (`ANS/roles/service_rollout/tasks/prepare_and_run_generator.yml:36-57`;
+- **iac_core (sync time)**: loads the controller tree per site/stage → Jinja (2 passes) → Pydantic →
+  `inventory.yml`/`group_vars`/tfvars (`CORE/generator.py:115-134`). Reads **no** `service.yml`.
+- **iac-ansible-automation** does the actual merge of `service.yml` + controller
+  `services[].config` and calls the engine (`ANS/roles/service_rollout/tasks/prepare_and_run_generator.yml:36-57`;
   `ANS/playbooks/cd_playbooks/cd_rollout_single_service.yml:53-61`).
-- `ansible_context.json` liegt nur im Runner-Build-Verzeichnis `/tmp/aac_builds/<host>/<svc>`
-  (`prepare_and_run_generator.yml:5,91`), nicht im Inventory-State.
-- `TE/documentation.md:209-265` (Promote-Ablauf nach iac-controller) ist veraltet; real:
+- `ansible_context.json` exists only in the runner build directory `/tmp/aac_builds/<host>/<svc>`
+  (`prepare_and_run_generator.yml:5,91`), not in the inventory state.
+- `TE/documentation.md:209-265` (promote flow to iac-controller) is outdated; in reality:
   `prod-trigger-orchestrator` (`service-pipeline.yml:299-386`).
 
-## 2. `service.yml`-Schema und Validierung
+## 2. `service.yml` schema and validation
 
-- **Kein formales Schema.** Nur der Ad-hoc-Linter `TE/scripts/validate_ssot.py` (195 Zeilen):
-  Pflicht `service.{name,image_repo,image_tag,stage}` (59-65), `deployments.docker_compose` (68-70),
-  Dangling Volumes, Typo-Checks, Traefik-Domain, Deprecations, Publishability-/Secret-Gate nur bei
-  `schema_version >= 2` (110-118), Inline-Literal-Lint (121-139). `schema_version` aus
-  `config.schema_version`, Default 1 (41-45). **Unbekannte Top-Level-Keys werden nicht geprüft**
-  (weder Fehler noch Warnung).
-- **Laufzeit:** `ContextBuilder.build` (`TE/scripts/manifest_generator/context.py:52-88`) validiert
-  nicht; Safety-Net (55-73) + Deep-Merge der gesamten SSoT (77-78). Unbekannte Keys werden
-  durchgereicht und landen in `ansible_context.json` (`main.py:101-104`). Beleg: `deployment_strategy`
+- **No formal schema.** Only the ad-hoc linter `TE/scripts/validate_ssot.py` (195 lines):
+  required `service.{name,image_repo,image_tag,stage}` (59-65), `deployments.docker_compose` (68-70),
+  dangling volumes, typo checks, Traefik domain, deprecations, publishability/secret gate only at
+  `schema_version >= 2` (110-118), inline-literal lint (121-139). `schema_version` from
+  `config.schema_version`, default 1 (41-45). **Unknown top-level keys are not checked**
+  (neither error nor warning).
+- **Runtime:** `ContextBuilder.build` (`TE/scripts/manifest_generator/context.py:52-88`) does not
+  validate; safety net (55-73) + deep merge of the whole SSoT (77-78). Unknown keys are passed
+  through and end up in `ansible_context.json` (`main.py:101-104`). Evidence: `deployment_strategy`
   (`main.py:68`).
-- `_render_recursive` rendert jeden `{{ }}`-String (`context.py:21-50`, max. 5 Pässe).
-  Fenster-/Cron-Werte sind jinja-frei und damit sicher.
-- Reale Top-Level-Keys (aac-lyndrix-core, authentik, grafana): `service`, `ports`, `config`,
+- `_render_recursive` renders every `{{ }}` string (`context.py:21-50`, max. 5 passes).
+  Window/cron values are Jinja-free and therefore safe.
+- Real top-level keys (aac-lyndrix-core, authentik, grafana): `service`, `ports`, `config`,
   `stage_overrides`, `secrets`, `volumes`, `deployment_strategy`, `deployments`, `dependencies`, `vars`.
-  `schema_version: 2` (`APPS/aac-lyndrix-core/service.yml:32`). `stage_overrides` nutzt real nur
+  `schema_version: 2` (`APPS/aac-lyndrix-core/service.yml:32`). `stage_overrides` really only uses
   `prod: {config, service}` (`service.yml:33-38`). `deployment_strategy`: `main → prod`, `dev → dev`,
   `test` `enabled: false` (`service.yml:75-93`).
-- **Folge:** `maintenance:`/`incidents:` überleben schon heute unverändert bis ans Output. Ein Schema
-  wäre ein Zusatz (Linter), **kein `schema_version`-Bump nötig** (die Version steuert nur
-  Env-/Secret-Verhalten, `TE/tests/test_processors.py:189,216`).
+- **Consequence:** `maintenance:`/`incidents:` already survive unchanged to the output today. A schema
+  would be an addition (linter), **no `schema_version` bump needed** (the version only controls
+  env/secret behaviour, `TE/tests/test_processors.py:189,216`).
 
-## 3. Render-Pfad und Merge-Reihenfolge
+## 3. Render path and merge order
 
-1. Orchestrator legt `service.yml` ab (`prepare_and_run_generator.yml:3,8-17`), Kopie in isolierten
-   Build-Pfad (25-29).
-2. Ansible-Merge (36-46): `service.yml` → `combine(ansible_host_ip)` →
-   `combine(service_item.config, recursive)` [Controller `hosts.yml services[].config`] →
+1. The orchestrator places `service.yml` (`prepare_and_run_generator.yml:3,8-17`), copy into an isolated
+   build path (25-29).
+2. Ansible merge (36-46): `service.yml` → `combine(ansible_host_ip)` →
+   `combine(service_item.config, recursive)` [controller `hosts.yml services[].config`] →
    `combine(service.stage)` → `combine(inventory_hostname)`.
 3. `python -m manifest_generator.main --ssot-json --stage` (`main → prod`) (50-57).
-4. `main.py:66-75` Strategy/Kill-Switch (Stage per `deployment_strategy.target_stage`);
-   `ContextBuilder`; `stage_overrides[stage]` wird **zuletzt** deep-gemerged (`context.py:80-84`);
-   Jinja-Rekursion (86-88).
-5. Prozessor-Kette (`main.py:85-95`): Imports (`catalog/*.yml`), Metadata, Ports, Environment,
-   Networks, Ingress, Spec, Volume, Ansible (erzeugt `ansible_directories`, `processors/ansible.py:108`).
-6. `ansible_context.json` wird immer geschrieben, auch bei `deployment_enabled=false`
-   (`main.py:101-110`); danach `engine.render_all/documentation/files/ansible` (`main.py:112-136`;
-   `engine.py:15,41,72,110`); Ansible liest `final_ssot_vars` (`prepare_and_run_generator.yml:88-92`).
+4. `main.py:66-75` strategy/kill switch (stage via `deployment_strategy.target_stage`);
+   `ContextBuilder`; `stage_overrides[stage]` is deep-merged **last** (`context.py:80-84`);
+   Jinja recursion (86-88).
+5. Processor chain (`main.py:85-95`): imports (`catalog/*.yml`), metadata, ports, environment,
+   networks, ingress, spec, volume, ansible (produces `ansible_directories`, `processors/ansible.py:108`).
+6. `ansible_context.json` is always written, also when `deployment_enabled=false`
+   (`main.py:101-110`); afterwards `engine.render_all/documentation/files/ansible` (`main.py:112-136`;
+   `engine.py:15,41,72,110`); Ansible reads `final_ssot_vars` (`prepare_and_run_generator.yml:88-92`).
 
-- **Effektive Reihenfolge:** SSoT → Controller-`config` → `stage_overrides`. `stage_overrides`
-  schlägt also den Controller-Override.
-- Listen werden **ersetzt** (`_deep_merge`, `context.py:11-19`; Ansible `combine` = Standard, nicht
-  verifiziert).
-- Controller-Werte müssen literal sein: sie durchlaufen `CORE/services/renderer.py:105-120`
-  (2 Pässe, `PermissiveUndefined` → leer; nur `ansible_host_ip`/`ansible_host`/`inventory_hostname`
-  bleiben Literal, Z. 63). Fensterdaten sind literal, also unkritisch.
+- **Effective order:** SSoT → controller `config` → `stage_overrides`. `stage_overrides`
+  therefore beats the controller override.
+- Lists are **replaced** (`_deep_merge`, `context.py:11-19`; Ansible `combine` = default, not
+  verified).
+- Controller values must be literal: they pass through `CORE/services/renderer.py:105-120`
+  (2 passes, `PermissiveUndefined` → empty; only `ansible_host_ip`/`ansible_host`/`inventory_hostname`
+  stay literal, line 63). Window data is literal, hence uncritical.
 
-## 4. iac-controller: Struktur von Hosts, VMs und Stages
+## 4. iac-controller: structure of hosts, VMs and stages
 
 - `environments/global/{01_global_vars,02_service_catalog,03_profiles,04_agents}.yml`;
   `sites/<site>/{site_vars,networks,hardware}.yml` (`site = onprem | hetzner`);
   `sites/<site>/stages/<stage>/{stage,stage_vars,hosts}.yml` (`stage = dev | test | prod`).
-- Ladereihenfolge: `CORE/services/loader.py:28-50`; Listen werden **vereinigt**
+- Load order: `CORE/services/loader.py:28-50`; lists are **united**
   (`unique_list_merge`, `loader.py:6-15`).
-- `stage.yml`: nur Metadaten (Top-Key heißt dort `sage_details`, vermutlich Tippfehler, harmlos).
+- `stage.yml`: metadata only (the top key there is called `sage_details`, probably a typo, harmless).
   `stage_vars.yml`: `stage_vars.{ansible_vars, terraform_vars}`.
-- `hosts.yml` (Top-Key `hosts`; onprem/prod 10 Hosts): `hostname`, `ansible_host`, `profiles[]`,
+- `hosts.yml` (top key `hosts`; onprem/prod 10 hosts): `hostname`, `ansible_host`, `profiles[]`,
   `swarm`, `terraform{is_managed,node_name,vm_id,ip,cores,ram,…}`, `ansible_groups[]`,
-  `baseline_roles[]`, `services[]{name,state,deploy_type,config{…}}`. Modelle
+  `baseline_roles[]`, `services[]{name,state,deploy_type,config{…}}`. Models
   `StandardHost`/`ServiceDefinition` (`CORE/validate/models.py:6-12,44-53`), `extra="allow"`.
 - Hardware: `sites/<site>/hardware.yml` → `hardware_hosts` (hydra, cerberus, truenas) + `cluster`
-  (olympus, nodes); `HardwareNode`/`HardwareCluster` (`models.py:55-75`), `extra=allow`. Kein
-  `services:`-Block (`CTRL/features/001-hypervisor-services-block.md`, OPEN).
-- VMs/LXC: `terraform.is_managed` → Container im tfvars (`CORE/gen/terraform/mapper.py:8`);
-  `is_used` → Provider (`mapper.py:6`). Ein `maintenance:` neben `terraform:` berührt TF nicht
-  (der Mapper liest nur das `terraform`-Dict, `mapper.py:75,123`).
-- Profile (`03_profiles.yml`) werden unter die Host-Daten gemerged (`CORE/generator.py:55-88`)
-  = weitere Vererbungsstufe.
-- `site_vars.timezone: Europe/Berlin` existiert
-  (`CTRL/environments/sites/{onprem,hetzner}/site_vars.yml:4`), nutzbar als tz-Default.
-- Transport: Git-Sync + Webhook `/api/iac/webhook/sync` (`CTRL/.gitlab-ci.yml:52-80`),
-  Self-Healing-Loop als Backstop. Der Controller hat keine Schema-/Unit-Tests.
+  (olympus, nodes); `HardwareNode`/`HardwareCluster` (`models.py:55-75`), `extra=allow`. No
+  `services:` block (`CTRL/features/001-hypervisor-services-block.md`, OPEN).
+- VMs/LXC: `terraform.is_managed` → container in tfvars (`CORE/gen/terraform/mapper.py:8`);
+  `is_used` → provider (`mapper.py:6`). A `maintenance:` next to `terraform:` does not touch TF
+  (the mapper only reads the `terraform` dict, `mapper.py:75,123`).
+- Profiles (`03_profiles.yml`) are merged under the host data (`CORE/generator.py:55-88`)
+  = a further inheritance level.
+- `site_vars.timezone: Europe/Berlin` exists
+  (`CTRL/environments/sites/{onprem,hetzner}/site_vars.yml:4`), usable as a tz default.
+- Transport: git sync + webhook `/api/iac/webhook/sync` (`CTRL/.gitlab-ci.yml:52-80`),
+  self-healing loop as a backstop. The controller has no schema/unit tests.
 
-## 5. Vererbungs-/Precedence-Mechanik heute und Kandidat für die effektive Auflösung
+## 5. Inheritance/precedence mechanics today and candidate for the effective resolution
 
-Bestehend (alles Deep-Merge, spezifisch gewinnt): global → site → stage Dateien
-(`loader.py:33-49`); Profil → Host (`generator.py:55-88`); global/site/stage_vars → jeder Host,
-Hardware ohne stage_vars (`generator.py:148-181`); SSoT → Controller `services[].config`
-(`prepare_and_run_generator.yml:36-46`); → `stage_overrides` (`context.py:80-84`). Es gibt **keine**
-Service → Host → Stage-Default-Auflösung (die heutige Richtung ist umgekehrt: Controller
-überschreibt SSoT).
+Existing (all deep merge, the more specific wins): global → site → stage files
+(`loader.py:33-49`); profile → host (`generator.py:55-88`); global/site/stage_vars → every host,
+hardware without stage_vars (`generator.py:148-181`); SSoT → controller `services[].config`
+(`prepare_and_run_generator.yml:36-46`); → `stage_overrides` (`context.py:80-84`). There is **no**
+service → host → stage-default resolution (today's direction is the reverse: the controller
+overrides the SSoT).
 
-- **Variante A (iac_core/Orchestrator, Sync-Zeit):** kennt Hosts, Stage, Site, Profile, `services[]`
-  (`generator.py:115-181`; `ansible_gen.py:78`); der Weg zu Monitoring/Registry existiert
+- **Variant A (iac_core/orchestrator, sync time):** knows hosts, stage, site, profiles, `services[]`
+  (`generator.py:115-181`; `ansible_gen.py:78`); the path to monitoring/registry exists
   (`ORCH/app/controller/engine.py:1161-1196` `_build_inventory_hosts`, `1271-1286`
-  `iac:inventory_updated`); Fenster werden **vor** dem Deploy gebraucht. Contra: liest kein
-  `service.yml`; der Orchestrator hat die Dateien aber (`engine.py:956-1010` `rglob service.yml` in
-  `services_dir`) und müsste `maintenance`/`incidents` (+ `stage_overrides`) mitlesen.
-  `_build_inventory_hosts` hat eine feste Feldliste, neue Felder explizit ergänzen.
-- **Variante B (Template Engine, Deploy-Zeit):** sieht `service.yml` komplett inkl.
-  `stage_overrides`; Ergebnis als `final_ssot_vars`. Contra: nur beim Deploy, kennt Host-/Stage-Defaults
-  nicht, Ergebnis erreicht den Orchestrator nicht über das Inventory; Henne-Ei für geplante Deployments.
-- **Faktenfazit:** die Auflösung gehört nach **A**; B kann die Service-Ebene validieren/durchreichen.
-  Entscheidung offen.
+  `iac:inventory_updated`); windows are needed **before** the deploy. Con: it reads no
+  `service.yml`; the orchestrator does have the files, though (`engine.py:956-1010` `rglob service.yml` in
+  `services_dir`) and would have to read `maintenance`/`incidents` (+ `stage_overrides`) as well.
+  `_build_inventory_hosts` has a fixed field list, new fields must be added explicitly.
+- **Variant B (template engine, deploy time):** sees `service.yml` completely incl.
+  `stage_overrides`; result as `final_ssot_vars`. Con: only at deploy, does not know host/stage defaults,
+  the result does not reach the orchestrator via the inventory; chicken-and-egg for scheduled deployments.
+- **Factual conclusion:** the resolution belongs in **A**; B can validate/pass through the service level.
+  Decision open.
 
-## 6. Inventory-Variablen-Durchreichung (Muster)
+## 6. Passing inventory variables through (pattern)
 
-- `process_host` schreibt das gesamte Host-Dict als Hostvars (`CORE/gen/ansible_gen.py:59-63`);
-  `extra=allow` (`models.py:53,64`). Ein Host-Key `maintenance:` wird ohne Codeänderung Hostvar.
+- `process_host` writes the whole host dict as hostvars (`CORE/gen/ansible_gen.py:59-63`);
+  `extra=allow` (`models.py:53,64`). A host key `maintenance:` becomes a hostvar without a code change.
 - `stage_vars`/`site_vars`/`global_vars` → `group_vars` (`ansible_gen.py:44-54`; `generator.py:136-146`)
-  **und** in jeden Host gemerged (`env_context`, `generator.py:148-181`). Ein Key auf Wurzelebene von
-  `stage.yml` landet **nicht** in `group_vars` (`ansible_gen.py:46-48`), daher
-  `maintenance_default`/`incident_defaults` **unter `stage_vars:`** ablegen. Hardware-Hosts bekommen
-  keine stage_vars, also Hypervisor-Defaults in `site_vars`.
-- Muster `ansible_host_ip`: im Orchestrator als Literal-Jinja erhalten (`renderer.py:63,99-102`), in
-  Ansible per `combine` gesetzt (`prepare_and_run_generator.yml:40-42`), konsumiert in
-  `processors/ports.py:37`, `ingress.py:81`. `maintenance_effective` liefe bei Variante B identisch per
-  `combine` (Z. 40-45). Service-Ebene im Inventory: `services[]` je Host + Gruppen `service_<name>`
+  **and** merged into every host (`env_context`, `generator.py:148-181`). A key at the root level of
+  `stage.yml` does **not** end up in `group_vars` (`ansible_gen.py:46-48`), hence
+  place `maintenance_default`/`incident_defaults` **under `stage_vars:`**. Hardware hosts get
+  no stage_vars, so hypervisor defaults go into `site_vars`.
+- Pattern `ansible_host_ip`: preserved as literal Jinja in the orchestrator (`renderer.py:63,99-102`), set in
+  Ansible via `combine` (`prepare_and_run_generator.yml:40-42`), consumed in
+  `processors/ports.py:37`, `ingress.py:81`. `maintenance_effective` would run identically via
+  `combine` in variant B (lines 40-45). Service level in the inventory: `services[]` per host + groups `service_<name>`
   (`ansible_gen.py:78-80`).
 
-## 7. Teststand und Doku-Orte
+## 7. Test status and documentation locations
 
 - **TE:** pytest, `PYTHONPATH=$(pwd)/scripts pytest tests/ -v`; CI `python-unit-tests`
   (`TE/.gitlab-ci.yml`, python:3.12, pytest/pyyaml/jinja2) + `yaml-syntax-check`.
-  `tests/test_processors.py` (382 Z., 15 Tests; einziger `ContextBuilder`-Test Z. 237, **kein
-  `stage_overrides`-Test**), `test_ansible_render.py`, `test_template_render.py`,
-  `test_render_files.py`; Fixture `tests/service-test/service.yml` (`stage_overrides` Z. 29).
-  `validate_ssot.py` hat keine Tests; Aufruf in CI nicht verifiziert. Migrationsskripte
+  `tests/test_processors.py` (382 lines, 15 tests; the only `ContextBuilder` test line 237, **no
+  `stage_overrides` test**), `test_ansible_render.py`, `test_template_render.py`,
+  `test_render_files.py`; fixture `tests/service-test/service.yml` (`stage_overrides` line 29).
+  `validate_ssot.py` has no tests; invocation in CI not verified. Migration scripts
   `TE/scripts/migration/`.
-- **Controller:** keine Schema-/Unit-Tests; `iac_core`-Tests nur `ORCH/iac_core/tests/test_terraform_gen.py`.
-- **Doku (DE):** `TE/documentation.md` (465 Z.; Abschnitt 3 `service.yml`, Z. 36-165 → neuer
-  Unterabschnitt 3.x; Abschnitt 6 veraltet), Hugo `aac-platform/aac-iac-documentation/content/aac-services/`,
-  `CTRL/README.md` (Boilerplate), `CTRL/features/README.md` (Index; neue Datei
-  `007-maintenance-windows.md` nach Konvention), MkDocs-Hub `CTRL/mkdocs.yml` +
+- **Controller:** no schema/unit tests; `iac_core` tests only `ORCH/iac_core/tests/test_terraform_gen.py`.
+- **Docs (DE):** `TE/documentation.md` (465 lines; section 3 `service.yml`, lines 36-165 → new
+  subsection 3.x; section 6 outdated), Hugo `aac-platform/aac-iac-documentation/content/aac-services/`,
+  `CTRL/README.md` (boilerplate), `CTRL/features/README.md` (index; new file
+  `007-maintenance-windows.md` by convention), MkDocs hub `CTRL/mkdocs.yml` +
   `.gitlab-ci/scripts/generate_hub.py`.
 
-## 8. Renovate → Webhook → Deploy (IaC-Seite)
+## 8. Renovate → webhook → deploy (IaC side)
 
-- `renovate.json` in TE, CTRL, `APPS/aac-lyndrix-core` enthalten nur `$schema`. Die echte Konfiguration
-  liegt im Renovate-Service `APPS/aac-renovate/service.yml` (`RENOVATE_CONFIG_FILE=/config/config.js`,
-  Z. 72-83) + `custom_templates` (nicht ausgewertet).
-- **Fluss:** Renovate-MR → MR-Pipeline (`generate`/`validate` bei `merge_request_event` gegen
-  `PROD_BRANCH`, `service-pipeline.yml:194-237`) → Merge `main` → `prod-generate` → `prod-validate` →
+- `renovate.json` in TE, CTRL, `APPS/aac-lyndrix-core` contains only `$schema`. The real configuration
+  lives in the Renovate service `APPS/aac-renovate/service.yml` (`RENOVATE_CONFIG_FILE=/config/config.js`,
+  lines 72-83) + `custom_templates` (not evaluated).
+- **Flow:** Renovate MR → MR pipeline (`generate`/`validate` on `merge_request_event` against
+  `PROD_BRANCH`, `service-pipeline.yml:194-237`) → merge `main` → `prod-generate` → `prod-validate` →
   `prod-trigger-orchestrator` (`service-pipeline.yml:299-386`):
-  `POST $LYNDRIX_ORCHESTRATOR_URL/api/iac/deploy/service/$CI_PROJECT_NAME/gitlab`, Body
-  `{"branch": PROD_BRANCH}`, Header `X-Gitlab-Token`; Regel `LYNDRIX_DIRECT_TRIGGER_ENABLED == "true"
-  && branch == PROD_BRANCH` (Z. 386; Default `"true"` Z. 40-43). Danach **Wait-Loop** auf
-  `…/gitlab/status` (`LYNDRIX_DEPLOY_WAIT_*`, Timeout 1800 s, Z. 44-48). Memory: parallele
-  GitLab-Webhooks nur mit `pipeline_events=False`.
-- **Wichtig für den Plan:** Ein auf `SCHEDULED` geparkter Deploy würde die Wait-Schleife
-  blockieren/timeouten und den GitLab-Job rot färben. Muss mit dem Orchestrator-Sweep abgestimmt werden.
+  `POST $LYNDRIX_ORCHESTRATOR_URL/api/iac/deploy/service/$CI_PROJECT_NAME/gitlab`, body
+  `{"branch": PROD_BRANCH}`, header `X-Gitlab-Token`; rule `LYNDRIX_DIRECT_TRIGGER_ENABLED == "true"
+  && branch == PROD_BRANCH` (line 386; default `"true"` lines 40-43). Afterwards a **wait loop** on
+  `…/gitlab/status` (`LYNDRIX_DEPLOY_WAIT_*`, timeout 1800 s, lines 44-48). Memory: parallel
+  GitLab webhooks only with `pipeline_events=False`.
+- **Important for the plan:** a deploy parked as `SCHEDULED` would block/time out the wait loop
+  and turn the GitLab job red. This must be coordinated with the orchestrator sweep.
 
-## 9. Einhängepunkte für Abschnitt 7.5
+## 9. Attachment points for section 7.5
 
-1. `TE/scripts/validate_ssot.py`, `validate_ssot()` nach Block 7b (~Z. 139): optionaler Block
+1. `TE/scripts/validate_ssot.py`, `validate_ssot()` after block 7b (~line 139): optional block
    `maintenance`/`incidents` (`weekly.days`, `HH:MM`, `tz` via `zoneinfo`, `once.start < end`, `cron`
-   5 Felder + `duration_minutes > 0`, `deploy_policy in {window, immediate}`, `offline_minutes >= 0`,
-   `severity`). Nur bei falschen Typen Fehler, sonst Warnungen; unbekannte Keys unter `maintenance` →
-   Warnung.
-2. `TE/…/context.py` Safety-Net (Z. 55-73): optional `"maintenance": {}`, `"incidents": {}`.
-3. Neu `TE/…/processors/maintenance.py` + Eintrag in `main.py:85-95` (nach `AnsibleProcessor`):
-   normalisiert weekly/once/cron, setzt Default `deploy_policy` nach Stage (prod → window, sonst
-   immediate), schreibt `context['maintenance_effective']` (Service-Ebene).
-4. `TE/tests/test_processors.py`: Normalisierung, `stage_overrides.prod.maintenance` (Liste ersetzt),
-   Linter-Fälle.
-5. `TE/documentation.md`: neuer Abschnitt 3.x.
-6. `CTRL hosts.yml` (je Host) / `hardware.yml` (je Hardware-Host): `maintenance: {windows, inherit}`
-   neben `terraform:`/`services:`; läuft ohne Codeänderung bis in die Hostvars.
-7. `CTRL stages/<stage>/stage_vars.yml` **unter `stage_vars:`**: `maintenance_default {enabled, windows}`,
-   `incident_defaults {service, host, vm, container}`. Hardware: `site_vars.yml`. Globale Typ-Defaults
-   sinnvoll in `global/01_global_vars.yml` (`global_vars:`).
-8. `CORE/validate/models.py` `StandardHost`/`HardwareNode` (Z. 44-72): optionales Pydantic-Submodell
-   `MaintenanceConfig`/`IncidentRule` (einziger formaler Controller-Validierungsort; Absprache mit der
-   Orchestrator-Session), sonst reicht `extra=allow`.
-9. `ORCH/app/controller/engine.py` `_build_inventory_hosts` (Z. 1161-1196): `maintenance_effective`/
-   `incidents_effective` pro Host und Service im `iac:inventory_updated`-Payload; hier die Vererbung
-   auflösen (Variante A).
-10. `CTRL/features/007-maintenance-windows.md` + `features/README.md` (Index Z. 10-20).
-11. `ANS prepare_and_run_generator.yml:40-45` und `cd_rollout_single_service.yml:57-61`: combine-Kette
-    nur bei Variante B.
+   5 fields + `duration_minutes > 0`, `deploy_policy in {window, immediate}`, `offline_minutes >= 0`,
+   `severity`). Errors only for wrong types, otherwise warnings; unknown keys under `maintenance` →
+   warning.
+2. `TE/…/context.py` safety net (lines 55-73): optional `"maintenance": {}`, `"incidents": {}`.
+3. New `TE/…/processors/maintenance.py` + entry in `main.py:85-95` (after `AnsibleProcessor`):
+   normalises weekly/once/cron, sets the default `deploy_policy` by stage (prod → window, otherwise
+   immediate), writes `context['maintenance_effective']` (service level).
+4. `TE/tests/test_processors.py`: normalisation, `stage_overrides.prod.maintenance` (list replaced),
+   linter cases.
+5. `TE/documentation.md`: new section 3.x.
+6. `CTRL hosts.yml` (per host) / `hardware.yml` (per hardware host): `maintenance: {windows, inherit}`
+   next to `terraform:`/`services:`; runs through to the hostvars without a code change.
+7. `CTRL stages/<stage>/stage_vars.yml` **under `stage_vars:`**: `maintenance_default {enabled, windows}`,
+   `incident_defaults {service, host, vm, container}`. Hardware: `site_vars.yml`. Global type defaults
+   make sense in `global/01_global_vars.yml` (`global_vars:`).
+8. `CORE/validate/models.py` `StandardHost`/`HardwareNode` (lines 44-72): optional Pydantic submodel
+   `MaintenanceConfig`/`IncidentRule` (the only formal controller validation location; coordinate with the
+   orchestrator session), otherwise `extra=allow` suffices.
+9. `ORCH/app/controller/engine.py` `_build_inventory_hosts` (lines 1161-1196): `maintenance_effective`/
+   `incidents_effective` per host and service in the `iac:inventory_updated` payload; resolve the inheritance
+   here (variant A).
+10. `CTRL/features/007-maintenance-windows.md` + `features/README.md` (index lines 10-20).
+11. `ANS prepare_and_run_generator.yml:40-45` and `cd_rollout_single_service.yml:57-61`: combine chain
+    only for variant B.
 
-- **Default-Schalter-Rückschreiben:** Zieldatei `stage_vars.yml` → `stage_vars.maintenance_default.enabled`.
-  Die Datei enthält einen TF-Backend-Block mit einem Credential-Key (nur der Keyname gesehen):
-  Kommentare/Reihenfolge erhalten, **nicht roh umdumpen** (siehe `CTRL/features/002-secrets-sops-hardening.md`).
-- **Risiken:** (a) literal-only im Controller (zwei Jinja-Pässe mit Leer-Fallback, `renderer.py:71-120`;
-  `{{ }}` in `once.note` würde gerendert/geleert). (b) Listen: Loader vereinigt (`loader.py:6-15`),
-  Ansible/`_deep_merge` ersetzen; Defaults pro Key nur auf **einer** Ebene definieren.
-  (c) `stage_overrides` schlägt den Controller-Override (nur bei Variante B relevant). (d) Hardware ohne
-  stage_vars. (e) kein `schema_version`-Bump nötig; ein Bump auf 3 würde Migrationsskripte berühren,
-  nicht empfohlen. (f) Idempotenz: `write_yaml_if_changed` (`ansible_gen.py:12-38`); keine volatilen
-  Werte (z. B. „nächstes Fenster") ins Inventory, sonst Commit pro Sync. (g) Inventory-State ist
-  Git/SOPS-versioniert; eine reine `maintenance`-Änderung könnte per `pipeline_rules.yml` einen
-  Ansible-Lauf auslösen (nicht verifiziert).
+- **Writing the default switch back:** target file `stage_vars.yml` → `stage_vars.maintenance_default.enabled`.
+  The file contains a TF backend block with a credential key (only the key name seen):
+  preserve comments/order, **do not dump it raw again** (see `CTRL/features/002-secrets-sops-hardening.md`).
+- **Risks:** (a) literal-only in the controller (two Jinja passes with an empty fallback, `renderer.py:71-120`;
+  `{{ }}` in `once.note` would be rendered/emptied). (b) Lists: the loader unites (`loader.py:6-15`),
+  Ansible/`_deep_merge` replace; define defaults per key on **one** level only.
+  (c) `stage_overrides` beats the controller override (only relevant for variant B). (d) Hardware without
+  stage_vars. (e) no `schema_version` bump needed; a bump to 3 would touch migration scripts,
+  not recommended. (f) Idempotency: `write_yaml_if_changed` (`ansible_gen.py:12-38`); no volatile
+  values (e.g. "next window") in the inventory, otherwise a commit per sync. (g) The inventory state is
+  git/SOPS-versioned; a pure `maintenance` change might trigger an Ansible run via `pipeline_rules.yml`
+  (not verified).
 
-## 10. Abweichungen vom Plan und offene Fragen
+## 10. Deviations from the plan and open questions
 
-1. Plan 4.1 „Template Engine validiert": real keine Validierung im Render-Pfad, nur ein optionaler
-   Linter; unbekannte Keys werden still durchgereicht. Validierung wäre eine Neuentwicklung.
-2. Plan 4.2 „Rendering (Template Engine / iac_core) löst Vererbung auf": die Template Engine kennt
-   Host-/Stage-Defaults nicht und läuft erst beim Deploy; `iac_core` kennt kein `service.yml`.
-   Entscheidung nötig (die Fakten sprechen für A mit `service.yml`-Lesen im Orchestrator).
-3. Plan nennt `stages/<stage>.yml`: real `stage.yml`/`stage_vars.yml`; nur unter `stage_vars:` wird es
-   Hostvar; Hardware ohne Stage-Vars.
-4. Stage-Begriff doppelt: Controller-Verzeichnis (`stages/dev|test|prod` je Site) vs. Branch/
-   `target_stage` im `service.yml` (`main → prod`, `test` in realen Services disabled). Die Auflösung
-   muss die Controller-Stage des Hosts nehmen.
-5. Service auf mehreren Hosts: gilt das SSoT-Fenster für alle Instanzen oder per
-   `services[].config.maintenance` je Host übersteuerbar (Mechanik vorhanden)?
-6. Orchestrator-Wait-Schleife vs. `SCHEDULED`-Deploy (Abschnitt 8): Cross-Sweep-Frage.
-7. Default-Schalter-Rückschreiben erzeugt Commits auf `iac-controller/main` → Webhook-Sync → neuer
-   Lauf; Schleifenrisiko prüfen (Commit-Autor ignorieren oder idempotent).
-8. TE-Image hat nur pyyaml, jinja2, mkdocs-material (`TE/Dockerfile`, `requirements.txt`), keine
-   Cron-Bibliothek; Linter nur mit stdlib (`zoneinfo`) / eigenem 5-Felder-Parser; die Cron-Auswertung
-   bleibt Core-Bibliothek.
-9. Renovate-Schedule/Automerge (`APPS/aac-renovate` `config.js`) nicht ausgewertet; klären, ob
-   Renovate Merges zeitlich steuert (Doppel-Fenster vermeiden).
-10. Nicht verifiziert: Ansible-`combine`-Listenverhalten, Rollout-Auslösung durch
-    Inventory-State-Änderung (`pipeline_rules.yml`), ob `validate_ssot.py` in einer CI läuft.
+1. Plan 4.1 "template engine validates": in reality no validation in the render path, only an optional
+   linter; unknown keys are silently passed through. Validation would be new development.
+2. Plan 4.2 "rendering (template engine / iac_core) resolves inheritance": the template engine does not know
+   host/stage defaults and only runs at deploy; `iac_core` knows no `service.yml`.
+   Decision needed (the facts favour A with `service.yml` reading in the orchestrator).
+3. The plan mentions `stages/<stage>.yml`: in reality `stage.yml`/`stage_vars.yml`; it only becomes a
+   hostvar under `stage_vars:`; hardware has no stage vars.
+4. The stage concept is doubled: controller directory (`stages/dev|test|prod` per site) vs. branch/
+   `target_stage` in `service.yml` (`main → prod`, `test` disabled in real services). The resolution
+   must use the controller stage of the host.
+5. Service on several hosts: does the SSoT window apply to all instances or can it be overridden per host via
+   `services[].config.maintenance` (mechanism exists)?
+6. Orchestrator wait loop vs. `SCHEDULED` deploy (section 8): cross-sweep question.
+7. Writing the default switch back produces commits on `iac-controller/main` → webhook sync → new
+   run; check the loop risk (ignore the commit author or make it idempotent).
+8. The TE image only has pyyaml, jinja2, mkdocs-material (`TE/Dockerfile`, `requirements.txt`), no
+   cron library; the linter only with stdlib (`zoneinfo`) / its own 5-field parser; cron evaluation
+   stays a core library.
+9. Renovate schedule/automerge (`APPS/aac-renovate` `config.js`) not evaluated; clarify whether
+   Renovate controls merges in time (avoid double windows).
+10. Not verified: Ansible `combine` list behaviour, rollout triggering by an
+    inventory-state change (`pipeline_rules.yml`), whether `validate_ssot.py` runs in a CI.

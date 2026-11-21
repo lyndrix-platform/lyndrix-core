@@ -1,98 +1,97 @@
-# Feature-Design: `lyndrix-agent` — verschlüsselter Host-Agent + `agent-management`-Plugin
+# Feature design: `lyndrix-agent` — encrypted host agent + `agent-management` plugin
 
-**Status:** 📐 Design (noch kein Code)
-**Betroffene Repos (neu):** `lyndrix-agent`, `lyndrix-plugin-agent-management`, `lyndrix-agent-contract`
-**Betroffene Repos (Migration):** `lyndrix-plugin-docker-manager`, `lyndrix-plugin-monitoring`, `docker-to-dns`
-**Deployment:** Baseline-Service, ausgerollt von der IaC-Pipeline auf jeden Host
+**Status:** 📐 Design (no code yet)
+**Affected repos (new):** `lyndrix-agent`, `lyndrix-plugin-agent-management`, `lyndrix-agent-contract`
+**Affected repos (migration):** `lyndrix-plugin-docker-manager`, `lyndrix-plugin-monitoring`, `docker-to-dns`
+**Deployment:** Baseline service, rolled out by the IaC pipeline to every host
 
 ---
 
 ## 1. Motivation
 
-Heute laufen auf den Hosts als Default mehrere Einzel-Tools, die **unverschlüsselt**
-kommunizieren:
+Today several individual tools run by default on the hosts and communicate **unencrypted**:
 
-| Tool | Zweck | Problem |
+| Tool | Purpose | Problem |
 |---|---|---|
-| `docker-proxy` (socket-proxy) | Docker-Socket über HTTP exponieren | Klartext-HTTP, offener Port im Netz |
-| `docker-to-dns` | Docker-Events → DNS-Einträge | eigener Prozess, eigener Kanal |
-| `dockermon` | Container-/Host-State liefern | eigener Prozess, eigener Kanal |
+| `docker-proxy` (socket proxy) | Expose Docker socket over HTTP | Plaintext HTTP, open port in the network |
+| `docker-to-dns` | Docker events → DNS entries | Own process, own channel |
+| `dockermon` | Deliver container/host state | Own process, own channel |
 
-Der Schmerz ist im Code sichtbar: **Docker Manager redet direkt per Klartext** an den
-Socket-Proxy. In `lyndrix-plugin-docker-manager/app/logic/service.py` baut `_base_url()`
-Requests als `http://{ip}:2375/containers/...`; Hosts sind als `{ip, port: 2375,
-scheme: "http"}` in Vault hinterlegt. Es gibt sogar Fallback-Logik, wenn der fremde
-Proxy `/exec` mit `403` blockt — d.h. wir sind einem Proxy ausgeliefert, dessen
-Allowlist wir nicht steuern.
+The pain is visible in the code: **Docker Manager talks directly in plaintext** to the
+socket proxy. In `lyndrix-plugin-docker-manager/app/logic/service.py`, `_base_url()`
+builds requests as `http://{ip}:2375/containers/...`; hosts are stored in Vault as `{ip, port: 2375,
+scheme: "http"}`. There is even fallback logic when the foreign
+proxy blocks `/exec` with `403` — i.e. we are at the mercy of a proxy whose
+allowlist we do not control.
 
-**Kernbeobachtung:** Alle drei Tools brauchen dasselbe — *lokalen Docker-Socket-Zugriff
-+ einen sicheren Kanal zum zentralen Core*. Sie unterscheiden sich nur darin, **was**
-sie mit dem Socket tun (Kommandos proxen / Events streamen / Stats streamen). Das ist
-das Lehrbuch-Muster für **ein Runtime, viele Module** — nicht für drei Images.
+**Core observation:** All three tools need the same thing — *local Docker socket access
+plus a secure channel to the central core*. They differ only in **what**
+they do with the socket (proxy commands / stream events / stream stats). That is the
+textbook pattern for **one runtime, many modules** — not for three images.
 
-Lyndrix-Core bringt genau das Backend mit, das ein Agent-Framework braucht: IAM/API-Keys,
-Event-Bus, Vault, SSE-Infrastruktur. Diese Erweiterung nutzt das aus, statt einen
-vierten Kommunikationsweg zu erfinden.
-
----
-
-## 2. Ziele / Nicht-Ziele
-
-**Ziele**
-- Ende der Klartext-Kommunikation zu den Hosts — **mTLS als Steady-State-Default**.
-- **Ein** Agent-Image pro Host statt N Einzel-Tools; Funktionen zentral zuschaltbar.
-- Bestehende Plugins (docker-manager, monitoring) konsumieren Agents **transparent** —
-  ohne den Transport zu kennen.
-- Kein exponierter Docker-Port mehr im Netz (siehe Transport-Modell).
-- Zentrale Sicht: welche Hosts online sind, welche Capabilities, welche Agent-Version.
-
-**Nicht-Ziele (vorerst)**
-- Kein generisches Remote-Shell-/Config-Management à la Ansible (die IaC-Pipeline bleibt
-  dafür zuständig).
-- Kein Ersatz für die IaC-Provisionierung — der Agent wird *von ihr* ausgerollt.
-- Keine Multi-Tenancy-Isolierung über einen Core hinaus (ein Core = eine Agent-Flotte).
+Lyndrix core already provides exactly the backend an agent framework needs: IAM/API keys,
+event bus, Vault, SSE infrastructure. This extension uses that instead of inventing
+a fourth communication path.
 
 ---
 
-## 3. Grundsatzentscheidung: ein modulares Runtime, keine N Spezial-Images
+## 2. Goals / non-goals
 
-**Entscheidung:** Ein einziges `lyndrix-agent`-Image mit **zentral schaltbaren
-Capability-Modulen**, nicht mehrere zweckgebundene Images.
+**Goals**
+- End of plaintext communication to the hosts — **mTLS as steady-state default**.
+- **One** agent image per host instead of N individual tools; functions centrally switchable.
+- Existing plugins (docker-manager, monitoring) consume agents **transparently** —
+  without knowing the transport.
+- No exposed Docker port in the network anymore (see transport model).
+- Central view: which hosts are online, which capabilities, which agent version.
 
-**Begründung:** N Spezial-Images multiplizieren pro Host den Betrieb — N Deployments,
-N Identitäten/Credentials, N Update-Kadenzen, N verschlüsselte Kanäle. Genau der
-Schmerz, der heute schon spürbar ist. Ein Image mit Feature-Flags gibt beides: eine
-Identität, ein Kanal, ein Rollout — und pro Host aktiviert man zentral nur die
-gewünschten Capabilities (`docker-control` / `docker-events` / `docker-stats`).
-Zusätzlich spiegelt es Lyndrix-Core selbst (ein modulares Runtime, das Module lädt) —
-Konsistenz über die ganze Plattform.
-
-Spezifische Images wären nur gerechtfertigt, wenn Agents fundamental verschiedene
-Runtimes/Sprachen bräuchten. Tun sie nicht — es ist immer „Socket + Kanal".
+**Non-goals (for now)**
+- No generic remote shell/config management à la Ansible (the IaC pipeline remains
+  responsible for that).
+- No replacement for IaC provisioning — the agent is rolled out *by it*.
+- No multi-tenancy isolation beyond one core (one core = one agent fleet).
 
 ---
 
-## 4. Architektur — drei Komponenten
+## 3. Fundamental decision: one modular runtime, no N special images
+
+**Decision:** A single `lyndrix-agent` image with **centrally switchable
+capability modules**, not several single-purpose images.
+
+**Rationale:** N special images multiply operations per host — N deployments,
+N identities/credentials, N update cadences, N encrypted channels. Exactly the
+pain that is already noticeable today. One image with feature flags gives both: one
+identity, one channel, one rollout — and per host one centrally activates only the
+desired capabilities (`docker-control` / `docker-events` / `docker-stats`).
+In addition, it mirrors Lyndrix core itself (a modular runtime that loads modules) —
+consistency across the whole platform.
+
+Special images would only be justified if agents fundamentally needed different
+runtimes/languages. They do not — it is always "socket + channel".
+
+---
+
+## 4. Architecture — three components
 
 ```
                          ┌─────────────────────────────────────────────┐
                          │                 lyndrix-core                 │
-   Consumer-Plugins      │                                             │
+   Consumer plugins      │                                             │
    ┌──────────────┐      │   ┌───────────────────────────────────┐    │
    │ docker-mgr   │──────┼──▶│  lyndrix-plugin-agent-management   │    │
-   │ monitoring   │◀─Bus─┼───│  • Enrollment / Identität         │    │
-   │ dns-consumer │      │   │  • Agent-Registry                 │    │
-   └──────────────┘      │   │  • Transport-Endpoint (WS)        │    │
-                         │   │  • Service-Fassade + Bus-Bridge   │    │
+   │ monitoring   │◀─Bus─┼───│  • Enrollment / identity          │    │
+   │ dns-consumer │      │   │  • Agent registry                 │    │
+   └──────────────┘      │   │  • Transport endpoint (WS)        │    │
+                         │   │  • Service facade + bus bridge    │    │
                          │   └───────────────┬───────────────────┘    │
-                         │      Vault (PKI)   │  Event-Bus             │
+                         │      Vault (PKI)   │  Event bus             │
                          └────────────────────┼───────────────────────┘
-                                              │  mTLS (Default: Agent→Core outbound)
+                                              │  mTLS (default: agent→core outbound)
                         ┌─────────────────────┼─────────────────────┐
                         │             Host    ▼                     │
                         │   ┌───────────────────────────────────┐   │
                         │   │           lyndrix-agent           │   │
-                        │   │  Supervisor + Transport-Client    │   │
+                        │   │  Supervisor + transport client    │   │
                         │   │  Capabilities:                    │   │
                         │   │   • docker-control  ┐             │   │
                         │   │   • docker-events   ├─ /var/run/  │   │
@@ -101,205 +100,203 @@ Runtimes/Sprachen bräuchten. Tun sie nicht — es ist immer „Socket + Kanal".
                         └───────────────────────────────────────────┘
 ```
 
-### 4.1 `lyndrix-agent` (das Image)
-Dünner **Supervisor** + **Transport-Client** + **Capability-Module**. Läuft als
-Container auf jedem Host mit read-mostly Bind-Mount auf `/var/run/docker.sock`.
+### 4.1 `lyndrix-agent` (the image)
+Thin **supervisor** + **transport client** + **capability modules**. Runs as a
+container on every host with a read-mostly bind mount of `/var/run/docker.sock`.
 
-Capabilities (zentral pro Host an/aus):
-- **`docker-control`** — ersetzt docker-proxy. Führt Docker-API-Calls lokal am Socket
-  aus und liefert Ergebnisse über den Kanal zurück. Aktionen laufen gegen eine
-  **zentral definierte Allowlist** (nicht mehr die Proxy-Konfig auf dem Host).
-- **`docker-events`** — ersetzt die docker-to-dns-Quelle. Streamt Docker-Events nach
-  Hause (`agent:docker:event`).
-- **`docker-stats`** — zapft dockermon an bzw. ersetzt es. Streamt Container-/Host-Stats
+Capabilities (centrally per host on/off):
+- **`docker-control`** — replaces docker-proxy. Executes Docker API calls locally on the socket
+  and returns results via the channel. Actions run against a **centrally defined allowlist** (no longer the proxy
+  configuration on the host).
+- **`docker-events`** — replaces the docker-to-dns source. Streams Docker events home
+  (`agent:docker:event`).
+- **`docker-stats`** — taps dockermon or replaces it. Streams container/host stats
   (`agent:docker:stats`, `agent:host:stats`).
-- **`host-metrics`** *(später)* — Node-Level-Metriken (CPU/RAM/Disk), node-exporter-ish.
+- **`host-metrics`** *(later)* — node-level metrics (CPU/RAM/disk), node-exporter-like.
 
-Der Agent selbst hält **keine** Business-Logik über „Socket + Transport" hinaus. DNS-
-Regeln, Monitoring-Auswertung etc. leben zentral.
+The agent itself holds **no** business logic beyond "socket + transport". DNS
+rules, monitoring evaluation etc. live centrally.
 
-### 4.2 `lyndrix-plugin-agent-management` (Core-Plugin)
-Die Server-Seite. Aufgaben:
-- **Enrollment / Identität** — Bootstrap-Token entgegennehmen, Agent registrieren,
-  Vault-PKI-Cert-Ausstellung anstoßen (§5).
-- **Transport-Endpoint** — der WebSocket-Endpoint, in den Agents reinwählen.
-- **Agent-Registry** — persistenter Zustand pro Agent (§6).
-- **Service-Fassade + Bus-Bridge** — *der Schlüssel*: andere Plugins nutzen Agents
-  über eine stabile Fassade (`agent_service.docker(host_id)...`) und/oder über
-  Bus-Events, **ohne** den Transport zu kennen (§7).
+### 4.2 `lyndrix-plugin-agent-management` (core plugin)
+The server side. Tasks:
+- **Enrollment / identity** — accept bootstrap token, register agent, trigger
+  Vault PKI certificate issuance (§5).
+- **Transport endpoint** — the WebSocket endpoint into which agents dial.
+- **Agent registry** — persistent state per agent (§6).
+- **Service facade + bus bridge** — *the key*: other plugins use agents
+  via a stable facade (`agent_service.docker(host_id)...`) and/or via bus
+  events, **without** knowing the transport (§7).
 
-### 4.3 `lyndrix-agent-contract` (Shared-Lib)
-Gemeinsame **Wire-Protocol-/DTO-Definitionen**, importiert von beiden Seiten (Agent +
-Plugin) — analog zu `core.api`. Verhindert Protokoll-Drift zwischen Agent und Core.
-Enthält: Frame-Schema, Capability-/Action-Enums, Registry-DTOs, Versionierung.
+### 4.3 `lyndrix-agent-contract` (shared library)
+Shared **wire protocol / DTO definitions**, imported by both sides (agent +
+plugin) — analogous to `core.api`. Prevents protocol drift between agent and core.
+Contains: frame schema, capability/action enums, registry DTOs, versioning.
 
 ---
 
-## 5. Transport & Sicherheit — progressives Trust-Modell
+## 5. Transport & security — progressive trust model
 
-Das ist der eigentliche Zweck der Erweiterung. Es gibt **einen Default-Pfad** und
-**einen optionalen Beschleuniger**, mit einem gestuften Vertrauensaufbau.
+This is the actual purpose of the extension. There is **one default path** and
+**one optional accelerator**, with a staged trust build-up.
 
-### 5.1 Default-Pfad: Agent → Core (outbound)
-Der Agent **wählt raus** und hält eine persistente, authentifizierte Verbindung. Vorteile:
-- **Kein inbound Port auf den Hosts** — funktioniert hinter NAT/Firewall, nichts zu
-  exponieren.
-- Agent initiiert TLS → Verschlüsselung ist der Default, nicht nachträglich draufgeschraubt.
-- Zentrale Online/Offline-Sicht über Heartbeat.
+### 5.1 Default path: agent → core (outbound)
+The agent **dials out** and maintains a persistent, authenticated connection. Advantages:
+- **No inbound port on the hosts** — works behind NAT/firewall, nothing to expose.
+- Agent initiates TLS → encryption is the default, not bolted on afterwards.
+- Central online/offline view via heartbeat.
 
-### 5.2 Gestufter Vertrauensaufbau
-1. **Bootstrap (Tag 0, noch kein Cert):** Der Agent authentifiziert mit einem
-   **per-Agent API-Key** (Enrollment-Token) über TLS. Das nutzt die bestehende
-   `UserApiKey`/`LYNDRIX_SYSTEM_API_KEY`-Infrastruktur. Reicht, um zu funktionieren
-   **und** um Certs zu ziehen.
-2. **Enrollment → mTLS (Steady-State-Default):** Der Agent zieht **automatisch** ein
-   kurzlebiges Client-Cert aus **Vault PKI** (vom `agent-management`-Plugin vermittelt,
-   z. B. via scoped Vault-Token oder einem Sign-CSR-Endpoint). Ab dann verbindet er per
-   **mTLS** und **rotiert das Cert selbstständig** vor Ablauf. Das ist der normale Betrieb.
-3. **Optionaler Beschleuniger — Core → Agent (inbound), erst wenn mTLS steht:** Sobald
-   ein gültiges beidseitiges Cert-Paar existiert, *darf* der Agent zusätzlich einen
-   kleinen **mTLS-gesicherten Inbound-Listener** öffnen, den der Core für **schnelle
-   Ad-hoc-Abfragen oder schnelle Reconnects** nutzt. Wichtig:
-   - Der Port öffnet **nie im Klartext** — er existiert erst, wenn beidseitige Certs da sind.
-   - Es ist ein Performance-Boost, **kein** Sicherheits-Downgrade (mTLS beidseitig).
-   - Pro Host abschaltbar; **Default bleibt der Agent→Core-Pfad** für alles.
+### 5.2 Staged trust build-up
+1. **Bootstrap (day 0, no cert yet):** The agent authenticates with a
+   **per-agent API key** (enrollment token) over TLS. This uses the existing
+   `UserApiKey`/`LYNDRIX_SYSTEM_API_KEY` infrastructure. Sufficient to function
+   **and** to obtain certificates.
+2. **Enrollment → mTLS (steady-state default):** The agent **automatically** obtains a
+   short-lived client certificate from **Vault PKI** (arranged by the `agent-management` plugin,
+   e.g. via a scoped Vault token or a sign-CSR endpoint). From then on it connects via
+   **mTLS** and **rotates the certificate itself** before expiry. This is normal operation.
+3. **Optional accelerator — core → agent (inbound), only once mTLS is in place:** As soon as a
+   valid mutual certificate pair exists, the agent *may* additionally open a
+   small **mTLS-secured inbound listener** that the core uses for **fast ad-hoc queries or fast
+   reconnects**. Important:
+   - The port **never opens in plaintext** — it only exists once mutual certificates are present.
+   - It is a performance boost, **not** a security downgrade (mutual mTLS).
+   - Can be disabled per host; **the default remains the agent→core path** for everything.
 
 ```
-Zeitachse eines Agents
-──────────────────────
-[install] ──API-Key──▶ [enrolled] ──Vault-PKI-Cert──▶ [mTLS steady-state]
+Timeline of an agent
+────────────────────
+[install] ──API key──▶ [enrolled] ──Vault PKI cert──▶ [mTLS steady-state]
                                                             │
-                                                            └─(optional)─▶ [+ inbound mTLS für schnelle Calls]
+                                                            └─(optional)─▶ [+ inbound mTLS for fast calls]
 ```
 
-### 5.3 Warum das die Verschlüsselungsfrage löst
-Der Status quo ist „Core → Host über offenen Klartext-Port". Das neue Modell dreht die
-Default-Richtung um (Agent→Core, verschlüsselt) und macht den inbound-Pfad zu einer
-**opt-in-Optimierung hinter mTLS**. Es gibt zu keinem Zeitpunkt einen unverschlüsselten
-exponierten Socket.
+### 5.3 Why this solves the encryption question
+The status quo is "core → host over an open plaintext port". The new model reverses the
+default direction (agent→core, encrypted) and makes the inbound path an
+**opt-in optimization behind mTLS**. At no point is there an unencrypted, exposed socket.
 
 ---
 
-## 6. Agent-Registry (Datenmodell, Skizze)
+## 6. Agent registry (data model, sketch)
 
-Persistiert im Core (SQLAlchemy, shared `Base`). Felder u. a.:
+Persisted in the core (SQLAlchemy, shared `Base`). Fields include:
 
-| Feld | Zweck |
+| Field | Purpose |
 |---|---|
-| `agent_id` | stabile ID (UUID) |
-| `hostname` / `fqdn` / `address` | Host-Identifikation |
-| `enrolled_at` | Zeitpunkt Enrollment |
-| `auth_mode` | `api_key` \| `mtls` (Trust-Stufe) |
-| `cert_serial` / `cert_expiry` | ausgestelltes Vault-PKI-Cert |
-| `capabilities` | aktivierte Module (`docker-control`, …) |
+| `agent_id` | stable ID (UUID) |
+| `hostname` / `fqdn` / `address` | host identification |
+| `enrolled_at` | time of enrollment |
+| `auth_mode` | `api_key` \| `mtls` (trust level) |
+| `cert_serial` / `cert_expiry` | issued Vault PKI certificate |
+| `capabilities` | activated modules (`docker-control`, …) |
 | `status` | `online` \| `offline` \| `degraded` |
-| `last_seen` | letzter Heartbeat |
-| `agent_version` | für Rollout-/Update-Sicht |
-| `inbound_endpoint` | optionaler Core→Agent-Listener (nur wenn mTLS) |
+| `last_seen` | last heartbeat |
+| `agent_version` | for rollout/update view |
+| `inbound_endpoint` | optional core→agent listener (only with mTLS) |
 
-Statuswechsel emittieren Bus-Events (`agent:registered`, `agent:online`,
-`agent:offline`), damit die UI/andere Plugins reagieren können.
+Status changes emit bus events (`agent:registered`, `agent:online`,
+`agent:offline`), so that the UI/other plugins can react.
 
 ---
 
-## 7. Integration: wie bestehende Plugins andocken
+## 7. Integration: how existing plugins connect
 
-Der Beweis, dass die Richtung stimmt — die Konsumenten werden **einfacher**:
+The proof that the direction is right — the consumers become **simpler**:
 
-### 7.1 Wire-Protocol / RPC
-Über den Kanal (WebSocket) laufen typisierte Frames. Da docker-manager **synchrone**
-Antworten braucht (Container-Liste, Logs), gibt es eine dünne **Correlation-ID-
-Request/Reply-Schicht**:
+### 7.1 Wire protocol / RPC
+Typed frames run over the channel (WebSocket). Since docker-manager needs **synchronous**
+replies (container list, logs), there is a thin **correlation-ID
+request/reply layer**:
 
 ```jsonc
-// Request (Core → Agent)
+// Request (core → agent)
 { "id": "c7f…", "type": "req", "capability": "docker-control",
   "action": "GET", "path": "/containers/json", "payload": null }
-// Reply (Agent → Core), gleiche id
+// Reply (agent → core), same id
 { "id": "c7f…", "type": "rep", "ok": true, "status": 200, "payload": [ … ] }
-// Unsolicited Event (Agent → Core), keine id-Korrelation
+// Unsolicited event (agent → core), no id correlation
 { "type": "event", "topic": "docker:event", "payload": { … } }
 ```
 
-### 7.2 Service-Fassade (für synchrone Consumer)
+### 7.2 Service facade (for synchronous consumers)
 ```python
-# in agent-management: from core.api-artiger Fassade
+# in agent-management: from core.api-like facade
 result = await agent_service.docker(host_id).request("GET", "/containers/json")
 ```
-Der Aufrufer weiß nichts von WebSocket/mTLS/Correlation-IDs.
+The caller knows nothing about WebSocket/mTLS/correlation IDs.
 
-### 7.3 Konkreter Migrationspfad
-- **`docker-manager`** — ersetzt `_base_url(host)` + `requests.get(f"{base}/containers/…")`
-  durch `agent_service.docker(host_id).request(...)`. Aus „Hosts" (`{ip, port:2375}`)
-  werden „Agents". Der 403-`/exec`-Fallback entfällt (Allowlist ist jetzt zentral, nicht
-  fremdbestimmt). **Größte Nutznießer-Migration.**
-- **`monitoring`** — subscribed `agent:host:stats` / `agent:heartbeat` statt eigenem
-  Scrape; dockermon-Daten kommen als Bus-Events rein.
-- **`docker-to-dns`** — die DNS-Logik wandert in einen zentralen Consumer (eigenes Plugin
-  oder Capability), der auf `agent:docker:event` reagiert. Ein Ort für die Regel statt
-  auf jedem Host.
+### 7.3 Concrete migration path
+- **`docker-manager`** — replaces `_base_url(host)` + `requests.get(f"{base}/containers/…")`
+  with `agent_service.docker(host_id).request(...)`. "Hosts" (`{ip, port:2375}`)
+  become "agents". The 403 `/exec` fallback is dropped (the allowlist is now central, not externally determined).
+  **Largest beneficiary migration.**
+- **`monitoring`** — subscribes to `agent:host:stats` / `agent:heartbeat` instead of its own
+  scrape; dockermon data arrives as bus events.
+- **`docker-to-dns`** — the DNS logic moves into a central consumer (own plugin
+  or capability) that reacts to `agent:docker:event`. One place for the rule instead of
+  on every host.
 
 ---
 
-## 8. Bus-Topics (Entwurf)
+## 8. Bus topics (draft)
 
-| Topic | Richtung | Payload |
+| Topic | Direction | Payload |
 |---|---|---|
-| `agent:registered` | Bridge → Bus | agent_id, host, capabilities |
-| `agent:online` / `agent:offline` | Bridge → Bus | agent_id, last_seen |
-| `agent:heartbeat` | Agent → Bridge | agent_id, ts, load |
-| `agent:docker:event` | Agent → Bridge | Docker-Event-Objekt |
-| `agent:docker:stats` | Agent → Bridge | container stats |
-| `agent:host:stats` | Agent → Bridge | cpu/ram/disk |
+| `agent:registered` | bridge → bus | agent_id, host, capabilities |
+| `agent:online` / `agent:offline` | bridge → bus | agent_id, last_seen |
+| `agent:heartbeat` | agent → bridge | agent_id, ts, load |
+| `agent:docker:event` | agent → bridge | Docker event object |
+| `agent:docker:stats` | agent → bridge | container stats |
+| `agent:host:stats` | agent → bridge | cpu/ram/disk |
 
 ---
 
-## 9. Naming & Sprache
+## 9. Naming & language
 
-- **`iac-agent` vs `lyndrix-agent`:** Das Ding redet mit **Lyndrix-Core** und ist eine
-  Lyndrix-Plattform-Komponente — es wird nur *von* der IaC-Pipeline als Baseline
-  ausgerollt. Empfehlung: **`lyndrix-agent`** (Runtime) + **`lyndrix-plugin-agent-management`**
-  (Plugin) + **`lyndrix-agent-contract`** (Lib). `iac-agent` als Alias/Deployment-Name
-  in der Pipeline ist ok.
-- **Sprache des Agents:** **lean Python** (asyncio + docker-SDK, schlankes Image) für
-  Ökosystem-Konsistenz mit dem Rest der Plattform. **Go** nur, falls der Image-/RAM-
-  Footprint auf sehr vielen Hosts kritisch wird (statisches Single-Binary) — dann zahlt
-  sich das Shared-Contract-Repo doppelt aus.
-
----
-
-## 10. Risiken / offene Fragen
-
-- **RPC-Backpressure & Timeouts:** Was passiert, wenn ein Agent langsam/weg ist, während
-  docker-manager synchron wartet? → Timeouts + Circuit-Breaker in der Fassade.
-- **Vault-PKI-Rollen & Rotation:** genaue Rolle/TTL/Renew-Strategie für Agent-Certs;
-  Revocation bei Host-Decommission.
-- **Enrollment-Token-Verteilung:** wie kommt der Bootstrap-API-Key sicher auf den Host?
-  → über die IaC-Pipeline (SOPS/CI-Variable) beim Ausrollen des Agents.
-- **Capability-Allowlist-Format:** wie granular wird `docker-control` (pro Endpoint?
-  read/write?) zentral konfiguriert.
-- **Agent-Self-Update:** zieht der Agent Updates selbst, oder rollt die IaC-Pipeline neu
-  aus? (Vorschlag: Pipeline bleibt Source of Truth, Agent meldet nur seine Version.)
-- **Fallback bei Core-Ausfall:** Agent puffert Events lokal (bounded) und replayed nach
-  Reconnect?
+- **`iac-agent` vs `lyndrix-agent`:** The thing talks to **Lyndrix core** and is a
+  Lyndrix platform component — it is only rolled out *by* the IaC pipeline as a baseline.
+  Recommendation: **`lyndrix-agent`** (runtime) + **`lyndrix-plugin-agent-management`**
+  (plugin) + **`lyndrix-agent-contract`** (library). `iac-agent` as alias/deployment name
+  in the pipeline is fine.
+- **Language of the agent:** **lean Python** (asyncio + docker SDK, slim image) for
+  ecosystem consistency with the rest of the platform. **Go** only if the image/RAM
+  footprint becomes critical on very many hosts (static single binary) — then the shared contract repo
+  pays off twice.
 
 ---
 
-## 11. Roadmap (phasiert)
+## 10. Risks / open questions
 
-1. **Contract + Skeleton:** `lyndrix-agent-contract` (Frame-Schema), minimaler Agent
-   (Bootstrap per API-Key, Heartbeat), `agent-management` (Enrollment + Registry +
-   WS-Endpoint). Ziel: ein Agent taucht online in der Registry auf.
-2. **`docker-control` + Fassade:** ein Docker-API-Roundtrip end-to-end; docker-manager
-   auf die Fassade migrieren (parallel zum alten Proxy-Pfad, hinter Flag).
-3. **mTLS via Vault-PKI:** Auto-Enrollment, Cert-Rotation, Upgrade des Kanals; API-Key
-   nur noch Bootstrap.
-4. **`docker-stats` + monitoring-Migration**, dann **`docker-events` + DNS-Consumer**.
-5. **Optionaler inbound mTLS-Pfad** für schnelle Calls/Reconnects.
-6. **IaC-Pipeline:** Agent als Baseline-Service auf allen Hosts ausrollen; alte
-   docker-proxy/dockermon/docker-to-dns zurückbauen.
+- **RPC backpressure & timeouts:** What happens if an agent is slow/gone while
+  docker-manager waits synchronously? → timeouts + circuit breaker in the facade.
+- **Vault PKI roles & rotation:** exact role/TTL/renew strategy for agent certificates;
+  revocation on host decommissioning.
+- **Enrollment token distribution:** how does the bootstrap API key get to the host securely?
+  → via the IaC pipeline (SOPS/CI variable) when rolling out the agent.
+- **Capability allowlist format:** how granularly is `docker-control` configured centrally (per endpoint?
+  read/write?).
+- **Agent self-update:** does the agent pull updates itself, or does the IaC pipeline roll it out again?
+  (Proposal: pipeline remains source of truth, agent only reports its version.)
+- **Fallback on core outage:** does the agent buffer events locally (bounded) and replay them after
+  reconnect?
 
 ---
 
-*Nächster Schritt laut Absprache: erst dieses Design, dann das finale `lyndrix-core`-
-Release. Umsetzung beginnt frühestens mit Phase 1.*
+## 11. Roadmap (phased)
+
+1. **Contract + skeleton:** `lyndrix-agent-contract` (frame schema), minimal agent
+   (bootstrap via API key, heartbeat), `agent-management` (enrollment + registry +
+   WS endpoint). Goal: one agent appears online in the registry.
+2. **`docker-control` + facade:** one Docker API round trip end-to-end; migrate docker-manager
+   to the facade (in parallel with the old proxy path, behind a flag).
+3. **mTLS via Vault PKI:** auto-enrollment, certificate rotation, upgrade of the channel; API key
+   only as bootstrap.
+4. **`docker-stats` + monitoring migration**, then **`docker-events` + DNS consumer**.
+5. **Optional inbound mTLS path** for fast calls/reconnects.
+6. **IaC pipeline:** roll out the agent as baseline service on all hosts; dismantle the old
+   docker-proxy/dockermon/docker-to-dns.
+
+---
+
+*Next step as agreed: first this design, then the final `lyndrix-core`
+release. Implementation begins at the earliest with phase 1.*

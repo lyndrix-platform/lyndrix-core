@@ -83,6 +83,19 @@ This catalog summarizes the event topics currently used in Lyndrix Core.
 | `monitoring:inventory_sync` | Payload logging is summarized by the event bus |
 | `monitoring:state_changed` | Payload logging is summarized by the event bus |
 
+## Cluster
+
+| Topic | Produced by | Consumed by | Notes |
+|---|---|---|---|
+| `cluster:changed` | Cluster | SSE clients, UI | Local; `reason`: started, start_failed, leader, lease, instances, preflight (plus `restarting`/`lost` id lists) |
+| `cluster:leader_changed` | Cluster | SSE clients, plugins | Local; leader moved |
+| `cluster:instance_lost` | Cluster | Plugins | Local, once per dead peer on every live instance; `{instance_id, roles, last_heartbeat, incarnation, graceful}` (API 1.14) |
+| `cluster:lease_released` | Cluster | Lease keeper on every instance | Bridged; kicks an immediate acquire |
+| `cluster:lease_handover_requested` | Cluster | Lease holder | Bridged; admin release of a lease a live peer holds |
+| `cluster:restart_requested` | API (`POST /api/system/restart`) | Leader | Bridged; starts a sequential rolling restart |
+| `cluster:restart_instance` | Leader | One instance | Bridged; "restart now"; the leader waits for the new incarnation to report ready |
+| `system:draining` | Cluster | SSE clients | Local; SIGTERM drain started |
+
 ## Guidance for plugin authors
 
 - subscribe and emit through `ctx.subscribe(...)` and `ctx.emit(...)`
