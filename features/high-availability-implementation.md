@@ -1,132 +1,131 @@
-# Umsetzungskonzept: HA modular — Docker **und** Kubernetes, Bausteine statt Blaupause
+# Implementation concept: HA modular — Docker **and** Kubernetes, building blocks instead of a blueprint
 
-**Status:** 🚧 M0 + M1 umgesetzt (Core 1.4.0, Plugin-API 1.7.0, Branch `feature/ha-cluster`); M2–M6 offen
-**Erstellt:** 2026-10-14, Fortsetzung von [`high-availability.md`](./high-availability.md) (Analyse + Zielarchitektur)
+**Status:** 🚧 M0 + M1 implemented (Core 1.4.0, plugin API 1.7.0, branch `feature/ha-cluster`); M2–M6 open
+**Created:** 2026-10-14, continuation of [`high-availability.md`](./high-availability.md) (analysis + target architecture)
 
-> **Umsetzungsstand 2026-10-14.** Geliefert (Core `feature/ha-cluster`, UI `feature/ha-cluster`,
-> Monitoring `feature/ha-lease` v1.4.0, Orchestrator `feature/ha-placement` v1.3.0):
-> `cluster`-Komponente mit Treibern `local`/`db` (Tabellen `cluster_*`, READ COMMITTED + Retry
-> 1020/1205/1213, DB-Uhr), LeaseKeeper (Heartbeat, Fencing nach TTL, Release-Broadcast →
-> Übernahme ≈ 1 s bei geordnetem Stop, ≤ TTL bei Kill), Bus-Bridge mit Allowlist + `emit(cluster=True)`
-> + `_origin`, SSE-Relay und `event: reconnect` beim Drain, `/api/live` + `/api/ready` +
-> `/api/cluster{,/preflight,/leases/{name}/release}`, Preflight (13 Prüfungen; nur `coordinator`
-> und `storage_secret` nehmen die Instanz aus der Rotation), Drain auf SIGTERM, Cluster-Restart
-> gestaffelt ohne Docker-Socket, Bootstrap-DDL/Seeds unter `GET_LOCK('lyndrix_bootstrap')`,
-> DB-Reconnect endlos ohne Re-Bootstrap (`db:reconnected`, kein doppeltes `load_all`), OIDC-State/
-> SSO-Codes/Login-Limiter im Cluster-KV, OIDC-Callback ohne NiceGUI, Settings-Propagation
-> (`settings:changed`), Plugin-API `placement` + `ctx.on_lease/lease/is_leader/instance_id/cluster_size/roles`,
-> `pinned` = 503 `remote` (Entscheidung §8.5: einfache Variante), Plugin-Artefakt-Reconcile aus
-> `plugin_states` (`plugin:desired_changed` + 5-min-Pass), Boot-Screen-Zeilen echt, Cluster-Seite
-> in der Shell (Settings → Cluster), englischer Doku-Baum `docs/ha/` (Entscheidung §8.2),
-> Zwei-Instanzen-Prüfstand `docker/docker-compose.ha.dev.yml` (Traefik `:8090`, `/api/ready`-Check).
-> Verifiziert auf dem Prüfstand: Leader-/Prober-Failover, Fan-out, LB-Round-Robin, Drain.
-> **Nicht geliefert:** `lyndrix-deploy` (§5), Storage-Treiber (§3.2), Migrate-CLI (§3.3),
-> `VAULT_NODES`-Unseal/AppRole, Redis-Treiber (§8.4: erst bei Bedarf), Helm-Chart, Galera/Raft-
-> Referenzstacks, übrige Plugins aus M4 (docker-manager, bingo, discord, itsm-Anhänge, ssot-manager).
-> Entscheidungen §8.1 (Repo), §8.3 (LB-Optionen in Doku: alle sieben aufgenommen), §8.6 (Cluster-
-> Seite im Core: ja), §8.7 (Tier 1 offiziell: in `docs/ha/tiers.md` so ausgewiesen) — bitte bestätigen.
-**Betroffene Repos:** `lyndrix-core` (Cluster-/Storage-Komponente, Preflight, Drain, Doku-Baum), `lyndrix-ui` (Cluster-Seite), alle Plugins (Placement/Leases), **neu** `lyndrix-deploy` (Compose-HA-Bundles, LB-Referenzkonfigs, Helm-Chart), `iac-environment` (eigene SSoTs)
+> **Implementation status 2026-10-14.** Delivered (core `feature/ha-cluster`, UI `feature/ha-cluster`,
+> monitoring `feature/ha-lease` v1.4.0, orchestrator `feature/ha-placement` v1.3.0):
+> `cluster` component with drivers `local`/`db` (tables `cluster_*`, READ COMMITTED + retry
+> 1020/1205/1213, DB clock), LeaseKeeper (heartbeat, fencing after TTL, release broadcast →
+> takeover ≈ 1 s on orderly stop, ≤ TTL on kill), bus bridge with allowlist + `emit(cluster=True)`
+> + `_origin`, SSE relay and `event: reconnect` on drain, `/api/live` + `/api/ready` +
+> `/api/cluster{,/preflight,/leases/{name}/release}`, preflight (13 checks; only `coordinator`
+> and `storage_secret` remove the instance from rotation), drain on SIGTERM, staggered cluster restart
+> without Docker socket, bootstrap DDL/seeds under `GET_LOCK('lyndrix_bootstrap')`,
+> DB reconnect endlessly without re-bootstrap (`db:reconnected`, no double `load_all`), OIDC state/
+> SSO codes/login limiter in the cluster KV, OIDC callback without NiceGUI, settings propagation
+> (`settings:changed`), plugin API `placement` + `ctx.on_lease/lease/is_leader/instance_id/cluster_size/roles`,
+> `pinned` = 503 `remote` (decision §8.5: simple variant), plugin artifact reconcile from
+> `plugin_states` (`plugin:desired_changed` + 5-min pass), boot screen lines live, cluster page
+> in the shell (Settings → Cluster), English documentation tree `docs/ha/` (decision §8.2),
+> two-instance test bench `docker/docker-compose.ha.dev.yml` (Traefik `:8090`, `/api/ready` check).
+> Verified on the test bench: leader/prober failover, fan-out, LB round robin, drain.
+> **Not delivered:** `lyndrix-deploy` (§5), storage driver (§3.2), migrate CLI (§3.3),
+> `VAULT_NODES` unseal/AppRole, Redis driver (§8.4: only when needed), Helm chart, Galera/Raft
+> reference stacks, remaining plugins from M4 (docker-manager, bingo, discord, itsm attachments, ssot-manager).
+> Decisions §8.1 (repo), §8.3 (LB options in docs: all seven included), §8.6 (cluster
+> page in the core: yes), §8.7 (tier 1 officially: marked as such in `docs/ha/tiers.md`) — please confirm.
+**Affected repos:** `lyndrix-core` (cluster/storage component, preflight, drain, documentation tree), `lyndrix-ui` (cluster page), all plugins (placement/leases), **new** `lyndrix-deploy` (Compose HA bundles, LB reference configs, Helm chart), `iac-environment` (own SSoTs)
 
-> Vorgaben des Betreibers: HA muss **sowohl direkt auf Docker als auch auf k3s** aufgebaut werden
-> können; für Docker braucht es einen **separaten Load Balancer**, der in der Anwendungs-Doku als
-> Option hinterlegt wird; die Doku bekommt einen **komplett neuen HA-Baum**, weil nicht jeder HA
-> will — wer will, soll **so modular und offen wie möglich** entscheiden können.
-> Konvention: Prosa Deutsch, Code/Identifier/APIs Englisch.
-
----
-
-## 0. Leitprinzipien
-
-1. **Der Core kennt weder Docker noch Kubernetes.** Er kennt nur Umgebungsvariablen und
-   *Verträge* (was ein Load Balancer, eine Datenbank, ein Vault, ein Storage leisten muss).
-   Deployment-Profile sind Artefakte und Doku *außerhalb* des Codes. So funktioniert jede
-   Core-Änderung automatisch auf beiden Plattformen.
-2. **Opt-in, nie Opt-out.** `LYNDRIX_CLUSTER_MODE=single` ist Default und verhält sich exakt wie
-   heute. Der Koordinator läuft dann mit dem Treiber `local` (Leader = immer ich, jede Lease wird
-   gewährt, Events bleiben lokal). Plugins schreiben **einen** Code-Pfad, der in beiden Modi läuft.
-3. **Bausteine statt Blaupause.** Jede Ebene (LB, Koordination, DB, Secrets, Storage, Plugins,
-   Frontend) hat einen *Vertrag* und *N Optionen* mit Vergleich. Der Core **validiert** den
-   Vertrag (Preflight) statt eine Option vorzuschreiben.
-4. **Stufen, auf denen man stehen bleiben darf** (§1): robuste Einzelinstanz → App-HA →
-   Daten-HA → DR. Jede Stufe ist für sich dokumentiert, ehrlich mit ihren verbleibenden SPOFs.
-5. **Gleiche Operator-Erfahrung auf beiden Plattformen:** dieselben Env-Namen (Helm-Values
-   mappen 1:1), dieselbe Cluster-Seite in der UI, dieselbe Preflight-Prüfung, dieselben Drills.
+> Operator requirements: HA must be buildable **both directly on Docker and on k3s**; for Docker a
+> **separate load balancer** is required, which is documented in the application docs as an
+> option; the docs get a **completely new HA tree**, because not everyone wants HA — whoever wants it should be able to decide
+> **as modularly and openly as possible**.
+> Convention: prose German, code/identifiers/APIs English.
 
 ---
 
-## 1. Stufenmodell (Tiers)
+## 0. Guiding principles
 
-| Tier | Name | Was läuft N-fach | Verbleibende SPOFs | Mindestens nötig |
+1. **The core knows neither Docker nor Kubernetes.** It only knows environment variables and
+   *contracts* (what a load balancer, a database, a Vault, a storage must provide).
+   Deployment profiles are artifacts and documentation *outside* the code. This way every core change
+   automatically works on both platforms.
+2. **Opt-in, never opt-out.** `LYNDRIX_CLUSTER_MODE=single` is the default and behaves exactly as
+   today. The coordinator then runs with the driver `local` (leader = always me, every lease is granted,
+   events stay local). Plugins write **one** code path that runs in both modes.
+3. **Building blocks instead of a blueprint.** Each layer (LB, coordination, DB, secrets, storage, plugins,
+   frontend) has a *contract* and *N options* with a comparison. The core **validates** the
+   contract (preflight) instead of prescribing one option.
+4. **Stages you may stop at** (§1): robust single instance → app HA →
+   data HA → DR. Each stage is documented on its own, honestly with its remaining SPOFs.
+5. **Same operator experience on both platforms:** the same env names (Helm values
+   map 1:1), the same cluster page in the UI, the same preflight check, the same drills.
+
+---
+
+## 1. Tier model
+
+| Tier | Name | What runs N-fold | Remaining SPOFs | Minimum required |
 |---|---|---|---|---|
-| **0** | Robuste Einzelinstanz | nichts | alles | Backups, `/api/ready`, Healthcheck, Restart-Policy, Drain |
-| **1** | App-HA | Core-API, Frontend | DB, Vault, Storage | LB, Koordination (`db`), gleiches `STORAGE_SECRET`, Plugin-Artefakte identisch, Worker-Rolle für Orchestrator |
-| **2** | Daten-HA | + DB (Galera, 1 Writer), Vault (Raft) | Storage (gnädig degradierend), Standort | MaxScale/Proxy, `VAULT_NODES`, Shared/Object-Storage |
-| **3** | DR | Backup-Ziel am zweiten Standort, Restore-Runbook | — | Off-Site-Dumps/Snapshots, dokumentierter Wiederanlauf |
+| **0** | Robust single instance | nothing | everything | backups, `/api/ready`, healthcheck, restart policy, drain |
+| **1** | App HA | core API, frontend | DB, Vault, storage | LB, coordination (`db`), same `STORAGE_SECRET`, identical plugin artifacts, worker role for orchestrator |
+| **2** | Data HA | + DB (Galera, 1 writer), Vault (Raft) | storage (gracefully degrading), site | MaxScale/proxy, `VAULT_NODES`, shared/object storage |
+| **3** | DR | backup target at the second site, restore runbook | — | off-site dumps/snapshots, documented recovery |
 
-Tier 1 ist bewusst eigenständig: viele wollen Rolling Updates ohne Downtime und einen toten
-Core-Container überleben, ohne gleich Galera zu betreiben. Die Doku sagt klar, was Tier 1 **nicht**
-abdeckt.
+Tier 1 is deliberately standalone: many want rolling updates without downtime and survival of a dead
+core container without having to operate Galera right away. The docs clearly state what tier 1 **does not** cover.
 
 ---
 
-## 2. Konfigurationsoberfläche — die eine Wahrheit für Compose, Helm und SSoT
+## 2. Configuration surface — the one truth for Compose, Helm and SSoT
 
-Alle Namen folgen den bestehenden Präfixen (`LYNDRIX_*`, `DB_*`, `VAULT_*`). Helm-Values und
-SSoT-Variablen sind nur Transportwege für genau diese Werte.
+All names follow the existing prefixes (`LYNDRIX_*`, `DB_*`, `VAULT_*`). Helm values
+and SSoT variables are merely transport paths for exactly these values.
 
-| Variable | Default | Tier | Bedeutung |
+| Variable | Default | Tier | Meaning |
 |---|---|---|---|
-| `LYNDRIX_CLUSTER_MODE` | `single` | 1 | `single` \| `cluster`. `cluster` aktiviert Koordinator, Preflight-Pflicht, React-only, Drain |
-| `LYNDRIX_INSTANCE_ID` | auto (`<hostname>-<rand>`) | 1 | stabile Kennung nur nötig für Diagnose; neue ID nach Restart ist harmlos (Leases laufen aus) |
-| `LYNDRIX_INSTANCE_ROLES` | single: `api,leader,runner` · cluster: `api,leader` | 1 | `api` (Routen), `leader` (lease-fähig für Core-Einmalaufgaben + `singleton`-Plugins), `runner` (für `pinned:runner`-Plugins; braucht Docker-Socket) |
+| `LYNDRIX_CLUSTER_MODE` | `single` | 1 | `single` \| `cluster`. `cluster` activates coordinator, mandatory preflight, React-only, drain |
+| `LYNDRIX_INSTANCE_ID` | auto (`<hostname>-<rand>`) | 1 | stable identifier only needed for diagnostics; a new ID after restart is harmless (leases expire) |
+| `LYNDRIX_INSTANCE_ROLES` | single: `api,leader,runner` · cluster: `api,leader` | 1 | `api` (routes), `leader` (lease-capable for core one-time tasks + `singleton` plugins), `runner` (for `pinned:runner` plugins; needs Docker socket) |
 | `LYNDRIX_COORDINATOR` | single: `local` · cluster: `db` | 1 | `local` \| `db` \| `redis` |
-| `LYNDRIX_REDIS_URL` | — | opt. | nur Treiber `redis` |
-| `LYNDRIX_LEASE_TTL_SECONDS` / `LYNDRIX_LEASE_HEARTBEAT_SECONDS` | `30` / `10` | 1 | Lease-Semantik |
-| `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | Treiber `db`: Poll-Intervall `cluster_events` |
-| `LYNDRIX_MIGRATE_MODE` | `auto` | 0 | `auto` (Boot unter `GET_LOCK`), `job` (Instanzen machen **kein** DDL, prüfen nur Schema-Version → Compose-Init-Service / k8s-Job führt `lyndrix migrate` aus), `off` |
-| `LYNDRIX_PLUGIN_ARTIFACTS` | `local` | 1 | `local` (wie heute), `reconcile` (jede Instanz zieht `plugin_states.desired_version` selbst), `image` (im Image gebacken, Installs nur als DB-Wunsch + Hinweis „neues Image bauen“) |
-| `LYNDRIX_STORAGE_DRIVER` | `local` | 1/2 | `local` \| `fs` (Shared-Mount, wird auf Beschreibbarkeit + Gemeinsamkeit geprüft) \| `s3` |
-| `LYNDRIX_STORAGE_S3_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY/REGION` | — | opt. | Treiber `s3` (MinIO, Garage, SeaweedFS, AWS) |
-| `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | → uvicorn `--forwarded-allow-ips`; Pflicht hinter jedem LB (Rate-Limiter, Audit-IP) |
-| `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → `/api/ready` 503 → warten → SSE schließen → Leases freigeben → Exit |
-| `LYNDRIX_UI_ENGINE` | `react` | 1 | in `cluster` erzwungen `react`; `LYNDRIX_ALLOW_LEGACY_UI_IN_CLUSTER=1` nur mit Sticky-LB + Shared `/app/.nicegui` (dokumentiert als „nicht unterstützt, aber möglich“) |
-| `DB_HOST` | — | 0 | **Writer-Endpunkt** (MaxScale/ProxySQL/Service). Nie ein Galera-Knoten direkt bei N Instanzen |
-| `DB_POOL_RECYCLE_SECONDS` / `DB_RETRY_ATTEMPTS` | `300` / `3` | 1 | Failover-Toleranz (1213/1205/2006/2013) |
-| `DB_STATEMENT_TIMEOUT_SECONDS` | `60` | 0 | vorhanden (API 1.5) |
-| `VAULT_URL` | — | 0 | LB- oder Active-Endpunkt |
-| `VAULT_NODES` | — | 2 | Liste aller Knoten für Health-Poll + Unseal (`https://v1:8200,https://v2:8200,…`) |
-| `VAULT_UNSEAL_MODE` | `lyndrix` | 2 | `lyndrix` (Leader entsiegelt alle `VAULT_NODES` mit dem Keyfile), `external` (Transit/KMS/Auto-Unseal auf Vault-Seite; Core pollt nur), `manual` |
-| `VAULT_AUTH` | `root-file` | opt. | `root-file` (heute) \| `approle` (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`, Renewal-Loop) |
-| `LYNDRIX_MASTER_KEY` + `SECURITY_DIR/vault_keys.enc` | — | 0 | unverändert; in HA als Secret/Shared-Secret an jede Instanz |
-| `STORAGE_SECRET` | — | 0 | unverändert; muss auf allen Instanzen identisch sein (Preflight prüft Hash in `cluster_instances`) |
+| `LYNDRIX_REDIS_URL` | — | opt. | only driver `redis` |
+| `LYNDRIX_LEASE_TTL_SECONDS` / `LYNDRIX_LEASE_HEARTBEAT_SECONDS` | `30` / `10` | 1 | lease semantics |
+| `LYNDRIX_EVENT_POLL_MS` | `500` | 1 | driver `db`: poll interval `cluster_events` |
+| `LYNDRIX_MIGRATE_MODE` | `auto` | 0 | `auto` (boot under `GET_LOCK`), `job` (instances perform **no** DDL, only check the schema version → Compose init service / k8s job runs `lyndrix migrate`), `off` |
+| `LYNDRIX_PLUGIN_ARTIFACTS` | `local` | 1 | `local` (as today), `reconcile` (every instance pulls `plugin_states.desired_version` itself), `image` (baked into the image, installs only as DB request + hint "build new image") |
+| `LYNDRIX_STORAGE_DRIVER` | `local` | 1/2 | `local` \| `fs` (shared mount, checked for writability + commonality) \| `s3` |
+| `LYNDRIX_STORAGE_S3_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY/REGION` | — | opt. | driver `s3` (MinIO, Garage, SeaweedFS, AWS) |
+| `LYNDRIX_TRUSTED_PROXIES` | `127.0.0.1` | 0 | → uvicorn `--forwarded-allow-ips`; mandatory behind every LB (rate limiter, audit IP) |
+| `LYNDRIX_DRAIN_SECONDS` | single `0` · cluster `10` | 0/1 | SIGTERM → `/api/ready` 503 → wait → close SSE → release leases → exit |
+| `LYNDRIX_UI_ENGINE` | `react` | 1 | enforced `react` in `cluster`; `LYNDRIX_ALLOW_LEGACY_UI_IN_CLUSTER=1` only with sticky LB + shared `/app/.nicegui` (documented as "not supported, but possible") |
+| `DB_HOST` | — | 0 | **writer endpoint** (MaxScale/ProxySQL/service). Never a Galera node directly with N instances |
+| `DB_POOL_RECYCLE_SECONDS` / `DB_RETRY_ATTEMPTS` | `300` / `3` | 1 | failover tolerance (1213/1205/2006/2013) |
+| `DB_STATEMENT_TIMEOUT_SECONDS` | `60` | 0 | present (API 1.5) |
+| `VAULT_URL` | — | 0 | LB or active endpoint |
+| `VAULT_NODES` | — | 2 | list of all nodes for health poll + unseal (`https://v1:8200,https://v2:8200,…`) |
+| `VAULT_UNSEAL_MODE` | `lyndrix` | 2 | `lyndrix` (leader unseals all `VAULT_NODES` with the keyfile), `external` (transit/KMS/auto-unseal on Vault side; core only polls), `manual` |
+| `VAULT_AUTH` | `root-file` | opt. | `root-file` (today) \| `approle` (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`, renewal loop) |
+| `LYNDRIX_MASTER_KEY` + `SECURITY_DIR/vault_keys.enc` | — | 0 | unchanged; in HA as secret/shared secret to every instance |
+| `STORAGE_SECRET` | — | 0 | unchanged; must be identical on all instances (preflight checks hash in `cluster_instances`) |
 
-**Preflight** (`GET /api/cluster/preflight`, auch `lyndrix doctor`) prüft im `cluster`-Modus und
-verweigert den Start bei harten Verstößen (mit Klartext-Meldung, welcher Vertrag verletzt ist):
-`STORAGE_SECRET` identisch; `DB_HOST` ist kein Galera-Knoten direkt (`@@wsrep_on` + `@@wsrep_node_name`
-vs. Proxy-Erkennung) oder ausdrücklich `DB_ALLOW_DIRECT_NODE=1`; Schema-Version passt; `VAULT_NODES`
-alle erreichbar; Storage-Treiber ist nicht `local`, wenn Plugins Anhänge speichern; mindestens eine
-Instanz mit Rolle `runner`, wenn ein `pinned:runner`-Plugin aktiv ist; `LYNDRIX_TRUSTED_PROXIES`
-gesetzt, wenn `X-Forwarded-For` ankommt; Uhrzeit-Drift zwischen Instanzen < 5 s (Leases!).
+**Preflight** (`GET /api/cluster/preflight`, also `lyndrix doctor`) checks in `cluster` mode and
+refuses start on hard violations (with plain-text message naming the violated contract):
+`STORAGE_SECRET` identical; `DB_HOST` is not a Galera node directly (`@@wsrep_on` + `@@wsrep_node_name`
+vs. proxy detection) or explicitly `DB_ALLOW_DIRECT_NODE=1`; schema version matches; `VAULT_NODES`
+all reachable; storage driver is not `local` if plugins store attachments; at least one
+instance with role `runner` if a `pinned:runner` plugin is active; `LYNDRIX_TRUSTED_PROXIES`
+set if `X-Forwarded-For` arrives; clock drift between instances < 5 s (leases!).
 
 ---
 
-## 3. Core-Bausteine (Code)
+## 3. Core building blocks (code)
 
-### 3.1 Komponente `core/components/cluster/`
+### 3.1 Component `core/components/cluster/`
 
 ```
 cluster/
 ├── logic/
-│   ├── coordinator.py      # Protocol + Factory (LYNDRIX_COORDINATOR)
-│   ├── drivers/local.py    # single: Leases immer gewährt, publish = no-op
-│   ├── drivers/db.py       # Tabellen cluster_instances/leases/kv/events, Poll-Loop
-│   ├── drivers/redis.py    # SET NX PX, Pub/Sub, INCR/EXPIRE (später)
-│   ├── leases.py           # LeaseKeeper: Heartbeat, Callbacks acquired/lost, Jitter
-│   ├── bridge.py           # Bus-Bridge: Allowlist-Topics ↔ publish/subscribe, _origin
-│   ├── preflight.py        # Vertragsprüfungen (§2)
-│   └── drain.py            # SIGTERM-Handling, ready=False, Leases freigeben
+│   ├── coordinator.py      # Protocol + factory (LYNDRIX_COORDINATOR)
+│   ├── drivers/local.py    # single: leases always granted, publish = no-op
+│   ├── drivers/db.py       # tables cluster_instances/leases/kv/events, poll loop
+│   ├── drivers/redis.py    # SET NX PX, Pub/Sub, INCR/EXPIRE (later)
+│   ├── leases.py           # LeaseKeeper: heartbeat, callbacks acquired/lost, jitter
+│   ├── bridge.py           # bus bridge: allowlist topics ↔ publish/subscribe, _origin
+│   ├── preflight.py        # contract checks (§2)
+│   └── drain.py            # SIGTERM handling, ready=False, release leases
 ├── api/cluster_api.py      # GET /api/cluster, /preflight, /leases; POST /leases/{name}/release (admin)
-└── ui/react/               # Cluster-Seite (in lyndrix-ui: Instanzen, Leader, Leases, Placements, Preflight)
+└── ui/react/               # cluster page (in lyndrix-ui: instances, leader, leases, placements, preflight)
 ```
 
 ```python
@@ -139,64 +138,64 @@ class Coordinator(Protocol):
     async def holder(self, name: str) -> str | None: ...
     async def kv_set(self, key: str, value: Any, ttl: int) -> None: ...
     async def kv_get(self, key: str) -> Any | None: ...
-    async def kv_incr(self, key: str, ttl: int) -> int: ...          # Rate-Limiter
+    async def kv_incr(self, key: str, ttl: int) -> int: ...          # rate limiter
     async def publish(self, topic: str, payload: dict) -> None: ...
     def subscribe(self, callback: Callable[[str, dict], Awaitable[None]]) -> None: ...
     async def instances(self) -> list[InstanceInfo]: ...
 ```
 
-Verbraucher im Core: Leader-Lease `core:leader` (Seeds im `auto`-Modus, Collection-Sync,
-Update-Checker, Messaging-Outbox, Vault-Unseal-Poll, `singleton`-Plugin-Leases), OIDC-State +
-SSO-Codes + Limiter → `kv_*`, Bridge für die Allowlist-Topics aus der Analyse (§9.4 dort),
-SSE-Relay, `/api/health` → `/api/live` + `/api/ready` + tief gecacht.
+Consumers in the core: leader lease `core:leader` (seeds in `auto` mode, collection sync,
+update checker, messaging outbox, vault unseal poll, `singleton` plugin leases), OIDC state +
+SSO codes + limiter → `kv_*`, bridge for the allowlist topics from the analysis (§9.4 there),
+SSE relay, `/api/health` → `/api/live` + `/api/ready` + deep cached.
 
-### 3.2 Komponente `core/components/storage/`
+### 3.2 Component `core/components/storage/`
 
-`ObjectStore`-Protocol (`put/get/delete/exists/url/list`) mit Treibern `local`, `fs`, `s3`;
-Export als `ctx.storage` (Namespace je Plugin: `plugins/<id>/…`). Umsteller: Theme-Uploads,
-User-Backgrounds, ITSM-Anhänge, Plugin-Zip-Cache. Der Treiber `fs` ist technisch `local` plus
-Preflight „ist das Verzeichnis auf allen Instanzen derselbe Mount?“ (Marker-Datei mit
-`instance_id`, von den anderen gelesen).
+`ObjectStore` protocol (`put/get/delete/exists/url/list`) with drivers `local`, `fs`, `s3`;
+exposed as `ctx.storage` (namespace per plugin: `plugins/<id>/…`). Migrates: theme uploads,
+user backgrounds, ITSM attachments, plugin zip cache. The driver `fs` is technically `local` plus
+a preflight "is the directory the same mount on all instances?" (marker file with
+`instance_id`, read by the others).
 
-### 3.3 Migration und Bootstrap
+### 3.3 Migration and bootstrap
 
-- CLI `python -m app.cli migrate` (Image-Entrypoint `entrypoint.sh migrate`): `create_all`, alle
-  heute verstreuten `ALTER`s, Seeds — **idempotent**, unter `GET_LOCK('lyndrix_migrate', 120)`,
-  schreibt `lyndrix_schema(component, version)`.
-- Plugins ersetzen DDL in `setup()`/`health()` durch `ctx.migrate(fn)`: der Core führt `fn` im
-  Migrationsjob bzw. auf dem Leader unter Lock aus; Instanzen ohne passende Schema-Version warten
-  (`starting`, nicht blocking → Routen 503 mit Hinweis), statt selbst zu altern.
-- Compose: `init`-Service `lyndrix-migrate` mit `depends_on: condition: service_completed_successfully`;
-  k8s: `Job` als Helm-Hook `pre-install,pre-upgrade`.
+- CLI `python -m app.cli migrate` (image entrypoint `entrypoint.sh migrate`): `create_all`, all
+  `ALTER`s scattered today, seeds — **idempotent**, under `GET_LOCK('lyndrix_migrate', 120)`,
+  writes `lyndrix_schema(component, version)`.
+- Plugins replace DDL in `setup()`/`health()` with `ctx.migrate(fn)`: the core runs `fn` in the
+  migration job or on the leader under lock; instances without a matching schema version wait
+  (`starting`, not blocking → routes 503 with hint) instead of aging themselves.
+- Compose: `init` service `lyndrix-migrate` with `depends_on: condition: service_completed_successfully`;
+  k8s: `Job` as Helm hook `pre-install,pre-upgrade`.
 
-### 3.4 Plugin-Artefakte
+### 3.4 Plugin artifacts
 
-Treiber `reconcile`: Reconciler je Instanz vergleicht `plugin_states.desired_version` mit
-`/app/plugins/<repo>/entrypoint.py`-Manifest-Version, lädt bei Abweichung (Zip aus Release-Tag,
-`vendor` via pip), lädt Modul neu — ausgelöst durch Cluster-Event `plugin:desired_changed` und alle
-`LYNDRIX_PLUGIN_RECONCILE_SECONDS` (300). Marketplace-Install im Cluster = nur DB-Wunsch +
-Event; der Leader verifiziert vorab (Download + Health im Tempdir), damit nicht N Instanzen
-gleichzeitig ein kaputtes Plugin ziehen. Treiber `image`: Reconciler meldet Abweichung nur
-(`plugin:artifact_mismatch`), installiert nichts.
+Driver `reconcile`: reconciler per instance compares `plugin_states.desired_version` with the
+manifest version in `/app/plugins/<repo>/entrypoint.py`, on deviation loads (zip from release tag,
+`vendor` via pip), reloads the module — triggered by cluster event `plugin:desired_changed` and every
+`LYNDRIX_PLUGIN_RECONCILE_SECONDS` (300). Marketplace install in the cluster = only DB request +
+event; the leader verifies beforehand (download + health in tempdir), so that not N instances
+simultaneously pull a broken plugin. Driver `image`: reconciler only reports deviation
+(`plugin:artifact_mismatch`), installs nothing.
 
-### 3.5 Drain und Rolling Update
+### 3.5 Drain and rolling update
 
-SIGTERM → `ready=False` (`/api/ready` 503, LB nimmt die Instanz nach 1–2 Checks raus) → warten
-`LYNDRIX_DRAIN_SECONDS` → SSE-Streams mit `event: reconnect` schließen → Leases freigeben
-(Leader-Wechsel sofort statt nach TTL) → `stop()` der Plugins → Exit. uvicorn
-`--timeout-graceful-shutdown` bleibt der Notnagel dahinter. k8s: `terminationGracePeriodSeconds`
-≥ Drain + 15.
+SIGTERM → `ready=False` (`/api/ready` 503, LB removes the instance after 1–2 checks) → wait
+`LYNDRIX_DRAIN_SECONDS` → close SSE streams with `event: reconnect` → release leases
+(leader change immediately instead of after TTL) → `stop()` of plugins → exit. uvicorn
+`--timeout-graceful-shutdown` remains the emergency brake behind it. k8s: `terminationGracePeriodSeconds`
+≥ drain + 15.
 
-### 3.6 Plugin-API (Core API 1.6)
+### 3.6 Plugin API (core API 1.6)
 
 ```python
 manifest = ModuleManifest(..., placement="any")   # any | singleton | pinned:<role>
 
 def setup(ctx):
-    ctx.register_routes(router)                                  # jede api-Instanz
+    ctx.register_routes(router)                                  # every api instance
     ctx.on_lease("monitoring:prober", acquired=svc.start, lost=svc.stop)
     ctx.emit("monitoring:monitors_changed", {...}, cluster=True)
-    ctx.migrate(svc.ensure_schema)                                # statt DDL in setup()
+    ctx.migrate(svc.ensure_schema)                                # instead of DDL in setup()
     store = ctx.storage                                          # ObjectStore, namespaced
 
 async with ctx.lease("itsm:connector_poll") as held:
@@ -204,139 +203,139 @@ async with ctx.lease("itsm:connector_poll") as held:
 ctx.is_leader, ctx.instance_id, ctx.cluster_size, ctx.roles
 ```
 
-Kompatibilität wie bei `set_status`: `getattr(ctx, "on_lease", None)`; auf alten Cores fällt das
-Plugin auf „immer aktiv“ zurück (= heutiges Verhalten).
+Compatibility as with `set_status`: `getattr(ctx, "on_lease", None)`; on old cores the
+plugin falls back to "always active" (= today's behavior).
 
 ### 3.7 UI (`lyndrix-ui`)
 
-Seite **Settings → Cluster** (nur `cluster`-Modus sichtbar): Instanzen mit Rollen, Version,
-Heartbeat, Leader-Marker; Leases mit Halter und Restlaufzeit; Plugin-Placements und wo sie laufen;
-Preflight-Ergebnis mit Klartext; Button „Lease freigeben“ (admin). Runtime-Status-Pills zeigen
-`instance_id`, wenn Instanzen abweichen.
+Page **Settings → Cluster** (visible only in `cluster` mode): instances with roles, version,
+heartbeat, leader marker; leases with holder and remaining time; plugin placements and where they run;
+preflight result with plain text; button "Release lease" (admin). Runtime status pills show
+`instance_id` when instances diverge.
 
 ---
 
-## 4. Der separate Load Balancer für Docker
+## 4. The separate load balancer for Docker
 
-### 4.1 LB-Vertrag (plattformneutral, steht so in der Doku)
+### 4.1 LB contract (platform-neutral, documented as such)
 
-1. Health-Check **`GET /api/ready`** (200 = Verkehr, alles andere = raus), Intervall ≤ 5 s,
-   `fall 2 / rise 2`. Nie `/api/health` als LB-Check (teuer, prüft Plugins).
-2. **SSE**: kein Response-Buffering, Read-/Tunnel-Timeout ≥ 1 h für `/api/events` und
+1. Health check **`GET /api/ready`** (200 = traffic, anything else = out), interval ≤ 5 s,
+   `fall 2 / rise 2`. Never `/api/health` as LB check (expensive, checks plugins).
+2. **SSE**: no response buffering, read/tunnel timeout ≥ 1 h for `/api/events` and
    `/api/plugins/*/stream/*`.
-3. **Forwarded-Header** (`X-Forwarded-For/Proto/Host`) setzen; Core-Seite `LYNDRIX_TRUSTED_PROXIES`.
-4. **Eine öffentliche Origin** für UI + API (TLS-Terminierung am LB oder Passthrough).
-5. **WebSocket**-Upgrade nur, wenn Legacy-UI erlaubt ist; dann **Sticky-Cookie** Pflicht.
-6. Optional: `Retry-After`/503 vom Runtime-Gate durchreichen (nicht als „Backend tot“ werten,
-   d. h. Health-Check getrennt vom Request-Fehler).
-7. Der LB **selbst** darf kein SPOF sein → VIP (keepalived/CARP) oder zwei LBs + DNS-Failover.
+3. **Forwarded headers** (`X-Forwarded-For/Proto/Host`) set; core side `LYNDRIX_TRUSTED_PROXIES`.
+4. **One public origin** for UI + API (TLS termination at the LB or passthrough).
+5. **WebSocket** upgrade only if the legacy UI is allowed; then **sticky cookie** mandatory.
+6. Optional: pass through `Retry-After`/503 from the runtime gate (do not count as "backend dead",
+   i.e. health check separate from request errors).
+7. The LB **itself** must not be a SPOF → VIP (keepalived/CARP) or two LBs + DNS failover.
 
-### 4.2 Optionen (Doku-Vergleichstabelle)
+### 4.2 Options (documentation comparison table)
 
-| Option | Aktive Health-Checks | TLS | SSE | Sticky | LB-HA | Wann |
+| Option | Active health checks | TLS | SSE | Sticky | LB HA | When |
 |---|---|---|---|---|---|---|
-| **Traefik** (File-Provider, statische Server) | ja (`healthCheck.path`) | ACME | ja (`responseForwarding.flushInterval`) | Cookie | mit keepalived | Standard im Fleet; Container-Discovery **nicht** nutzen (Backends liegen auf anderen Hosts) |
-| **HAProxy** | ja (`option httpchk`) | ja | `timeout tunnel 1h` | Cookie/Source | keepalived oder **pfSense-Paket + CARP** | präziseste Health-Semantik; Appliance-Variante ohne eigenen Host |
-| **Caddy** | ja (`health_uri`) | automatisch | `flush_interval -1` | Cookie | keepalived | kleinste Konfiguration, für Einsteiger |
-| **nginx OSS** | **nur passiv** (`max_fails`) | ja | `proxy_buffering off` | `ip_hash`/Cookie | keepalived | wenn ohnehin vorhanden; aktive Checks nur in Plus |
-| **Docker Swarm** Routing-Mesh | Container-Healthcheck | — | ja | nein | eingebaut | wenn jemand Swarm nutzt; kein Sticky, kein `/api/ready` → `HEALTHCHECK` im Image nötig |
-| **DNS Round-Robin** | nein | — | — | nein | — | **nicht empfohlen**, nur Übergang (Browser-Failover langsam) |
-| Hardware/Cloud-LB | ja | ja | meist | ja | ja | wenn vorhanden; Vertrag §4.1 prüfen |
+| **Traefik** (file provider, static servers) | yes (`healthCheck.path`) | ACME | yes (`responseForwarding.flushInterval`) | cookie | with keepalived | standard in the fleet; do **not** use container discovery (backends are on other hosts) |
+| **HAProxy** | yes (`option httpchk`) | yes | `timeout tunnel 1h` | cookie/source | keepalived or **pfSense package + CARP** | most precise health semantics; appliance variant without own host |
+| **Caddy** | yes (`health_uri`) | automatic | `flush_interval -1` | cookie | keepalived | smallest configuration, for beginners |
+| **nginx OSS** | **passive only** (`max_fails`) | yes | `proxy_buffering off` | `ip_hash`/cookie | keepalived | if already present; active checks only in Plus |
+| **Docker Swarm** routing mesh | container healthcheck | — | yes | no | built-in | if someone uses Swarm; no sticky, no `/api/ready` → `HEALTHCHECK` in image needed |
+| **DNS round robin** | no | — | — | no | — | **not recommended**, transitional only (browser failover slow) |
+| Hardware/cloud LB | yes | yes | mostly | yes | yes | if present; check contract §4.1 |
 
-### 4.3 Wo der LB läuft
+### 4.3 Where the LB runs
 
-- **Dediziertes Paar** (sauberste Trennung, zwei kleine LXCs) mit keepalived-VIP.
-- **Kolokiert** auf jedem App-Host (3 Hosts → 3× LB + Core) mit einer VIP, die wandert; spart
-  Hosts, koppelt aber LB- und App-Ausfall.
-- **Appliance**: pfSense HAProxy-Paket + CARP-VIP — passt zur bestehenden pfSense, kein Container.
-- **k3s**: nicht nötig — Ingress + MetalLB/kube-vip übernehmen den Vertrag; die Doku zeigt die
-  Annotationen (Traefik `traefik-external`, Health über `readinessProbe`).
+- **Dedicated pair** (cleanest separation, two small LXCs) with keepalived VIP.
+- **Colocated** on every app host (3 hosts → 3× LB + core) with a VIP that moves; saves
+  hosts, but couples LB and app failure.
+- **Appliance**: pfSense HAProxy package + CARP VIP — fits the existing pfSense, no container.
+- **k3s**: not needed — ingress + MetalLB/kube-vip take over the contract; the docs show the
+  annotations (Traefik `traefik-external`, health via `readinessProbe`).
 
-### 4.4 Ausgelieferte Referenzkonfigurationen (`lyndrix-deploy/docker/ha/lb/`)
+### 4.4 Shipped reference configurations (`lyndrix-deploy/docker/ha/lb/`)
 
 `traefik/{traefik.yml,dynamic.yml}`, `haproxy/haproxy.cfg`, `caddy/Caddyfile`,
 `nginx/lyndrix-lb.conf`, `keepalived/{keepalived.conf,check_lb.sh}`, `pfsense/README.md`
-(Klick-Anleitung + Export). Jede Konfiguration implementiert §4.1 vollständig und ist mit einem
-Smoke-Skript (`scripts/lb-contract-test.sh <url>`: ready-Check, SSE-Stream 70 s offen,
-Forwarded-Header sichtbar in `/api/system/info`) prüfbar.
+(click instructions + export). Each configuration implements §4.1 completely and can be checked with a
+smoke script (`scripts/lb-contract-test.sh <url>`: ready check, SSE stream open for 70 s,
+forwarded headers visible in `/api/system/info`).
 
 ---
 
-## 5. Deployment-Profile als Artefakte: neues Repo `lyndrix-deploy`
+## 5. Deployment profiles as artifacts: new repo `lyndrix-deploy`
 
-Begründung für ein eigenes Repo: eigene Release-Kadenz (Chart-Version ↔ Core-Image-Version),
-ein Ort für alles Betreiber-Relevante, keine Vermischung mit dem Dev-Compose im Core. Alternative
-(im Core unter `deploy/`) ist möglich, verliert aber die saubere Versionierung des Charts.
+Rationale for a separate repo: its own release cadence (chart version ↔ core image version),
+one place for everything operator-relevant, no mixing with the dev compose in the core. Alternative
+(in the core under `deploy/`) is possible, but loses the clean versioning of the chart.
 
 ```
 lyndrix-deploy/
 ├── docker/
-│   ├── single/                 docker-compose.yml  (Tier 0: heutiges Produktiv-Setup + Healthcheck + Backups)
+│   ├── single/                 docker-compose.yml  (tier 0: today's production setup + healthcheck + backups)
 │   └── ha/
-│       ├── core/               docker-compose.yml  (eine api-Instanz; DB/Vault/Storage extern via .env)
-│       ├── runner/             docker-compose.yml  (Rolle runner, docker.sock, HOST_*-Pfade)
+│       ├── core/               docker-compose.yml  (one api instance; DB/Vault/storage external via .env)
+│       ├── runner/             docker-compose.yml  (role runner, docker.sock, HOST_* paths)
 │       ├── lb/                 traefik | haproxy | caddy | nginx | keepalived | pfsense  (§4.4)
-│       ├── db/                 galera-node/ (je Host) + maxscale/ + bootstrap.sh + backup.sh
-│       ├── vault/              raft-node/ (vault **oder** openbao, gleiche Dateien) + join.sh
+│       ├── db/                 galera-node/ (per host) + maxscale/ + bootstrap.sh + backup.sh
+│       ├── vault/              raft-node/ (vault **or** openbao, same files) + join.sh
 │       ├── storage/            minio/ (optional)
-│       ├── migrate/            Init-Service-Snippet
+│       ├── migrate/            init service snippet
 │       └── .env.ha.example
 ├── kubernetes/
-│   ├── helm/lyndrix/           Chart (values: core.replicas, core.roles, runner.enabled,
+│   ├── helm/lyndrix/           chart (values: core.replicas, core.roles, runner.enabled,
 │   │                            database.mode external|operator|bundled, vault.mode external|raft|bundled,
 │   │                            storage.mode, coordinator, ingress.className, migrate.job)
 │   ├── kustomize/              base + overlays (k3s-traefik, ingress-nginx)
 │   └── examples/               k3s-full-ha.values.yaml, external-db-vault.values.yaml, tier1.values.yaml
 ├── scripts/
-│   ├── ha-preflight.sh         curl /api/cluster/preflight auf jeder Instanz
-│   ├── ha-rolling-update.sh    Reihenfolge: migrate → runner → api-Instanzen einzeln, wartet auf /api/ready
+│   ├── ha-preflight.sh         curl /api/cluster/preflight on every instance
+│   ├── ha-rolling-update.sh    order: migrate → runner → api instances one by one, waits for /api/ready
 │   ├── lb-contract-test.sh
-│   └── failover-drill.sh       Instanz/DB-Knoten/Vault-Knoten stoppen, Messpunkte ausgeben
-└── README.md → verweist auf den HA-Baum der Core-Doku
+│   └── failover-drill.sh       stop instance/DB node/Vault node, output measurement points
+└── README.md → refers to the HA tree of the core docs
 ```
 
-**Mapping Helm ↔ Env** (Auszug): `core.roles` → `LYNDRIX_INSTANCE_ROLES`; `coordinator` →
+**Mapping Helm ↔ env** (excerpt): `core.roles` → `LYNDRIX_INSTANCE_ROLES`; `coordinator` →
 `LYNDRIX_COORDINATOR`; `database.external.host` → `DB_HOST`; `vault.nodes` → `VAULT_NODES`;
 `storage.s3.*` → `LYNDRIX_STORAGE_S3_*`; `migrate.job=true` → `LYNDRIX_MIGRATE_MODE=job`.
-Jede Helm-Option ist in der Doku mit ihrer Env-Variable gelistet, damit Compose- und k8s-Leser
-dasselbe Vokabular haben.
+Every Helm option is listed in the docs with its env variable, so that Compose and k8s readers
+share the same vocabulary.
 
-**Marvins Fleet (iac-environment):** aus denselben Referenzdateien entstehen SSoTs
-`aac-lyndrix-core` (Rolle `api`, je Host ein Eintrag), `aac-lyndrix-runner`, `aac-lyndrix-lb`,
-`aac-lyndrix-db`, `aac-lyndrix-vault`; die heutigen `dependencies:` DB/Vault im Core-SSoT
-entfallen. Die Engine-Eigenschaft „gleiche SSoT auf mehreren Hosts = unabhängige Stacks“ ist genau
-das, was Galera-/Raft-Knoten brauchen.
+**Marvin's fleet (iac-environment):** from the same reference files, SSoTs emerge:
+`aac-lyndrix-core` (role `api`, one entry per host), `aac-lyndrix-runner`, `aac-lyndrix-lb`,
+`aac-lyndrix-db`, `aac-lyndrix-vault`; the today's `dependencies:` DB/Vault in the core SSoT
+are dropped. The engine property "same SSoT on several hosts = independent stacks" is exactly
+what Galera/Raft nodes need.
 
 ---
 
-## 6. Der neue Doku-Baum (`lyndrix-core/docs/ha/`)
+## 6. The new documentation tree (`lyndrix-core/docs/ha/`)
 
-**Sprache:** die MkDocs-Site (`docs/deployment.md` „Installation and Deployment“) ist englisch →
-der HA-Baum wird **englisch**, damit die Site konsistent bleibt; `features/`-Konzepte bleiben
-deutsch. (Entscheidung §8.)
+**Language:** the MkDocs site (`docs/deployment.md` "Installation and Deployment") is English →
+the HA tree will be **English**, so that the site stays consistent; `features/` concepts remain
+German. (Decision §8.)
 
-**Grundsatz:** `deployment.md` bleibt der Weg für „ich will einfach Lyndrix“. Der HA-Baum ist ein
-eigener Top-Level-Eintrag, beginnt mit einer **Entscheidungshilfe** und endet mit Drills — wer HA
-nicht will, muss ihn nie öffnen.
+**Principle:** `deployment.md` remains the path for "I just want Lyndrix". The HA tree is its own
+top-level entry, begins with a **decision guide** and ends with drills — whoever does not want HA
+never has to open it.
 
 ```yaml
-# mkdocs.yml (Ergänzung nav)
+# mkdocs.yml (nav addition)
   - High Availability:
-      - Overview & decision guide: ha/index.md          # Fragen: Hosts? k8s? Vault/DB vorhanden? Orchestrator? → Tier + Profil
-      - Tiers: ha/tiers.md                              # Tier 0–3, was jede Stufe (nicht) abdeckt
-      - Architecture & contracts: ha/architecture.md    # Ebenenbild, Leader/Leases/placement, Verträge
-      - Configuration reference: ha/configuration.md    # Tabelle §2, Preflight-Regeln
+      - Overview & decision guide: ha/index.md          # questions: hosts? k8s? Vault/DB present? orchestrator? → tier + profile
+      - Tiers: ha/tiers.md                              # tiers 0–3, what each stage does (not) cover
+      - Architecture & contracts: ha/architecture.md    # layer picture, leader/leases/placement, contracts
+      - Configuration reference: ha/configuration.md    # table §2, preflight rules
       - Building blocks:
           - Load balancer: ha/building-blocks/load-balancer.md
           - Coordination: ha/building-blocks/coordination.md       # local | db | redis
           - Database: ha/building-blocks/database.md               # single | galera+maxscale | galera+proxysql | primary/replica | operator | managed
-          - Secrets (Vault / OpenBao): ha/building-blocks/secrets.md   # single | raft | external; Unseal-Modi
+          - Secrets (Vault / OpenBao): ha/building-blocks/secrets.md   # single | raft | external; unseal modes
           - Shared storage: ha/building-blocks/storage.md          # local | fs (NFS/CIFS/RWX) | s3
           - Plugin artifacts & placement: ha/building-blocks/plugins.md
           - Frontend: ha/building-blocks/frontend.md
       - Docker:
-          - Overview & host layouts: ha/docker/index.md           # 3 Hosts; 2 + Arbiter; dediziertes LB-Paar
-          - The separate load balancer: ha/docker/load-balancer.md  # §4 mit allen Referenzkonfigs
+          - Overview & host layouts: ha/docker/index.md           # 3 hosts; 2 + arbiter; dedicated LB pair
+          - The separate load balancer: ha/docker/load-balancer.md  # §4 with all reference configs
           - Galera + MaxScale: ha/docker/galera-maxscale.md
           - Vault / OpenBao Raft: ha/docker/vault-raft.md
           - Compose reference: ha/docker/compose-reference.md
@@ -345,7 +344,7 @@ nicht will, muss ihn nie öffnen.
           - Overview: ha/kubernetes/index.md
           - Helm chart: ha/kubernetes/helm.md
           - Database options: ha/kubernetes/database.md           # mariadb-operator, Bitnami, external
-          - Vault options: ha/kubernetes/vault.md                 # Helm Raft, external, Unseal
+          - Vault options: ha/kubernetes/vault.md                 # Helm Raft, external, unseal
           - Ingress & load balancing: ha/kubernetes/ingress.md
           - Rolling updates: ha/kubernetes/rolling-updates.md
       - Operations:
@@ -353,63 +352,63 @@ nicht will, muss ihn nie öffnen.
           - Backup & restore: ha/operations/backup-restore.md
           - Failover drills: ha/operations/failover-drills.md
           - Troubleshooting: ha/operations/troubleshooting.md
-      - For plugin developers: ha/plugin-development.md           # placement, on_lease, cluster events, DDL-Regeln, PK-Pflicht
+      - For plugin developers: ha/plugin-development.md           # placement, on_lease, cluster events, DDL rules, PK requirement
 ```
 
-**Seitenschablone für jeden Baustein** (gleiches Raster, damit Vergleichen leicht ist):
-1. *Contract* — was Lyndrix von dieser Ebene verlangt (kurz, prüfbar).
-2. *Options* — Tabelle: Option · HA der Ebene selbst · Aufwand · Besonderheiten · wann wählen.
-3. *Lyndrix settings* — die betroffenen Variablen aus §2.
-4. *Reference setup* — Verweis auf `lyndrix-deploy/…` + Minimalbeispiel.
-5. *Verify* — konkrete Kommandos (Preflight-Zeile, Drill).
+**Page template for each building block** (same grid, so that comparison is easy):
+1. *Contract* — what Lyndrix requires from this layer (short, verifiable).
+2. *Options* — table: option · HA of the layer itself · effort · special characteristics · when to choose.
+3. *Lyndrix settings* — the affected variables from §2.
+4. *Reference setup* — reference to `lyndrix-deploy/…` + minimal example.
+5. *Verify* — concrete commands (preflight line, drill).
 6. *Known limits*.
 
-Die Entscheidungshilfe (`ha/index.md`) ist ein kurzer Fragenbaum: *Wie viele Hosts? (1 → Tier 0;
-2 → Tier 1 oder 2 + Arbiter; ≥ 3 → alles) · Kubernetes vorhanden? (→ Kubernetes-Zweig) · Bestehender
-Vault/OpenBao? (→ `vault.mode external`) · Bestehende DB-HA? (→ `database.mode external`, Vertrag
-prüfen) · IaC-Orchestrator im Einsatz? (→ Runner-Rolle einplanen) · Legacy-UI nötig? (→ Sticky-LB,
-nicht unterstützt)* — jede Antwort verlinkt die passende Seite.
+The decision guide (`ha/index.md`) is a short question tree: *How many hosts? (1 → tier 0;
+2 → tier 1 or 2 + arbiter; ≥ 3 → everything) · Kubernetes present? (→ Kubernetes branch) · Existing
+Vault/OpenBao? (→ `vault.mode external`) · Existing DB HA? (→ `database.mode external`, check
+contract) · IaC orchestrator in use? (→ plan runner role) · Legacy UI needed? (→ sticky LB,
+not supported)* — each answer links the matching page.
 
 ---
 
-## 7. Umsetzungsreihenfolge mit Meilensteinen (beide Plattformen früh testbar)
+## 7. Implementation sequence with milestones (both platforms testable early)
 
-| M | Ergebnis | Inhalt | Nachweis |
+| M | Result | Content | Proof |
 |---|---|---|---|
-| **M0** | Tier 0 ist echt | `/api/live` + `/api/ready`, Drain, `LYNDRIX_TRUSTED_PROXIES`, `migrate`-CLI + `GET_LOCK`, Boot-Races idempotent, Vault-Health-Poll, Notifications → DB, Logs stdout, Backup-Skripte in `lyndrix-deploy/docker/single` | DB stoppen/starten ohne Re-Bootstrap; Restore aus Dump auf `docker-test` |
-| **M1** | Core `cluster`-Modus (API 1.6) | `cluster`-Komponente mit `local`+`db`, Bridge, SSE-Relay, Leader-Aufgaben, kv für OIDC/Limiter, `reconcile`-Artefakte, Preflight, Cluster-API; **Dev-Compose mit 2 Instanzen hinter `docker/traefik.dev.yml`** als Pflicht-Prüfstand | Install auf A sichtbar auf B; Leader-Kill → Übernahme ≤ 30 s; OIDC mit Instanzwechsel |
-| **M2** | Docker Tier 1 end-to-end | `lyndrix-deploy/docker/ha/{core,runner,lb}` + alle LB-Referenzkonfigs + `lb-contract-test.sh`; Doku `ha/docker/*` + `ha/building-blocks/load-balancer.md` | 2 Hosts + LB-Paar mit keepalived: Rolling Update ohne 5xx; Instanz killen unsichtbar |
-| **M3** | k3s Tier 1 | Helm-Chart (`database.mode external`, `vault.mode external`, Migrate-Job, Probes, PDB, `terminationGracePeriodSeconds`), Kustomize-Overlay k3s-Traefik; Doku `ha/kubernetes/*` | Chart auf dem bestehenden k3s mit externer Test-DB/Vault; `kubectl rollout restart` ohne 5xx |
-| **M4** | Plugins cluster-fähig | monitoring (Lease-Prober, UNIQUE + atomare Zähler), orchestrator (`pinned:runner`, `owner_instance`, Reservierung, Trigger-Events), ssot-manager (ablösen/pinnen), docker-manager/discord/bingo → DB, server-manager/registry/itsm `ctx.migrate` + Retry, itsm Anhänge → `ctx.storage`, external-services Sidebar aus DB | Heartbeat-Rate bei 2 Instanzen = bei 1; Orchestrator-Job überlebt API-Restart |
-| **M5** | Tier 2 beide Plattformen | `docker/ha/{db,vault,storage}` (Galera+MaxScale, Raft, MinIO) + `VAULT_NODES`-Unseal + DB-Retry; Helm `database.mode operator` (mariadb-operator), `vault.mode raft`; Doku `galera-maxscale`, `vault-raft`, k8s `database`/`vault` | Writer killen → ≤ 1 Retry; Vault-Knoten sealen → Leader entsiegelt ≤ 20 s |
-| **M6** | Doku-Baum vollständig + Drills | Entscheidungshilfe, Tiers, Operations, Plugin-Developer-Seite, `failover-drill.sh`; SSoTs im Fleet aus den Referenzdateien | Hypervisor stoppen → `lyndrix.int` antwortet weiter |
+| **M0** | Tier 0 is real | `/api/live` + `/api/ready`, drain, `LYNDRIX_TRUSTED_PROXIES`, `migrate` CLI + `GET_LOCK`, boot races idempotent, Vault health poll, notifications → DB, logs stdout, backup scripts in `lyndrix-deploy/docker/single` | DB stop/start without re-bootstrap; restore from dump on `docker-test` |
+| **M1** | Core `cluster` mode (API 1.6) | `cluster` component with `local`+`db`, bridge, SSE relay, leader tasks, kv for OIDC/limiter, `reconcile` artifacts, preflight, cluster API; **dev compose with 2 instances behind `docker/traefik.dev.yml`** as mandatory test bench | install on A visible on B; leader kill → takeover ≤ 30 s; OIDC with instance change |
+| **M2** | Docker tier 1 end-to-end | `lyndrix-deploy/docker/ha/{core,runner,lb}` + all LB reference configs + `lb-contract-test.sh`; docs `ha/docker/*` + `ha/building-blocks/load-balancer.md` | 2 hosts + LB pair with keepalived: rolling update without 5xx; kill instance invisibly |
+| **M3** | k3s tier 1 | Helm chart (`database.mode external`, `vault.mode external`, migrate job, probes, PDB, `terminationGracePeriodSeconds`), Kustomize overlay k3s-Traefik; docs `ha/kubernetes/*` | chart on the existing k3s with external test DB/Vault; `kubectl rollout restart` without 5xx |
+| **M4** | Plugins cluster-capable | monitoring (lease prober, UNIQUE + atomic counters), orchestrator (`pinned:runner`, `owner_instance`, reservation, trigger events), ssot-manager (replace/pin), docker-manager/discord/bingo → DB, server-manager/registry/itsm `ctx.migrate` + retry, itsm attachments → `ctx.storage`, external-services sidebar from DB | heartbeat rate with 2 instances = with 1; orchestrator job survives API restart |
+| **M5** | Tier 2 on both platforms | `docker/ha/{db,vault,storage}` (Galera+MaxScale, Raft, MinIO) + `VAULT_NODES` unseal + DB retry; Helm `database.mode operator` (mariadb-operator), `vault.mode raft`; docs `galera-maxscale`, `vault-raft`, k8s `database`/`vault` | kill writer → ≤ 1 retry; seal Vault node → leader unseals ≤ 20 s |
+| **M6** | Docs tree complete + drills | decision guide, tiers, operations, plugin developer page, `failover-drill.sh`; SSoTs in the fleet from the reference files | stop hypervisor → `lyndrix.int` keeps responding |
 
-M0–M1 sind reine Core-Arbeit und für Marvins Produktivinstanz **sofort** nützlich. M2 und M3
-hängen beide nur an M1 und können parallel laufen — das stellt sicher, dass kein Core-Detail
-versehentlich Docker- oder k8s-spezifisch wird. M4 ist unabhängig vom Deployment und kann nach M1
-Plugin für Plugin erfolgen. M5 ist Infrastruktur und braucht aus dem Core nur `VAULT_NODES`
-und den DB-Retry (beides in M1 mitnehmen).
-
----
-
-## 8. Entscheidungen für Marvin
-
-1. **Eigenes Repo `lyndrix-deploy`** (empfohlen) oder `lyndrix-core/deploy/`?
-2. **Sprache des HA-Doku-Baums:** englisch wie die bestehende MkDocs-Site (empfohlen) oder deutsch
-   nach Workspace-Konvention?
-3. **LB-Optionen in der Doku:** Traefik + HAProxy + keepalived sind Pflicht; **Caddy** (Einsteiger)
-   und **pfSense-HAProxy + CARP** (Appliance) aufnehmen? Docker Swarm nur erwähnen oder als Profil?
-4. **Treiber `redis`** in M1 mitbauen (kleiner Mehraufwand, gleiche Schnittstelle) oder erst bei Bedarf?
-5. **`pinned`-Semantik** für api-Instanzen: 503 „remote“ (einfach, M1) oder transparenter Proxy zum
-   Worker (nahtlos, später)?
-6. **Cluster-Seite** im Core/Shell (empfohlen: Plattformzustand) oder als Plugin?
-7. **Tier 1 als offizieller Support-Stand** (N Core + LB, aber Single-DB/Vault) ausweisen — ja?
+M0–M1 are pure core work and immediately useful for Marvin's production instance. M2 and M3
+both depend only on M1 and can run in parallel — this ensures that no core detail
+accidentally becomes Docker- or k8s-specific. M4 is independent of deployment and can proceed
+plugin by plugin after M1. M5 is infrastructure and needs only `VAULT_NODES`
+and the DB retry from the core (take both along in M1).
 
 ---
 
-## 9. Bezug zur Analyse
+## 8. Decisions for Marvin
 
-Alle Befunde mit `file:line`, die Zielarchitektur und die Phasenlogik stehen in
-[`high-availability.md`](./high-availability.md); dieses Dokument übersetzt sie in Konfiguration,
-Code-Struktur, Artefakte, Doku-Baum und Meilensteine. Die Analyse-Phasen 0–4 entsprechen hier
+1. **Own repo `lyndrix-deploy`** (recommended) or `lyndrix-core/deploy/`?
+2. **Language of the HA docs tree:** English like the existing MkDocs site (recommended) or German
+   per workspace convention?
+3. **LB options in the docs:** Traefik + HAProxy + keepalived are mandatory; include **Caddy** (beginners)
+   and **pfSense HAProxy + CARP** (appliance)? Mention Docker Swarm only or as a profile?
+4. **Driver `redis`** in M1 (small extra effort, same interface) or only when needed?
+5. **`pinned` semantics** for api instances: 503 "remote" (simple, M1) or transparent proxy to the
+   worker (seamless, later)?
+6. **Cluster page** in core/shell (recommended: platform state) or as a plugin?
+7. **Tier 1 as official support state** (N core + LB, but single DB/Vault) — declare it so: yes?
+
+---
+
+## 9. Relation to the analysis
+
+All findings with `file:line`, the target architecture and the phase logic are in
+[`high-availability.md`](./high-availability.md); this document translates them into configuration,
+code structure, artifacts, documentation tree and milestones. The analysis phases 0–4 correspond here to
 M0 → M1 → M2/M3 → M4 → M5/M6.

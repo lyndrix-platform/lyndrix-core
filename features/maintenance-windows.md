@@ -1,251 +1,244 @@
-# Wartungsfenster, geplante Deployments und Incident-Regeln
+# Maintenance windows, planned deployments and incident rules
 
-Stand: 2026-10-17, Planungsdokument (Phase 0). Autor: Lyndrix-Session mit Marvin.
-Status: **P0 abgeschlossen.** Die sechs Analysen und die Teilpläne liegen in
-`features/maintenance-windows/`. **`00-ergebnis-p0.md` ersetzt die Abschnitte 4, 6 und 7 dieses
-Dokuments, wo es ihnen widerspricht** (Typ-Vokabular ohne `vm`, Entscheidung im Job statt beim
-Enqueue, lokale Bus-Emission, Override-Semantik, ITSM-Mapping). Nächster Schritt: Review der
-Teilpläne mit Marvin (offene Entscheidungen A–H im Ergebnis, Abschnitt 5), dann P1.
+Status: 2026-10-17, planning document (phase 0). Author: Lyndrix session with Marvin.
+Status: **P0 completed.** The six analyses and the sub-plans are in
+`features/maintenance-windows/`. **`00-ergebnis-p0.md` replaces sections 4, 6 and 7 of this
+document where they contradict it** (type vocabulary without `vm`, decision in the job instead of at enqueue,
+local bus emission, override semantics, ITSM mapping). Next step: review of the
+sub-plans with Marvin (open decisions A–H in the result, section 5), then P1.
 
-## 1. Ziel
+## 1. Goal
 
-Jede überwachbare Komponente – Hardware (PVE-Nodes), VMs, Container, Services – kann
-geplante **Wartungsfenster** haben. Innerhalb eines Fensters alarmiert das Monitoring nicht
-(Zustand „Wartung“ statt „down“, keine Benachrichtigungen, keine Incidents).
+Every monitorable component – hardware (PVE nodes), VMs, containers, services – can have
+planned **maintenance windows**. Within a window, monitoring does not raise alarms (state "maintenance" instead of "down", no notifications, no incidents).
 
-Deployments, die aus dem Repository kommen (Renovate → GitLab-Webhook → IaC Orchestrator),
-werden **in das nächste Wartungsfenster** des betroffenen Services/Hosts geplant. Der Operator
-kann das übersteuern („jetzt ausführen“); dieser **Override** wird als temporäres Wartungsfenster
-an das Monitoring weitergereicht, damit das Deployment selbst keinen Alarm auslöst.
+Deployments that come from the repository (Renovate → GitLab webhook → IaC Orchestrator)
+are **scheduled into the next maintenance window** of the affected service/host. The operator
+can override this ("run now"); this **override** is passed to monitoring as a temporary maintenance window
+so that the deployment itself does not trigger an alarm.
 
-Hat ein Service kein eigenes Fenster, gilt ein **Default-Wartungsfenster**, das im iac-controller
-aktivierbar ist. Fenster für Hardware, VMs und Container werden im iac-controller konfiguriert,
-Fenster für Services in der `service.yml` des Services (SSoT).
+If a service has no window of its own, a **default maintenance window** applies, which can be
+activated in the iac-controller. Windows for hardware, VMs and containers are configured in the iac-controller,
+windows for services in the `service.yml` of the service (SSoT).
 
-Zusätzlich gibt es pro Service **Incident-Regeln**: Ist Service X außerhalb eines (geplanten
-oder übersteuerten) Fensters länger als Y Minuten offline (Y aus `service.yml`), entsteht ein
-Incident im ITSM, verknüpft mit dem Host, auf dem der Service läuft, und mit dem Service selbst.
+In addition, there are **incident rules** per service: if service X is offline for longer than Y minutes
+outside a (planned or overridden) window (Y from `service.yml`), an incident is created in the ITSM, linked to the host on which the service runs and to the service itself.
 
-## 2. Leitprinzipien
+## 2. Guiding principles
 
-1. **Jedes Plugin implementiert seine Wartungsfähigkeit selbst.** Kein Plugin *braucht* ein anderes.
-   Wer nur den IaC Orchestrator installiert hat, bekommt geplante Deployments und Overrides; die
-   Events an das Monitoring verhallen dann folgenlos (`ctx.emit` ist fire-and-forget). Wer nur das
-   Monitoring hat, pflegt Fenster direkt dort. Zusammen ergibt sich die Erweiterung.
-2. **Der Core bleibt plugin-agnostisch.** Er liefert nur eine neutrale Bibliothek (Fenster-Modell,
-   Zeitauswertung) und den dokumentierten Bus-Vertrag (Topics, Payloads). Keine Persistenz, keine
-   Plugin-Kenntnis im Core.
-3. **Single Source of Truth bleibt der SSoT.** Fenster und Incident-Regeln stehen im
-   iac-controller (Hosts, Stages) und in der `service.yml` (Services). Lyndrix rendert, zeigt an
-   und wertet aus – es ist nicht die zweite Wahrheit. Was in Lyndrix konfiguriert wird (Overrides,
-   manuelle Fenster im Monitoring, Default-Schalter) ist Laufzeitzustand, kein Duplikat des SSoT.
-4. **CI-Identität über die Entity Registry** (`ci_id`, bestehender Vertrag): Hosts, VMs, Services
-   werden in allen Events über ihre `ci_id` adressiert, nie über IP oder Namen allein.
-5. **Degradieren statt brechen:** fehlt ein Konsument, fehlt ein `ci_id`, fehlt eine Regel → das
-   jeweilige Plugin verhält sich wie heute.
+1. **Each plugin implements its own maintainability.** No plugin *needs* another. Whoever has only the IaC Orchestrator installed gets planned deployments and overrides; the
+   events to monitoring then go nowhere (`ctx.emit` is fire-and-forget). Whoever has only monitoring maintains windows
+   there directly. Together they form the extension.
+2. **The core stays plugin-agnostic.** It only provides a neutral library (window model,
+   time evaluation) and the documented bus contract (topics, payloads). No persistence, no
+   plugin knowledge in the core.
+3. **The single source of truth remains the SSoT.** Windows and incident rules live in the
+   iac-controller (hosts, stages) and in the `service.yml` (services). Lyndrix renders,
+   displays and evaluates – it is not the second source of truth. What is configured in Lyndrix (overrides,
+   manual windows in monitoring, default switch) is runtime state, not a duplicate of the SSoT.
+4. **CI identity via the entity registry** (`ci_id`, existing contract): hosts, VMs, services
+   are addressed in all events via their `ci_id`, never by IP or name alone.
+5. **Degrade instead of break:** if a consumer is missing, a `ci_id` is missing, or a rule is missing → the
+   respective plugin behaves as it does today.
 
-## 3. Begriffe
+## 3. Terms
 
-| Begriff | Bedeutung |
+| Term | Meaning |
 |---|---|
-| Wartungsfenster (Schedule) | Wiederkehrend (z. B. jeden Sonntag 02:00–04:00 Europe/Berlin) oder einmalig (Start/Ende). |
-| Default-Fenster | Fenster, das für Komponenten ohne eigenes Fenster gilt; pro Site/Stage definierbar, im iac-controller aktivierbar. |
-| Vererbung | Service → Host → Stage/Site-Default → aus. Ein Service ohne eigenes Fenster erbt das seines Hosts, dann das Stage-Default. |
-| Override | Temporäres Fenster, das ein Operator oder ein Deployment-Job erzeugt (Start = jetzt, Ende = Jobende + Puffer). Gilt für die betroffenen `ci_id`s. |
-| Geplantes Deployment | Ein Orchestrator-Job im Zustand `SCHEDULED` mit `not_before` = Beginn des nächsten Fensters. |
-| Incident-Regel | Pro Service: „offline ≥ Y Minuten außerhalb eines Fensters ⇒ Incident (Severity, Auto-Resolve)“. |
+| Maintenance window (schedule) | Recurring (e.g. every Sunday 02:00–04:00 Europe/Berlin) or one-time (start/end). |
+| Default window | Window that applies to components without their own window; definable per site/stage, activatable in the iac-controller. |
+| Inheritance | Service → host → stage/site default → none. A service without its own window inherits that of its host, then the stage default. |
+| Override | Temporary window that an operator or a deployment job creates (start = now, end = job end + buffer). Applies to the affected `ci_id`s. |
+| Planned deployment | An orchestrator job in state `SCHEDULED` with `not_before` = start of the next window. |
+| Incident rule | Per service: "offline ≥ Y minutes outside a window ⇒ incident (severity, auto-resolve)". |
 
-## 4. Konfigurationsquellen (SSoT)
+## 4. Configuration sources (SSoT)
 
-### 4.1 `service.yml` (aac-Service, Template Engine validiert)
+### 4.1 `service.yml` (aac service, validated by the template engine)
 
 ```yaml
 maintenance:
-  windows:                       # optional; leer = erbt Host/Stage-Default
-    - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }     # einfaches Format
+  windows:                       # optional; empty = inherit host/stage default
+    - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }     # simple format
     - once:   { start: "2026-11-02T22:00+01:00", end: "2026-11-03T02:00+01:00", note: "Storage-Umzug" }
-    - cron:   { expr: "0 2 1 * *", duration_minutes: 180, tz: Europe/Berlin }       # erweitert (wie Semaphore: Cron + Dauer)
-  deploy_policy: window          # window | immediate; Default: prod → window, dev/test → immediate
-  override_buffer_minutes: 15    # Override-Fenster = Jobdauer + Puffer
-incidents:                       # überschreibt die globalen Typ-Defaults (controller) für diesen Service
+    - cron:   { expr: "0 2 1 * *", duration_minutes: 180, tz: Europe/Berlin }       # extended (like Semaphore: cron + duration)
+  deploy_policy: window          # window | immediate; default: prod → window, dev/test → immediate
+  override_buffer_minutes: 15    # override window = job duration + buffer
+incidents:                       # overrides the global type defaults (controller) for this service
   enabled: true
-  offline_minutes: 10            # Y; 0 = keine Incident-Regel
-  severity: high                 # ITSM-Severity
-  auto_resolve: true             # Incident schließen, wenn der Service wieder online ist
+  offline_minutes: 10            # Y; 0 = no incident rule
+  severity: high                 # ITSM severity
+  auto_resolve: true             # close incident when the service is back online
 ```
 
-### 4.2 iac-controller (Hosts, Hardware, VMs, Stages)
+### 4.2 iac-controller (hosts, hardware, VMs, stages)
 
 ```yaml
-# hosts.yml / Hardware / VM-Definitionen
+# hosts.yml / hardware / VM definitions
 maintenance:
-  windows: [...]                 # wie oben
-  inherit: true                  # Services auf diesem Host erben, wenn sie nichts eigenes haben
-# stages/<stage>.yml (oder Site)
+  windows: [...]                 # as above
+  inherit: true                  # services on this host inherit if they have nothing of their own
+# stages/<stage>.yml (or site)
 maintenance_default:
-  enabled: true                  # der „Default-Fenster“-Schalter (auch aus der Orchestrator-UI schaltbar → Git-Commit)
+  enabled: true                  # the "default window" switch (also switchable from the orchestrator UI → Git commit)
   windows:
     - weekly: { days: [sun], start: "02:00", end: "04:00", tz: Europe/Berlin }
-incident_defaults:               # globale Regeln je CI-Typ (Typen = Entity-Registry-Kinds)
+incident_defaults:               # global rules per CI type (types = entity registry kinds)
   service: { enabled: true,  offline_minutes: 10, severity: high,   auto_resolve: true }
   host:    { enabled: true,  offline_minutes: 5,  severity: critical, auto_resolve: true }
   vm:      { enabled: true,  offline_minutes: 5,  severity: high,   auto_resolve: true }
   container: { enabled: false }
 ```
 
-Auflösung der Incident-Regel: Service-/Host-Eintrag im SSoT → `incident_defaults[<typ>]` der Stage →
-aus. Zusätzlich hat das Monitoring einen **Laufzeit-Notschalter je Typ** (Plugin-Setting), der die
-Erzeugung von Outage-Events ohne Repo-Änderung stoppt – kein zweites Regelwerk, nur ein Aus-Knopf.
+Resolution of the incident rule: service/host entry in the SSoT → `incident_defaults[<type>]` of the stage →
+none. In addition, monitoring has a **runtime emergency switch per type** (plugin setting) that
+stops the creation of outage events without a repo change – not a second rule set, just an off switch.
 
-Das Rendering (Template Engine / `iac_core` im Orchestrator) löst die Vererbung auf und liefert pro
-Host/Service die **effektiven** Fenster und Regeln in die Inventory-Variablen; der Orchestrator
-veröffentlicht sie (Abschnitt 6).
+The rendering (template engine / `iac_core` in the orchestrator) resolves the inheritance and delivers the **effective**
+windows and rules per host/service into the inventory variables; the orchestrator publishes them (section 6).
 
-Entschieden: Der Default-Schalter wird aus der Orchestrator-UI bedient und per Git-Commit in den
-iac-controller zurückgeschrieben (eine Wahrheit, bequem). Der Orchestrator braucht dafür Schreibrechte
-auf das controller-Repo (bestehender Git-Pfad des Plugins, Commit-Autor „Lyndrix IaC Orchestrator“).
+Decided: the default switch is operated from the orchestrator UI and written back to the iac-controller via Git commit
+(one truth, convenient). The orchestrator needs write access to the controller repo for this (existing Git path
+of the plugin, commit author "Lyndrix IaC Orchestrator").
 
-## 5. Core: Bibliothek und Vertrag (API 1.13)
+## 5. Core: library and contract (API 1.13)
 
-`core.api.maintenance` – reine Funktionen, keine Persistenz:
+`core.api.maintenance` – pure functions, no persistence:
 
 - `Schedule` (weekly | once | cron+duration), `MaintenanceWindow` (ci_id, source, schedule, note, override:bool);
-  Cron-Auswertung über `croniter` (oder eigene Minimal-Implementierung) mit Zeitzone
-- `parse_windows(raw: list[dict]) -> list[Schedule]` (validiert das YAML-Schema aus 4.x)
-- `active_until(schedules, now) -> datetime | None` (laufendes Fenster), `next_start(schedules, after)`
-- Topic-Konstanten und Payload-Schemata des Bus-Vertrags (Abschnitt 6), damit alle Plugins dieselben
-  Namen verwenden; Doku in `docs/plugins.md` („Maintenance (API 1.13)“).
+  cron evaluation via `croniter` (or own minimal implementation) with time zone
+- `parse_windows(raw: list[dict]) -> list[Schedule]` (validates the YAML schema from 4.x)
+- `active_until(schedules, now) -> datetime | None` (running window), `next_start(schedules, after)`
+- Topic constants and payload schemas of the bus contract (section 6), so that all plugins use the same
+  names; documentation in `docs/plugins.md` ("Maintenance (API 1.13)").
 
-Keine neuen Core-Endpunkte außer ggf. `GET /api/maintenance/contract` (reine Doku) – bewusst
-minimal, der Core kennt keine Fenster.
+No new core endpoints except possibly `GET /api/maintenance/contract` (documentation only) – deliberately
+minimal, the core knows no windows.
 
-## 6. Bus-Vertrag (alles optional, fire-and-forget)
+## 6. Bus contract (all optional, fire-and-forget)
 
-| Topic | Emitter | Payload | Konsumenten |
+| Topic | Emitter | Payload | Consumers |
 |---|---|---|---|
-| `maintenance:windows_published` | Orchestrator (nach Render/Sync), Monitoring (manuelle Fenster) | `{source, items:[{ci_id, kind: host|vm|service, windows:[Schedule], inherited_from?}], replaces: true}` | Monitoring, Registry, Server Manager, ITSM |
-| `maintenance:override_started` | Orchestrator (Deploy jetzt), Monitoring (manuell), ITSM (Change) | `{override_id, ci_ids[], until, reason, source}` | Monitoring, Registry |
-| `maintenance:override_ended` | dito | `{override_id}` | dito |
+| `maintenance:windows_published` | Orchestrator (after render/sync), monitoring (manual windows) | `{source, items:[{ci_id, kind: host|vm|service, windows:[Schedule], inherited_from?}], replaces: true}` | Monitoring, Registry, Server Manager, ITSM |
+| `maintenance:override_started` | Orchestrator (deploy now), monitoring (manual), ITSM (change) | `{override_id, ci_ids[], until, reason, source}` | Monitoring, Registry |
+| `maintenance:override_ended` | ditto | `{override_id}` | ditto |
 | `monitoring:outage_persisted` | Monitoring | `{ci_id, host_ci_id?, service?, since, duration_s, rule:{offline_minutes, severity, auto_resolve}}` | ITSM |
-| `monitoring:outage_recovered` | Monitoring | `{ci_id, since, recovered_at}` | ITSM (Auto-Resolve) |
+| `monitoring:outage_recovered` | Monitoring | `{ci_id, since, recovered_at}` | ITSM (auto-resolve) |
 
-Regeln: `ci_id` Pflicht (Emitter löst vorher über die Registry auf, sonst kein Event); Konsumenten
-ignorieren unbekannte Felder; jeder Konsument hält seinen eigenen Zustand (Tabelle) und kommt ohne
-den Emitter aus. Topics werden in den Manifesten unter `permissions.emit/subscribe` deklariert.
+Rules: `ci_id` mandatory (emitter resolves it beforehand via the registry, otherwise no event); consumers
+ignore unknown fields; each consumer keeps its own state (table) and manages without the emitter. Topics are declared in the manifests under `permissions.emit/subscribe`.
 
-## 7. Arbeit pro Plugin
+## 7. Work per plugin
 
 ### 7.1 IaC Orchestrator (`lyndrix-plugin-iac-orchestrator`)
-- SSoT-Parsing: `maintenance`/`incidents` aus `service.yml` und controller-Hosts/Stages lesen,
-  Vererbung auflösen, pro CI veröffentlichen (`maintenance:windows_published`, nach jedem Sync).
-- Job-Queue: neue Zustände `SCHEDULED` (+ `not_before`, `window_ci_ids`); Webhook-Deploys mit
-  `deploy_policy: window` werden nicht sofort `QUEUED`, sondern `SCHEDULED` auf den nächsten
-  Fensterbeginn; der Worker nimmt sie fällig auf. Mehrere Deploys desselben Services im selben
-  Fenster werden zusammengefasst (letzter Stand gewinnt).
-- UI: Liste geplanter Deployments mit Fenster, Button „Jetzt ausführen“ → Override: Job sofort
-  `QUEUED`, `maintenance:override_started` für Host+Service-CIs (Ende = Jobende + Puffer),
-  `override_ended` beim Abschluss.
-- Default-Fenster-Schalter: Anzeige des effektiven Default je Stage; Aktivierung je nach Frage 1.
-- Guardrails: ohne Monitoring keine Änderung im Verhalten außer dem Planen; ohne `ci_id` kein Event.
+- SSoT parsing: read `maintenance`/`incidents` from `service.yml` and controller hosts/stages,
+  resolve inheritance, publish per CI (`maintenance:windows_published`, after each sync).
+- Job queue: new states `SCHEDULED` (+ `not_before`, `window_ci_ids`); webhook deploys with
+  `deploy_policy: window` are not immediately `QUEUED` but `SCHEDULED` for the start of the next
+  window; the worker picks them up when due. Multiple deploys of the same service in the same window are combined (latest state wins).
+- UI: list of planned deployments with window, button "Run now" → override: job immediately
+  `QUEUED`, `maintenance:override_started` for host+service CIs (end = job end + buffer),
+  `override_ended` on completion.
+- Default window switch: display of the effective default per stage; activation depending on question 1.
+- Guardrails: without monitoring no change in behavior except the planning; without `ci_id` no event.
 
 ### 7.2 Monitoring (`lyndrix-plugin-monitoring`)
-- Eigene Tabelle `monitoring_maintenance` (ci_id/monitor_id, schedule JSON, source, note) und
-  `monitoring_overrides` (override_id, ci_ids, until, reason); Konsument der Bus-Events, zusätzlich
-  **manuelle Fenster in der eigenen UI** (pro Monitor/Host, einmalig oder wiederkehrend).
-- Auswertung beim Probe-Ergebnis: ist für den Monitor (über `ci_id`) ein Fenster/Override aktiv →
-  Zustand `maintenance` statt `down`, keine Notification (Discord/Notification-Router), kein
-  Transition-Event als Alarm; Dashboard zeigt „Wartung bis hh:mm“.
-- Incident-Regel: pro Monitor die Regel aus dem Bus (`rule`) oder lokal konfiguriert; läuft ein
-  Monitor außerhalb eines Fensters ≥ `offline_minutes` → einmal `monitoring:outage_persisted`;
-  bei Rückkehr `monitoring:outage_recovered`. Zustand in einer kleinen Tabelle, cluster-sicher
-  (nur die Prober-Lease-Instanz wertet aus).
+- Own table `monitoring_maintenance` (ci_id/monitor_id, schedule JSON, source, note) and
+  `monitoring_overrides` (override_id, ci_ids, until, reason); consumer of the bus events, additionally
+  **manual windows in its own UI** (per monitor/host, one-time or recurring).
+- Evaluation on probe result: if a window/override is active for the monitor (via `ci_id`) →
+  state `maintenance` instead of `down`, no notification (Discord/notification router), no transition
+  event as alarm; dashboard shows "maintenance until hh:mm".
+- Incident rule: per monitor the rule from the bus (`rule`) or locally configured; if a monitor runs
+  outside a window for ≥ `offline_minutes` → `monitoring:outage_persisted` once;
+  on return `monitoring:outage_recovered`. State in a small table, cluster-safe
+  (only the prober lease instance evaluates).
 
 ### 7.3 ITSM (`lyndrix-plugin-itsm`)
-- Konsument: `monitoring:outage_persisted` → Incident anlegen (Dedupe: offener Incident je `ci_id`),
-  Severity aus der Regel, CI-Links auf Service- und Host-CI, Beschreibung mit Dauer/Monitor.
-- `monitoring:outage_recovered` → Auto-Resolve (wenn Regel es erlaubt), sonst Kommentar.
-- Eigene Wartungskenntnis: ein geplanter Change kann ein Fenster als Override veröffentlichen
-  (`maintenance:override_started`) – zweite Stufe, nicht Teil des ersten Wurfs.
+- Consumer: `monitoring:outage_persisted` → create incident (dedupe: open incident per `ci_id`),
+  severity from the rule, CI links to service and host CI, description with duration/monitor.
+- `monitoring:outage_recovered` → auto-resolve (if the rule allows it), otherwise comment.
+- Own maintenance knowledge: a planned change can publish a window as override
+  (`maintenance:override_started`) – second stage, not part of the first release.
 
-### 7.4 Entity Registry, Server Manager, Docker-Manager, External Services
-- Registry: Attribut `maintenance` am CI (aktuelles/nächstes Fenster, Quelle) aus den Bus-Events –
-  read model, damit jede UI „in Wartung“ anzeigen kann (`GET /entities/{id}` erweitert).
-- Server Manager: Anzeige des effektiven Fensters und laufender Overrides am Host.
-- Docker-Manager / External Services: Anzeige-Badge, optional eigene manuelle Overrides (später).
+### 7.4 Entity Registry, Server Manager, Docker Manager, External Services
+- Registry: attribute `maintenance` on the CI (current/next window, source) from the bus events –
+  read model, so every UI can show "in maintenance" (`GET /entities/{id}` extended).
+- Server Manager: display of the effective window and running overrides on the host.
+- Docker Manager / External Services: display badge, optionally own manual overrides (later).
 
-### 7.5 IaC-Workspace (Zusammenarbeit mit der IaC-Session)
-- Template Engine: Schema für `maintenance`/`incidents` in `service.yml`, Validierung, Rendering
-  der effektiven Werte in die Inventory-Variablen.
-- iac-controller: Schema für Hosts/Stages (`maintenance`, `maintenance_default`), Dokumentation.
+### 7.5 IaC workspace (collaboration with the IaC session)
+- Template engine: schema for `maintenance`/`incidents` in `service.yml`, validation, rendering
+  of the effective values into the inventory variables.
+- iac-controller: schema for hosts/stages (`maintenance`, `maintenance_default`), documentation.
 
 ### 7.6 Shell (lyndrix-ui)
-- Nichts Zentrales nötig; Plugins zeigen ihre eigenen Badges. Optional später: Wartungs-Badge in der
-  Plugin-Liste aus dem Registry-Read-Model.
+- Nothing central needed; plugins show their own badges. Optionally later: maintenance badge in the
+  plugin list from the registry read model.
 
-## 8. Phasen
+## 8. Phases
 
-| Phase | Inhalt | Wer |
+| Phase | Content | Who |
 |---|---|---|
-| P0 | Analyse-Sweeps pro Plugin (günstige Subagenten): aktuelle Datenmodelle, Events, UI-Stellen, Teststand, Lücken gegenüber Abschnitt 7 | Sonnet/Haiku-Agenten, Briefings in Abschnitt 10 |
-| P1 | Core-Bibliothek + Vertrag + Doku (API 1.13), Tests der Zeitlogik (Zeitzonen, Monatswechsel, Sommerzeit) | Fable |
-| P2 | Orchestrator: Parsing, `SCHEDULED`, Override, UI | Fable-Subagent mit Teilplan |
-| P3 | Monitoring: Tabellen, Suppression, manuelle Fenster, Outage-Regel | Fable-Subagent mit Teilplan |
-| P4 | ITSM: Incident aus Outage, Auto-Resolve, CI-Links | Fable-Subagent mit Teilplan |
-| P5 | Registry/Server Manager Read-Model und Anzeige | Fable-Subagent mit Teilplan |
-| P6 | IaC: Template-Engine- und controller-Schema, Doku; Übergabe an die IaC-Session | IaC-Session |
-| P7 | Dev-Bench-Durchstich: Renovate-Deploy → SCHEDULED → Override → Monitoring „Wartung“ → Incident-Regel außerhalb Fenster → ITSM | Fable |
+| P0 | Analysis sweeps per plugin (cheap subagents): current data models, events, UI locations, test status, gaps against section 7 | Sonnet/Haiku agents, briefings in section 10 |
+| P1 | Core library + contract + documentation (API 1.13), tests of the time logic (time zones, month change, daylight saving time) | Fable |
+| P2 | Orchestrator: parsing, `SCHEDULED`, override, UI | Fable subagent with sub-plan |
+| P3 | Monitoring: tables, suppression, manual windows, outage rule | Fable subagent with sub-plan |
+| P4 | ITSM: incident from outage, auto-resolve, CI links | Fable subagent with sub-plan |
+| P5 | Registry/Server Manager read model and display | Fable subagent with sub-plan |
+| P6 | IaC: template-engine and controller schema, documentation; handover to the IaC session | IaC session |
+| P7 | Dev-bench prototype: Renovate deploy → SCHEDULED → override → monitoring "maintenance" → incident rule outside window → ITSM | Fable |
 
-Jede Phase endet mit Tests (reine Funktionen + Plugin-Suiten im Dev-Core) und einem Release-Tag;
-Reihenfolge der Rollouts wie gewohnt (Core → Plugins → k3s-Roll durch Marvin).
+Each phase ends with tests (pure functions + plugin suites in the dev core) and a release tag;
+rollout order as usual (core → plugins → k3s roll by Marvin).
 
-## 9. Entscheidungen (Marvin, 2026-10-17)
+## 9. Decisions (Marvin, 2026-10-17)
 
-1. **Default-Fenster-Schalter:** Definition im iac-controller, Ein/Aus auch aus der Orchestrator-UI
-   mit Rückschreiben per Git-Commit (eine Wahrheit).
-2. **Deploy-Standardverhalten:** `prod` wartet auf das nächste Fenster, `dev`/`test` deployen sofort;
-   pro Service per `deploy_policy` übersteuerbar.
-3. **Fensterformat:** beides – einfaches Schema (`weekly`, `once`) als Standard, erweitert
-   `cron` + `duration_minutes` (wie Semaphore).
-4. **Incidents:** Auto-Resolve bei Rückkehr, Regeln für Services **und** Hosts/VMs; **globale
-   Regeln je CI-Typ** (Typen aus der Entity Registry) als Default, pro Service in der `service.yml`
-   bzw. pro Host im controller übersteuerbar; Laufzeit-Notschalter je Typ im Monitoring.
-5. Annahmen ohne Rückfrage: mehrere Deploys desselben Services im selben Fenster → letzter Stand
-   gewinnt; Override-Puffer 15 Minuten, maximale Override-Dauer 4 h (beides als Setting).
+1. **Default window switch:** definition in the iac-controller, on/off also from the orchestrator UI
+   with write-back via Git commit (one truth).
+2. **Default deploy behavior:** `prod` waits for the next window, `dev`/`test` deploy immediately;
+   overridable per service via `deploy_policy`.
+3. **Window format:** both – simple schema (`weekly`, `once`) as standard, extended
+   `cron` + `duration_minutes` (like Semaphore).
+4. **Incidents:** auto-resolve on return, rules for services **and** hosts/VMs; **global
+   rules per CI type** (types from the entity registry) as default, overridable per service in the `service.yml`
+   or per host in the controller; runtime emergency switch per type in monitoring.
+5. Assumptions without query: multiple deploys of the same service in the same window → latest state
+   wins; override buffer 15 minutes, maximum override duration 4 h (both as setting).
 
-**Nachtrag 2026-10-18 (Antworten auf A–H aus `maintenance-windows/00-ergebnis-p0.md` §5):**
-Punkt 1 ist präzisiert: der Orchestrator bleibt Ausführung und zeigt den Default-Schalter nur
-an; das Rückschreiben per Git-Commit kommt in ein eigenes Vorhaben im SSoT-Manager-Plugin
-(C). Typen sind alle Entity-Registry-Kinds, offen für künftige wie `network` (A). Findet sich
-im Horizont kein Fenster, deployt der Orchestrator sofort mit Warnung und das ITSM legt einen
-Task „Wartungsfenster definieren" an (H, Topic `maintenance:window_missing`). B, D, E, F, G
-mit den vorgeschlagenen Defaults.
+**Addendum 2026-10-18 (answers to A–H from `maintenance-windows/00-ergebnis-p0.md` §5):**
+Point 1 is refined: the orchestrator remains execution and only displays the default switch; the write-back via Git commit goes into a separate project in the SSoT manager plugin
+(C). Types are all entity registry kinds, open for future ones such as `network` (A). If no window
+appears on the horizon, the orchestrator deploys immediately with a warning and the ITSM creates a
+task "Define maintenance window" (H, topic `maintenance:window_missing`). B, D, E, F, G
+with the proposed defaults.
 
-## 11. Ergebnis P0 (2026-10-17)
+## 11. Result P0 (2026-10-17)
 
-| Datei | Inhalt |
+| File | Content |
 |---|---|
-| `maintenance-windows/00-ergebnis-p0.md` | Befunde, korrigierter Vertrag (Schema, Payloads, Transportregel), Architekturentscheidungen, offene Entscheidungen A–H, Phasen/Versionen, P7-Durchstich |
-| `maintenance-windows/analysis-{iac-orchestrator,monitoring,itsm,entity-registry,server-manager,template-engine-controller}.md` | Analyse-Sweeps (Sonnet), file:line-genau |
+| `maintenance-windows/00-ergebnis-p0.md` | Findings, corrected contract (schema, payloads, transport rule), architecture decisions, open decisions A–H, phases/versions, P7 prototype |
+| `maintenance-windows/analysis-{iac-orchestrator,monitoring,itsm,entity-registry,server-manager,template-engine-controller}.md` | Analysis sweeps (Sonnet), exact to file:line |
 | `maintenance-windows/plan-core.md` | P1: `core.api.maintenance`, API 1.13, Core 1.11.0, Shell 1.8.0 |
-| `maintenance-windows/plan-iac-orchestrator.md` | P2: Resolver, Service-CIs, `SCHEDULED`/Park, Overrides, Default-Schalter, 1.6.0 |
-| `maintenance-windows/plan-monitoring.md` | P3: `ci_id`, `MAINTENANCE`, Fenster/Overrides, Outage-Regel, 1.7.0 |
-| `maintenance-windows/plan-itsm.md` | P4: Incidents aus Outage-Events, Auto-Resolve, 0.3.0 |
-| `maintenance-windows/plan-entity-registry.md` | P5a: Read-Model, Scheme `iac.service`, 0.3.0 |
-| `maintenance-windows/plan-server-manager.md` | P5b: Badge/Filter, 1.4.0 |
-| `maintenance-windows/plan-iac-workspace.md` | P6: Linter, Controller-Doku/Beispiele, CI-Statusvertrag (Übergabe IaC-Session) |
+| `maintenance-windows/plan-iac-orchestrator.md` | P2: resolver, service CIs, `SCHEDULED`/park, overrides, default switch, 1.6.0 |
+| `maintenance-windows/plan-monitoring.md` | P3: `ci_id`, `MAINTENANCE`, windows/overrides, outage rule, 1.7.0 |
+| `maintenance-windows/plan-itsm.md` | P4: incidents from outage events, auto-resolve, 0.3.0 |
+| `maintenance-windows/plan-entity-registry.md` | P5a: read model, scheme `iac.service`, 0.3.0 |
+| `maintenance-windows/plan-server-manager.md` | P5b: badge/filter, 1.4.0 |
+| `maintenance-windows/plan-iac-workspace.md` | P6: linter, controller documentation/examples, CI status contract (handover to IaC session) |
 
-## 10. Briefings für die Analyse-Sweeps (P0)
+## 10. Briefings for the analysis sweeps (P0)
 
-Jeder Sweep liefert eine Markdown-Datei `features/maintenance-windows/analysis-<plugin>.md` mit:
-Datenmodell (Tabellen/Spalten, `ci_id`-Nutzung), relevante Events (emit/subscribe), API-Routen,
-UI-Komponenten mit Datei:Zeile, Teststand/-recipe, Cluster-Besonderheiten (Lease, Shard), und
-eine Liste konkreter Einhängepunkte für Abschnitt 7 – ohne Code zu ändern.
+Each sweep delivers a Markdown file `features/maintenance-windows/analysis-<plugin>.md` with:
+data model (tables/columns, `ci_id` usage), relevant events (emit/subscribe), API routes,
+UI components with file:line, test status/recipe, cluster specifics (lease, shard), and
+a list of concrete hook points for section 7 – without changing any code.
 
-- Orchestrator: Webhook-Pfad (GitLab/Renovate) bis zum Job, Queue-Zustände, Worker, wo `service.yml`
-  und controller-Daten gelesen werden, `iac:inventory_updated`-Payload, UI-Jobliste.
-- Monitoring: Monitor-Modell, Probe-Loop, Transition/Notification-Pfad, `ci_id` am Monitor,
-  Inventory-Sync aus dem Orchestrator, Dashboard-Komponenten, Prober-Lease.
-- ITSM: Incident-Modell, Erzeugung per API/Bus, CI-Links, Dedupe-Möglichkeiten, Katalog-YAML.
-- Entity Registry: Entity-Attribute, Erweiterbarkeit, `lookup`/`identify`-Verträge.
-- Server Manager: Host-Modell, Anzeigeorte.
-- Template Engine / iac-controller: `service.yml`-Schema-Validierung, Render-Pfad, Stage-Overrides.
+- Orchestrator: webhook path (GitLab/Renovate) to the job, queue states, worker, where `service.yml`
+  and controller data are read, `iac:inventory_updated` payload, UI job list.
+- Monitoring: monitor model, probe loop, transition/notification path, `ci_id` on the monitor,
+  inventory sync from the orchestrator, dashboard components, prober lease.
+- ITSM: incident model, creation via API/bus, CI links, dedupe options, catalog YAML.
+- Entity Registry: entity attributes, extensibility, `lookup`/`identify` contracts.
+- Server Manager: host model, display locations.
+- Template engine / iac-controller: `service.yml` schema validation, render path, stage overrides.

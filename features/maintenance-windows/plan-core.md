@@ -1,41 +1,41 @@
-# Teilplan P1: Core-Bibliothek `core.api.maintenance` (API 1.13, Core 1.11.0)
+# Sub-plan P1: core library `core.api.maintenance` (API 1.13, Core 1.11.0)
 
-**Status 2026-10-18: umgesetzt** (lyndrix-core `50d94f5`, lyndrix-ui `fca418d`, lokal, nicht gepusht).
-Abweichungen vom Entwurf unten, die reale Datei `app/core/api/maintenance.py` ist maßgeblich:
-`KINDS` → `KNOWN_KINDS` + `is_valid_kind()` (Entscheidung A); zusätzlich `MaintenanceError` als
-Basis von `ScheduleError`/`RuleError`, `CronExpr` öffentlich, `UTC`, `apply_override_ended(o,
+**Status 2026-10-18: implemented** (lyndrix-core `50d94f5`, lyndrix-ui `fca418d`, local, not pushed).
+Deviations from the draft below; the real file `app/core/api/maintenance.py` is authoritative:
+`KINDS` → `KNOWN_KINDS` + `is_valid_kind()` (decision A); additionally `MaintenanceError` as
+base of `ScheduleError`/`RuleError`, `CronExpr` public, `UTC`, `apply_override_ended(o,
 payload)`, `make_window_missing_id`, `TOPIC_WINDOW_MISSING`, TypedDict `WindowMissing`;
-`resolve_incident_rule(own, kind, *defaults_by_kind)` (eigener Block gewinnt und darf partiell
-sein, dann die erste `incident_defaults`-Map, die den Kind kennt). `weekly.start == end` ist ein
-Fehler. Horizont von `next_start` zählt ab Ende des laufenden Fensters. 64 Tests
-(`tests/maintenance/`, laufen auch ohne Core-Stack auf dem Host). Codename 1.11.0 „Quiet Hours".
+`resolve_incident_rule(own, kind, *defaults_by_kind)` (own block wins and may be partial,
+then the first `incident_defaults` map that knows the kind). `weekly.start == end` is an
+error. The horizon of `next_start` counts from the end of the running window. 64 tests
+(`tests/maintenance/`, also run without the core stack on the host). Codename 1.11.0 "Quiet Hours".
 
-Ausführung: Fable selbst. Grundlage: `00-ergebnis-p0.md` Abschnitte 2, 3. Der Core bleibt
-plugin-agnostisch: reine Funktionen, Konstanten, Doku, ein Farbtoken. Keine Persistenz, keine
-Endpunkte.
+Execution: Fable itself. Basis: `00-ergebnis-p0.md` sections 2, 3. The core stays
+plugin-agnostic: pure functions, constants, docs, one color token. No persistence, no
+endpoints.
 
-## 1. Dateien
+## 1. Files
 
-| Datei | Änderung |
+| File | Change |
 |---|---|
-| `lyndrix-core/app/core/api/maintenance.py` | neu, die Bibliothek |
-| `lyndrix-core/app/core/api/__init__.py` | `__api_version__ = "1.13.0"`, Docstring-Kopf „v1.13", `from . import maintenance` + `"maintenance"` in `__all__` (Präzedenz: `core.api.route_order` wird als Submodul importiert) |
-| `lyndrix-core/app/version.py` | `1.11.0`, `__release_date__`, Codename |
-| `lyndrix-core/app/core/theming/schema.py:42` | `--lx-state-maintenance` in die Token-Whitelist |
-| `lyndrix-core/app/ui/theme.py` (Zeilen um 148 und 608) | CSS-Variable + Badge-Klasse `lx-badge--maintenance` für NiceGUI |
-| `lyndrix-core/app/assets/themes/*/tokens.json` | Token `state_maintenance` (light/dark) in jedem mitgelieferten Theme; Validator füllt fehlende Keys auf, trotzdem in `default` setzen (Vorschlag `#a78bfa` dunkel, `#7c3aed` hell) |
-| `lyndrix-ui/src/index.css:58-61` und `:453,460` | `--lx-state-maintenance: #a78bfa;` plus `.lx-badge--maintenance`; `package.json` 1.8.0 |
-| `lyndrix-core/docs/plugins.md` | neuer Abschnitt „## Maintenance (API 1.13)" nach „AI instructions" |
-| `lyndrix-core/tests/maintenance/test_schedule.py`, `test_contract.py` | neu |
-| `lyndrix-dev/CLAUDE.md` | Abschnitt „### Maintenance (core API ≥ 1.13)" (äußeres Repo, Marvins Commit) |
+| `lyndrix-core/app/core/api/maintenance.py` | new, the library |
+| `lyndrix-core/app/core/api/__init__.py` | `__api_version__ = "1.13.0"`, docstring header "v1.13", `from . import maintenance` + `"maintenance"` in `__all__` (precedent: `core.api.route_order` is imported as a submodule) |
+| `lyndrix-core/app/version.py` | `1.11.0`, `__release_date__`, codename |
+| `lyndrix-core/app/core/theming/schema.py:42` | `--lx-state-maintenance` in the token whitelist |
+| `lyndrix-core/app/ui/theme.py` (lines around 148 and 608) | CSS variable + badge class `lx-badge--maintenance` for NiceGUI |
+| `lyndrix-core/app/assets/themes/*/tokens.json` | token `state_maintenance` (light/dark) in every bundled theme; validator fills missing keys, still set it in `default` (suggestion `#a78bfa` dark, `#7c3aed` light) |
+| `lyndrix-ui/src/index.css:58-61` and `:453,460` | `--lx-state-maintenance: #a78bfa;` plus `.lx-badge--maintenance`; `package.json` 1.8.0 |
+| `lyndrix-core/docs/plugins.md` | new section "## Maintenance (API 1.13)" after "AI instructions" |
+| `lyndrix-core/tests/maintenance/test_schedule.py`, `test_contract.py` | new |
+| `lyndrix-dev/CLAUDE.md` | section "### Maintenance (core API ≥ 1.13)" (outer repo, Marvin's commit) |
 
-## 2. Öffentliche API der Bibliothek
+## 2. Public API of the library
 
 ```python
-# Konstanten
+# Constants
 KNOWN_KINDS = ("hypervisor", "host", "service", "container", "network", "itsm_record", "generic")
-    # nur Doku/UI-Reihenfolge — KEIN Gate (Entscheidung A: Kinds sind offen)
-def is_valid_kind(kind: str) -> bool        # ^[a-z][a-z0-9_]*$, max 32 Zeichen
+    # documentation/UI order only — NOT a gate (decision A: kinds are open)
+def is_valid_kind(kind: str) -> bool        # ^[a-z][a-z0-9_]*$, max 32 characters
 SEVERITIES = ("critical", "high", "medium", "low")
 DEPLOY_POLICIES = ("window", "immediate")
 TOPIC_WINDOWS_PUBLISHED = "maintenance:windows_published"
@@ -50,117 +50,114 @@ DEFAULT_HORIZON = timedelta(days=30)
 
 class ScheduleError(ValueError): ...
 
-@dataclass(frozen=True) class WeeklySchedule:  days: frozenset[int]  # 0 = Montag … 6 = Sonntag (ISO)
+@dataclass(frozen=True) class WeeklySchedule:  days: frozenset[int]  # 0 = Monday … 6 = Sunday (ISO)
                                                start: time; end: time; tz: str
 @dataclass(frozen=True) class OnceSchedule:    start: datetime; end: datetime; note: str | None   # aware
 @dataclass(frozen=True) class CronSchedule:    expr: str; duration_minutes: int; tz: str
 Schedule = WeeklySchedule | OnceSchedule | CronSchedule
 
 def parse_window(raw: Mapping, *, default_tz: str = "UTC") -> Schedule
-    # akzeptiert Eingabeform {"weekly": {...}} / {"once": {...}} / {"cron": {...}}
-    # und Normalform {"type": "weekly", ...}; wirft ScheduleError mit sprechender Meldung
+    # accepts input form {"weekly": {...}} / {"once": {...}} / {"cron": {...}}
+    # and normal form {"type": "weekly", ...}; raises ScheduleError with a descriptive message
 def parse_windows(raw: Sequence[Mapping] | None, *, default_tz="UTC") -> list[Schedule]
-def validate_windows(raw, *, default_tz="UTC") -> list[str]        # Fehlertexte statt Exception (Linter, UI)
-def to_dict(s: Schedule) -> dict                                     # Normalform (Abschnitt 2.1 im Ergebnis)
+def validate_windows(raw, *, default_tz="UTC") -> list[str]        # error texts instead of exception (linter, UI)
+def to_dict(s: Schedule) -> dict                                     # normal form (section 2.1 in the result)
 def to_dicts(schedules) -> list[dict]
 
 class Interval(NamedTuple): start: datetime; end: datetime         # aware, UTC
-def intervals_between(schedules, start, end, *, limit=500) -> list[Interval]   # sortiert, überlappende zusammengeführt
-def current_interval(schedules, now) -> Interval | None             # enthält now (start <= now < end), größtes end
+def intervals_between(schedules, start, end, *, limit=500) -> list[Interval]   # sorted, overlapping ones merged
+def current_interval(schedules, now) -> Interval | None             # contains now (start <= now < end), largest end
 def active_until(schedules, now) -> datetime | None
 def next_window(schedules, after, *, horizon=DEFAULT_HORIZON) -> Interval | None
-    # frühestes Intervall mit end > after; liegt after darin, ist es das laufende (start <= after)
-def next_start(schedules, after, *, horizon=DEFAULT_HORIZON) -> datetime | None   # Start des nächsten noch nicht laufenden Intervalls
+    # earliest interval with end > after; if after lies within it, it is the running one (start <= after)
+def next_start(schedules, after, *, horizon=DEFAULT_HORIZON) -> datetime | None   # start of the next not-yet-running interval
 
 @dataclass class Override:
     override_id: str; ci_ids: tuple[str, ...]; until: datetime; started_at: datetime
     ended_at: datetime | None = None; linger_minutes: int = DEFAULT_LINGER_MINUTES
     reason: str = ""; source: str = ""
-def override_until(o: Override) -> datetime     # ended_at + linger, sonst until
+def override_until(o: Override) -> datetime     # ended_at + linger, otherwise until
 def override_active(o: Override, now) -> bool
-def override_from_payload(payload: Mapping) -> Override     # aus override_started (+ ended-Merge separat)
+def override_from_payload(payload: Mapping) -> Override     # from override_started (+ ended merge separately)
 
 @dataclass(frozen=True) class MaintenanceState:
     active: bool; until: datetime | None; source: Literal["window", "override"] | None
     next_start: datetime | None; note: str | None
 def effective_state(schedules, overrides, now, *, horizon=DEFAULT_HORIZON) -> MaintenanceState
-    # Override gewinnt bei gleichzeitiger Aktivität (längeres until), source="override"
+    # override wins on simultaneous activity (longer until), source="override"
 
 @dataclass(frozen=True) class IncidentRule:
     enabled: bool; offline_minutes: int; severity: str; auto_resolve: bool
 def parse_incident_rule(raw: Mapping | None, *, fallback: IncidentRule | None = None) -> IncidentRule | None
-    # offline_minutes 0 → enabled False; severity validiert; unbekannte Keys ignoriert
-def resolve_incident_rule(own, type_default, site_default) -> IncidentRule | None   # erste definierte Ebene gewinnt
+    # offline_minutes 0 → enabled False; severity validated; unknown keys ignored
+def resolve_incident_rule(own, type_default, site_default) -> IncidentRule | None   # first defined level wins
 def rule_to_dict(rule) -> dict
 
 def parse_iso(value: str) -> datetime        # aware; naive → UTC
-def iso(dt: datetime) -> str                 # UTC, Sekunden, "Z"
+def iso(dt: datetime) -> str                 # UTC, seconds, "Z"
 def utcnow() -> datetime
 def make_outage_id(ci_id: str, since: datetime) -> str      # f"{ci_id}:{iso(since)}"
 def make_window_missing_id(ci_id: str, job_ref: str | int) -> str   # f"window_missing:{ci_id}:{job_ref}"
 ```
 
-Payload-Formen aus `00-ergebnis-p0.md` Abschnitt 3 als `TypedDict`s (`WindowsPublishedItem`,
+Payload shapes from `00-ergebnis-p0.md` section 3 as `TypedDict`s (`WindowsPublishedItem`,
 `WindowsPublished`, `OverrideStarted`, `OverrideEnded`, `WindowMissing`, `OutagePersisted`,
-`OutageRecovered`) nur zur Dokumentation und für Typprüfung; keine Laufzeitvalidierung im Core.
-`parse_incident_rule`/`resolve_incident_rule` arbeiten mit `incident_defaults` als
-`Mapping[str, Mapping]` mit **beliebigen** Kind-Schlüsseln (`resolve_incident_rule(own,
+`OutageRecovered`) only for documentation and type checking; no runtime validation in the core.
+`parse_incident_rule`/`resolve_incident_rule` work with `incident_defaults` as
+`Mapping[str, Mapping]` with **arbitrary** kind keys (`resolve_incident_rule(own,
 defaults_by_kind, kind, site_defaults_by_kind)`).
 
-## 3. Zeitlogik, präzise
+## 3. Time logic, precisely
 
-- **Weekly:** Für jeden Kalendertag `d` im Fenster `[after − 1 Tag, after + horizon]` (lokal in
-  `tz`): Tag in `days` → lokaler Start `d + start`, Ende `d + end`, bei `end <= start` Ende am
-  Folgetag. Lokale Zeiten über `zoneinfo.ZoneInfo(tz)` nach UTC; nicht existierende Zeiten
-  (Frühjahrsumstellung) werden von `zoneinfo` vorwärts normalisiert, doppelte Zeiten
-  (Herbst) mit `fold=0`. Horizon begrenzt die Iteration.
-- **Once:** genau ein Intervall; `start < end` Pflicht; `tz`-Offset Pflicht (oder `default_tz`
-  bei naiven Werten).
-- **Cron:** eigener Parser `CronExpr` (5 Felder: Minute, Stunde, Tag, Monat, Wochentag).
-  `*`, `a`, `a-b`, `a,b`, `*/n`, `a-b/n`, Monatsnamen `jan…dec`, Wochentagsnamen `sun…sat`,
-  `0` und `7` = Sonntag. Vixie-Semantik: sind Tag **und** Wochentag eingeschränkt, zählt
-  „einer von beiden". `next_fire(after_local)` sucht minutenweise mit Sprüngen über Felder
-  (Monat → Tag → Stunde → Minute), Obergrenze 5 Jahre, sonst `None`. Intervall =
-  `[fire, fire + duration]` in `tz`, nach UTC konvertiert. Für `current_interval` muss auch ein
-  Fire vor `now` geprüft werden: `last_fire(before)` rückwärts bis `duration` zurück.
-- Alle Rückgaben sind **aware UTC**. Eingaben ohne Zeitzone gelten als UTC (`parse_iso`).
-- `intervals_between` vereinigt überlappende Intervalle aller Schedules (Fenster addieren sich).
+- **Weekly:** for every calendar day `d` in the window `[after − 1 day, after + horizon]` (local in
+  `tz`): day in `days` → local start `d + start`, end `d + end`; if `end <= start`, end on the following day. Local times via `zoneinfo.ZoneInfo(tz)` to UTC; non-existent times
+  (spring change) are normalized forward by `zoneinfo`, duplicate times (autumn) with `fold=0`. Horizon limits the iteration.
+- **Once:** exactly one interval; `start < end` mandatory; `tz` offset mandatory (or `default_tz`
+  for naive values).
+- **Cron:** own parser `CronExpr` (5 fields: minute, hour, day, month, weekday).
+  `*`, `a`, `a-b`, `a,b`, `*/n`, `a-b/n`, month names `jan…dec`, weekday names `sun…sat`,
+  `0` and `7` = Sunday. Vixie semantics: if day **and** weekday are restricted, "one of the two" counts.
+  `next_fire(after_local)` searches minute-wise with jumps over fields
+  (month → day → hour → minute), upper bound 5 years, otherwise `None`. Interval =
+  `[fire, fire + duration]` in `tz`, converted to UTC. For `current_interval` a fire before `now`
+  must also be checked: `last_fire(before)` backwards up to `duration`.
+- All return values are **aware UTC**. Inputs without time zone count as UTC (`parse_iso`).
+- `intervals_between` merges overlapping intervals of all schedules (windows add up).
 
 ## 4. Tests (`tests/maintenance/`)
 
-Laufen im Dev-Core (`docker exec lyndrix-core-dev python -m pytest tests/maintenance -q`).
+Run in the dev core (`docker exec lyndrix-core-dev python -m pytest tests/maintenance -q`).
 
-- Parsing: jede Eingabeform und die Normalform; Fehlerfälle (unbekannter Typ, `HH:MM` falsch,
-  `days` leer, `once.end <= start`, Cron 4 Felder, `duration_minutes 0`, unbekannte `tz`) mit
-  Prüfung des Meldungstexts; `to_dict(parse_window(x))` ist idempotent.
-- Weekly: Sonntag 02:00–04:00 Berlin → UTC-Intervalle im Winter (01:00–03:00Z) und Sommer
-  (00:00–02:00Z); Fenster über Mitternacht (`22:00–02:00`); Umstellungstage 2026-03-29 und
-  2026-10-25 (Fenster 02:00–03:00 am Umstellungstag: Frühjahr normalisiert, Herbst 1 h länger
-  erlaubt, Test dokumentiert das Verhalten); `days` als Zahlen und Namen.
-- Cron: `0 2 1 * *` + 180 min über Monats- und Jahreswechsel; `*/15 * * * *`; `0 3 * * sun`;
-  Vixie-OR `0 0 13 * fri`; `last_fire` für `current_interval`; `None` nach Horizon.
-- `next_window`/`next_start`: vor, in und nach einem Intervall; leere Liste; Horizon 30 Tage.
-- `effective_state`: nur Fenster, nur Override, beides (Override gewinnt), Override nach
-  `ended_at` innerhalb und außerhalb `linger`, abgelaufen.
-- Incident-Regeln: `offline_minutes: 0` → disabled; Severity-Validierung; Kaskade
+- Parsing: every input form and the normal form; error cases (unknown type, `HH:MM` wrong,
+  `days` empty, `once.end <= start`, cron with 4 fields, `duration_minutes 0`, unknown `tz`) with
+  checking of the message text; `to_dict(parse_window(x))` is idempotent.
+- Weekly: Sunday 02:00–04:00 Berlin → UTC intervals in winter (01:00–03:00Z) and summer
+  (00:00–02:00Z); window across midnight (`22:00–02:00`); change days 2026-03-29 and
+  2026-10-25 (window 02:00–03:00 on the change day: spring normalized, autumn 1 h longer
+  allowed, test documents the behavior); `days` as numbers and names.
+- Cron: `0 2 1 * *` + 180 min across month and year change; `*/15 * * * *`; `0 3 * * sun`;
+  Vixie OR `0 0 13 * fri`; `last_fire` for `current_interval`; `None` after horizon.
+- `next_window`/`next_start`: before, inside and after an interval; empty list; horizon 30 days.
+- `effective_state`: only window, only override, both (override wins), override after
+  `ended_at` inside and outside `linger`, expired.
+- Incident rules: `offline_minutes: 0` → disabled; severity validation; cascade
   `resolve_incident_rule`.
-- Contract: Konstanten unverändert (Snapshot-Test), `make_outage_id`/`make_window_missing_id`
-  deterministisch; `is_valid_kind` akzeptiert `network`/`my_kind2`, lehnt `VM`/`a-b`/leer ab.
+- Contract: constants unchanged (snapshot test), `make_outage_id`/`make_window_missing_id`
+  deterministic; `is_valid_kind` accepts `network`/`my_kind2`, rejects `VM`/`a-b`/empty.
 
-## 5. Doku (`docs/plugins.md`, Englisch wie der Rest der Datei)
+## 5. Docs (`docs/plugins.md`, English like the rest of the file)
 
-Inhalt: Zweck (Core liefert Modell + Zeitauswertung + Topic-Namen, keine Persistenz), Normalform
-der Fenster, die sechs Topics mit Payload-Tabelle, Transportregel (lokal emittieren, idempotent
-konsumieren, eigener Cluster-Broadcast für Caches), Override-Semantik mit `linger_minutes`,
-Typ-Vokabular = Entity-Registry-Kinds (offen, kein Gate; `KNOWN_KINDS` nur Anzeige-Reihenfolge),
-`window_missing` → ITSM-Task, Beispiel „Plugin konsumiert `windows_published` und
-berechnet `effective_state` beim Lesen", Hinweis auf `min_core_version="1.11.0"` bzw.
-`try/except ImportError` für optionale Nutzung.
+Content: purpose (core delivers model + time evaluation + topic names, no persistence), normal form
+of the windows, the six topics with payload table, transport rule (emit locally, consume idempotently, own cluster broadcast for caches), override semantics with `linger_minutes`,
+type vocabulary = entity registry kinds (open, no gate; `KNOWN_KINDS` only display order),
+`window_missing` → ITSM task, example "plugin consumes `windows_published` and
+computes `effective_state` on read", note on `min_core_version="1.11.0"` or
+`try/except ImportError` for optional use.
 
-## 6. Abnahme
+## 6. Acceptance
 
-- Tests grün im Dev-Core; `ruff`, `black --check`, `mypy app/core/api/maintenance.py` sauber.
-- `python -c "from core.api import maintenance as m; print(m.KNOWN_KINDS)"` im Dev-Core.
-- Theme-Validator akzeptiert `state_maintenance`; Shell zeigt das Token in den DevTools.
-- Commit auf `feature/maintenance-core`, kein Push vor Freigabe; danach Core-Image 1.11.0 und
-  Shell 1.8.0 nach dem gewohnten Rollout (Marvin rollt k3s).
+- Tests green in the dev core; `ruff`, `black --check`, `mypy app/core/api/maintenance.py` clean.
+- `python -c "from core.api import maintenance as m; print(m.KNOWN_KINDS)"` in the dev core.
+- Theme validator accepts `state_maintenance`; shell shows the token in the DevTools.
+- Commit on `feature/maintenance-core`, no push before approval; afterwards core image 1.11.0 and
+  shell 1.8.0 after the usual rollout (Marvin rolls out k3s).

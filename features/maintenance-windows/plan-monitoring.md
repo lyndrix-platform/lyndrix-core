@@ -1,49 +1,49 @@
-# Teilplan P3: Monitoring 1.7.0 — `ci_id`, Zustand `MAINTENANCE`, Fenster/Overrides, Outage-Regel
+# Sub-plan P3: Monitoring 1.7.0 — `ci_id`, state `MAINTENANCE`, windows/overrides, outage rule
 
-Ausführung: Fable-Subagent. Grundlage: `analysis-monitoring.md`, `00-ergebnis-p0.md`
-(Abschnitte 2–4). Repo `plugins/lyndrix-plugin-monitoring`, Layout bleibt `app/controller/`.
-Voraussetzung: Core 1.11.0 (API 1.13); Orchestrator 1.6.0 liefert `ci_id`/`host_ci_id` im
-Inventory-Sync (bis dahin bleibt `ci_id` leer, alles andere funktioniert).
+Execution: Fable subagent. Basis: `analysis-monitoring.md`, `00-ergebnis-p0.md`
+(sections 2–4). Repo `plugins/lyndrix-plugin-monitoring`, layout stays `app/controller/`.
+Prerequisite: core 1.11.0 (API 1.13); orchestrator 1.6.0 delivers `ci_id`/`host_ci_id` in the
+inventory sync (until then `ci_id` stays empty, everything else works).
 
-## 1. Manifest und Versionen
+## 1. Manifest and versions
 
 - `entrypoint.py:49` `version="1.6.2" → "1.7.0"`, `min_core_version="1.11.0"`.
 - `permissions.subscribe` + `maintenance:windows_published`, `maintenance:override_started`,
   `maintenance:override_ended`. `permissions.emit` + `maintenance:windows_published`,
   `maintenance:override_started`, `maintenance:override_ended`, `monitoring:outage_persisted`,
   `monitoring:outage_recovered`.
-- `settings_schema` (71-110) Kategorie „Maintenance" / „Incidents":
+- `settings_schema` (71-110) category "Maintenance" / "Incidents":
 
 | Key | kind | Default |
 |---|---|---|
-| `outage_rules_enabled` | bool | true (globaler Notschalter) |
-| `outage_rules_enabled_hypervisor` / `_host` / `_service` / `_container` | bool | true / true / true / false (die bekannten Kinds als eigene Schalter) |
-| `outage_rules_disabled_kinds` | str | "" (Komma-Liste weiterer Kinds, die stumm sind — Kinds sind offen, Entscheidung A; Beispiel `network,generic`) |
+| `outage_rules_enabled` | bool | true (global emergency switch) |
+| `outage_rules_enabled_hypervisor` / `_host` / `_service` / `_container` | bool | true / true / true / false (the known kinds as own switches) |
+| `outage_rules_disabled_kinds` | str | "" (comma list of further kinds that are silent — kinds are open, decision A; example `network,generic`) |
 | `outage_default_offline_minutes` | int | 10 |
 | `outage_default_severity` | select critical/high/medium/low | high |
 | `outage_default_auto_resolve` | bool | true |
-| `override_default_minutes` | int | 60 (manuelles Override aus der UI) |
+| `override_default_minutes` | int | 60 (manual override from the UI) |
 | `override_max_minutes` | int | 240 |
 | `override_linger_minutes` | int | 15 |
 
-`apply_settings` (`service.py:994-1010`) übernimmt sie; Änderungen kommen per
-`plugin:settings_changed` ohne Reload.
+`apply_settings` (`service.py:994-1010`) takes them over; changes arrive via
+`plugin:settings_changed` without reload.
 
-## 2. Datenmodell (`app/model/models.py`, DDL über `create_all` + `_ensure_schema`)
+## 2. Data model (`app/model/models.py`, DDL via `create_all` + `_ensure_schema`)
 
-- `MonitorRecord` (26-56): `ci_id String(36) NULL` mit Index; `MonitorUpsert.ci_id`;
-  `_serialize_monitor` liefert `ci_id`; `upsert_monitor` (`service.py:1655-1692`) übernimmt es;
-  **`config_hash` (1653-1654) schließt `ci_id` ein**; `_ensure_schema` (726-744) `ALTER … ADD
-  COLUMN IF NOT EXISTS ci_id`. Inventory-Ingest (`ingest_inventory_snapshot` 2155-2265) liest
-  `ci_id` aus `hosts[]`/`services[]`.
-- `MonitorState.MAINTENANCE = "MAINTENANCE"` (12-16). `PassiveResult.state` lehnt
-  `MAINTENANCE` ab (400).
-- `monitoring_daily_aggregates`: Spalte `maintenance_samples Integer default 0`
-  (`_ensure_schema`, MySQL-Upsert 1120-1156, `_bump_daily_aggregate` 1073-1110). Uptime-Nenner
+- `MonitorRecord` (26-56): `ci_id String(36) NULL` with index; `MonitorUpsert.ci_id`;
+  `_serialize_monitor` returns `ci_id`; `upsert_monitor` (`service.py:1655-1692`) takes it over;
+  **`config_hash` (1653-1654) includes `ci_id`**; `_ensure_schema` (726-744) `ALTER … ADD
+  COLUMN IF NOT EXISTS ci_id`. Inventory ingest (`ingest_inventory_snapshot` 2155-2265) reads
+  `ci_id` from `hosts[]`/`services[]`.
+- `MonitorState.MAINTENANCE = "MAINTENANCE"` (12-16). `PassiveResult.state` rejects
+  `MAINTENANCE` (400).
+- `monitoring_daily_aggregates`: column `maintenance_samples Integer default 0`
+  (`_ensure_schema`, MySQL upsert 1120-1156, `_bump_daily_aggregate` 1073-1110). Uptime denominator
   `total - paused - maintenance` in `_uptime_from_aggregates` (`models.py:222-229`),
   `_refresh_uptime_windows_sync` (`service.py:1202`), `_calculate_uptime_percentages`
-  (`models.py:201`); `_timeline_uptime_percent` zählt `UP` unverändert.
-- Neue Tabellen (alle `extend_existing`, FK-frei):
+  (`models.py:201`); `_timeline_uptime_percent` counts `UP` unchanged.
+- New tables (all `extend_existing`, FK-free):
 
 ```
 monitoring_maintenance_windows  id PK, ci_id String(36) idx NULL, monitor_id String(191) idx NULL,
@@ -61,151 +61,148 @@ monitoring_outages              monitor_id String(191) PK, outage_id String(128)
                                 rule_json Text NULL, error Text NULL, updated_at
 ```
 
-Zeiten naiv UTC wie der Rest des Plugins (`models.py:251`); Konvertierung aus/zu aware über
-Helfer in `maintenance.py`.
+Times naive UTC like the rest of the plugin (`models.py:251`); conversion from/to aware via
+helpers in `maintenance.py`.
 
-## 3. Modul `app/controller/maintenance.py` (neu)
+## 3. Module `app/controller/maintenance.py` (new)
 
-- `MaintenanceStore`: CRUD mit `_rc_session` + `_retrying` (1020/1205/1213):
-  `replace_windows(source, items)` (DELETE je `source` + INSERT in einer Transaktion),
+- `MaintenanceStore`: CRUD with `_rc_session` + `_retrying` (1020/1205/1213):
+  `replace_windows(source, items)` (DELETE per `source` + INSERT in one transaction),
   `add_manual_window(ci_id|monitor_id, windows, note)`, `delete_window(id)`,
   `upsert_override(...)`, `end_override(override_id, ended_at, linger)`, `list_*`,
-  `purge_expired(now)` (Overrides mit `until + linger < now - 1 d`), `open_outages()`.
-- `MaintenanceCache` (je Instanz, In-Memory, kein DB-Lesen im Probe-Hot-Path):
-  `reload()` lädt Fenster (`parse_windows`), Overrides (`Override`), Regeln je `ci_id`, und die
-  Zuordnung `monitor_id → ci_id` (Monitor-Spalte, Fallback: Host-Monitor `host:<host_name>`
-  für Services ohne eigene `ci_id`); `state_for(record, now) -> MaintenanceState` über
+  `purge_expired(now)` (overrides with `until + linger < now - 1 d`), `open_outages()`.
+- `MaintenanceCache` (per instance, in memory, no DB read in the probe hot path):
+  `reload()` loads windows (`parse_windows`), overrides (`Override`), rules per `ci_id`, and the
+  mapping `monitor_id → ci_id` (monitor column, fallback: host monitor `host:<host_name>`
+  for services without own `ci_id`); `state_for(record, now) -> MaintenanceState` via
   `core.api.maintenance.effective_state`; `rule_for(record) -> IncidentRule | None`
-  (Reihenfolge: Regel am Service-CI → Regel am Host-CI → Settings-Default des Kinds;
-  Kind aus `windows`-Tabelle, sonst `server`-Monitor → `host`, sonst `service`); Notschalter
-  (`outage_rules_enabled*` für die bekannten Kinds, `outage_rules_disabled_kinds` für alle
-  anderen; unbekannter Kind ohne Eintrag → Regel gilt) hier anwenden. Kein Kind-Gate: jeder
-  Slug aus dem Event wird übernommen (`core.api.maintenance.is_valid_kind`).
-- Bus-Handler (dünn in `entrypoint.py` nach Muster 327-367, Arbeit im Modul via `to_thread`):
-  `on_windows_published` (nur `source != "monitoring"`; `replaces` → `replace_windows`),
-  `on_override_started`, `on_override_ended`. Nach jedem Schreiben: `cache.reload()` lokal und
+  (order: rule on the service CI → rule on the host CI → settings default of the kind;
+  kind from `windows` table, otherwise `server` monitor → `host`, otherwise `service`); apply the emergency switch
+  here (`outage_rules_enabled*` for the known kinds, `outage_rules_disabled_kinds` for all
+  others; unknown kind without entry → rule applies). No kind gate: every
+  slug from the event is accepted (`core.api.maintenance.is_valid_kind`).
+- Bus handlers (thin in `entrypoint.py` following pattern 327-367, work in the module via `to_thread`):
+  `on_windows_published` (only `source != "monitoring"`; `replaces` → `replace_windows`),
+  `on_override_started`, `on_override_ended`. After each write: `cache.reload()` locally and
   `_emit_cluster("monitoring:monitors_changed", reason="maintenance")`; `on_monitors_changed`
-  (`service.py:436-446`) bekommt den Zweig `reason == "maintenance" → cache.reload()` (kein
-  Resync). Handler sind idempotent (Unique-Keys, Upsert je `override_id`).
-- Manuelle Fenster/Overrides aus der UI: schreiben, dann **lokal** `ctx.emit` von
-  `maintenance:windows_published {source:"monitoring", replaces:true, items}` bzw.
-  `override_started/ended {source:"monitoring"}`, damit Registry und Server Manager sie sehen;
-  die eigenen Handler ignorieren `source == "monitoring"` (sonst Doppelschreiben).
+  (`service.py:436-446`) gets the branch `reason == "maintenance" → cache.reload()` (no resync). Handlers are idempotent (unique keys, upsert per `override_id`).
+- Manual windows/overrides from the UI: write, then **locally** `ctx.emit` of
+  `maintenance:windows_published {source:"monitoring", replaces:true, items}` respectively
+  `override_started/ended {source:"monitoring"}`, so that the registry and server manager see them;
+  own handlers ignore `source == "monitoring"` (otherwise double writes).
 
-## 4. Unterdrückung im Schreibpfad (`service.py:1478-1506 _store_heartbeat`)
+## 4. Suppression in the write path (`service.py:1478-1506 _store_heartbeat`)
 
-Alle Heartbeat-Pfade (aktiv 643, passiv 1749) laufen hier durch. Reihenfolge:
+All heartbeat paths (active 643, passive 1749) run through here. Order:
 
 1. `ms = cache.state_for(record, now)`; `effective = MAINTENANCE if state == DOWN and ms.active
-   else state`. `UP` bleibt `UP`. `latest_error` bleibt zur Diagnose erhalten.
-2. Heartbeat mit `effective`, `_bump_daily_aggregate` zählt `maintenance_samples`.
-3. **Outage-Buchführung in derselben Session** (konsistent mit dem Commit, keine Phantome):
-   - `effective in (DOWN, MAINTENANCE)` und keine Zeile → `INSERT monitoring_outages(state="open",
+   else state`. `UP` stays `UP`. `latest_error` is kept for diagnostics.
+2. Heartbeat with `effective`, `_bump_daily_aggregate` counts `maintenance_samples`.
+3. **Outage bookkeeping in the same session** (consistent with the commit, no phantoms):
+   - `effective in (DOWN, MAINTENANCE)` and no row → `INSERT monitoring_outages(state="open",
      down_since=now, suppressed_until = ms.until if ms.active else NULL)`.
-   - vorhandene offene Zeile und `ms.active` → `suppressed_until = max(suppressed_until, ms.until)`.
-   - `effective == UP` und Zeile vorhanden: `state == "open"` → Zeile löschen (nie gemeldet);
-     `state == "persisted"` → `state="recovered"`, `recovered_at=now`, Event
-     `outage_recovered` **nach dem Commit** emittieren (Ereignisliste an der Session, Emit im
-     Aufrufer nach `commit()`), Zeile danach löschen.
-   - `apply_admin_override(pause)` (1703) und `delete_monitors`/`clear_states_db` (1929, 1803)
-     räumen `monitoring_outages` mit.
-4. `_emit_transition` (1462-1476): Payload um `ci_id` und `maintenance: bool` ergänzen; weiter
-   vor dem Commit (bestehendes Verhalten, nur für Cache/UI).
+   - existing open row and `ms.active` → `suppressed_until = max(suppressed_until, ms.until)`.
+   - `effective == UP` and row present: `state == "open"` → delete row (never reported);
+     `state == "persisted"` → `state="recovered"`, `recovered_at=now`, event
+     `outage_recovered` to be emitted **after the commit** (event list on the session, emit in the
+     caller after `commit()`), delete row afterwards.
+   - `apply_admin_override(pause)` (1703) and `delete_monitors`/`clear_states_db` (1929, 1803)
+     clear `monitoring_outages` as well.
+4. `_emit_transition` (1462-1476): extend payload by `ci_id` and `maintenance: bool`; still before the commit (existing behavior, only for cache/UI).
 
-Flap-Dämpfung (2128-2134) bleibt vor diesem Punkt; der Wartungs-Check findet erst hier statt.
+Flap damping (2128-2134) stays before this point; the maintenance check happens only here.
 
-## 5. Outage-Auswertung (Interval-Job `monitoring:outages`, 60 s)
+## 5. Outage evaluation (interval job `monitoring:outages`, 60 s)
 
-- Registriert in `start()` (184-200), läuft nur auf der probenden Instanz; im Shard-Modus für
-  `owns(monitor_id)` (383) und zusätzlich der `housekeeping`-Worker für fremde Reste nach
-  Shard-Wechsel.
-- Je offener Zeile (`state == "open"`): `rule = cache.rule_for(record)`; `None`/disabled →
-  weiter. `ms = cache.state_for(record, now)`; aktiv → `suppressed_until = max(…, ms.until)`,
-  weiter. Sonst `effective_since = max(down_since, suppressed_until or down_since)`;
-  `now - effective_since >= offline_minutes` → bedingtes `UPDATE … SET state='persisted',
+- Registered in `start()` (184-200), runs only on the probing instance; in shard mode for
+  `owns(monitor_id)` (383) and additionally the `housekeeping` worker for foreign leftovers
+  after a shard change.
+- Per open row (`state == "open"`): `rule = cache.rule_for(record)`; `None`/disabled →
+  continue. `ms = cache.state_for(record, now)`; active → `suppressed_until = max(…, ms.until)`,
+  continue. Otherwise `effective_since = max(down_since, suppressed_until or down_since)`;
+  `now - effective_since >= offline_minutes` → conditional `UPDATE … SET state='persisted',
   persisted_at=now, outage_id=make_outage_id(ci_id, down_since), rule_json=… WHERE
-  monitor_id=? AND state='open'`; `rowcount == 1` → **einmal** `ctx.emit(TOPIC_OUTAGE_PERSISTED,
-  {...})` (lokal). Ohne `ci_id` am Monitor (auch nicht über den Host-Monitor): kein Event, Log
-  einmal je Monitor.
-- Payload: `outage_id, ci_id, kind, name (Monitor-Name), host_ci_id (ci_id des Host-Monitors,
-  bei Host-Monitoren leer), monitor_id, since, persisted_at, duration_s, rule {offline_minutes,
+  monitor_id=? AND state='open'`; `rowcount == 1` → **once** `ctx.emit(TOPIC_OUTAGE_PERSISTED,
+  {...})` (local). Without `ci_id` on the monitor (also not via the host monitor): no event, log
+  once per monitor.
+- Payload: `outage_id, ci_id, kind, name (monitor name), host_ci_id (ci_id of the host monitor,
+  empty for host monitors), monitor_id, since, persisted_at, duration_s, rule {offline_minutes,
   severity, auto_resolve}, error (latest_error)`.
-- Recovery-Event siehe Abschnitt 4; `duration_s = recovered_at - down_since`.
+- Recovery event see section 4; `duration_s = recovered_at - down_since`.
 
-## 6. Zustand im Dashboard
+## 6. State on the dashboard
 
-- `aggregate_state` (`app/ui/styles.py:78-90`) und React-Äquivalent: `DOWN > UNKNOWN >
+- `aggregate_state` (`app/ui/styles.py:78-90`) and React equivalent: `DOWN > UNKNOWN >
   MAINTENANCE > UP > PAUSED`.
-- `status_counts`/`stats` (1232-1284): `maintenance` zählen; `health()` unverändert.
+- `status_counts`/`stats` (1232-1284): count `maintenance`; `health()` unchanged.
 - `_serialize_monitor` (`models.py:162`), `list_monitors` (1286), `helpers.py:147,271-307`
-  (Whitelist-Dicts, Host-/Service-Views 180-200): Felder `ci_id`, `in_maintenance`,
-  `maintenance_until`, `maintenance_source`, `outage_since` (bei offener/persistierter Zeile).
-  Overview-Cache (TTL 10 s) wird bei Fensteränderung geleert (`_view_cache.clear()`).
-- `_sync_job_on_loop` (1550): `MAINTENANCE` behält den Job (Probing läuft weiter, Recovery
-  wird erkannt). `_load_probe_candidates` (894-903): `MAINTENANCE` wie `DOWN` behandeln.
+  (whitelist dicts, host/service views 180-200): fields `ci_id`, `in_maintenance`,
+  `maintenance_until`, `maintenance_source`, `outage_since` (for an open/persisted row).
+  Overview cache (TTL 10 s) is cleared on window change (`_view_cache.clear()`).
+- `_sync_job_on_loop` (1550): `MAINTENANCE` keeps the job (probing continues, recovery
+  is detected). `_load_probe_candidates` (894-903): treat `MAINTENANCE` like `DOWN`.
 
-## 7. API (`app/controller/api.py`, R/W wie bisher)
+## 7. API (`app/controller/api.py`, R/W as before)
 
-| Methode | Pfad | Perm | Inhalt |
+| Method | Path | Perm | Content |
 |---|---|---|---|
-| GET | `/windows?ci_id=&monitor_id=&source=` | R | Fenster inkl. `effective_state` je Zeile |
-| POST | `/windows` | W | manuelles Fenster `{ci_id \| monitor_id, windows: [Eingabe- oder Normalform], note}`; Validierung über `parse_windows` (400 mit Meldungen) |
-| DELETE | `/windows/{id}` | W | nur `source == "monitoring"` |
-| GET | `/overrides?active=true` | R | Overrides mit `active`, `until_effective` |
+| GET | `/windows?ci_id=&monitor_id=&source=` | R | windows incl. `effective_state` per row |
+| POST | `/windows` | W | manual window `{ci_id \| monitor_id, windows: [input or normal form], note}`; validation via `parse_windows` (400 with messages) |
+| DELETE | `/windows/{id}` | W | only `source == "monitoring"` |
+| GET | `/overrides?active=true` | R | overrides with `active`, `until_effective` |
 | POST | `/overrides` | W | `{ci_ids \| monitor_ids, minutes (<= override_max_minutes), reason}` → `override_id = "mon-<uuid>"` |
-| DELETE | `/overrides/{id}` | W | beendet (`ended_at=now`, linger) — nur eigene (`source == "monitoring"`) |
-| GET | `/outages` | R | offene/persistierte Ausfälle mit Regel und effektiver Dauer |
+| DELETE | `/overrides/{id}` | W | ends (`ended_at=now`, linger) — only own (`source == "monitoring"`) |
+| GET | `/outages` | R | open/persisted outages with rule and effective duration |
 
-Pfade `/maintenance/*` bleiben der Plugin-Pflege; `/settings` ist reserviert.
+Paths `/maintenance/*` remain for plugin maintenance; `/settings` is reserved.
 
 ## 8. UI (`src/ui/PluginApp.tsx`, `src/ui/lib/api.ts`, `locales/monitoring.{de,en}.json`)
 
 - `MonitorState` (12) + `MAINTENANCE`; `STATE_COLOR` (140-149)
   `var(--lx-state-maintenance, var(--lx-state-paused))`; `STATE_LABEL`/`StateBadge` (320-353)
-  mit Zusatz „bis hh:mm" aus `maintenance_until`; `HeaderCard`-Zähler (1053-1059) „Wartung".
-- Typen `ServiceView`, `Host`, `Row` (14-66): `ci_id?`, `in_maintenance?`, `maintenance_until?`,
+  with addition "until hh:mm" from `maintenance_until`; `HeaderCard` counter (1053-1059) "Maintenance".
+- Types `ServiceView`, `Host`, `Row` (14-66): `ci_id?`, `in_maintenance?`, `maintenance_until?`,
   `outage_since?`.
-- Neue Komponenten (eigene Dateien unter `src/ui/`): `MaintenanceDialog` (Override anlegen:
-  Dauer-Preset 30/60/120/240 min, Grund; optional wiederkehrendes Fenster weekly/once) und
-  `OverridesPanel` (aktive Overrides mit „Beenden"). Einhängen: Button in `HostCardDetail`
-  (519), `SplitView` (771), Toolbar (873) für Mehrfachauswahl, Panel neben `HeaderCard`.
-- NiceGUI (`app/ui/styles.py:8-27`, `widget.py:25`, `_components/host_card.py`): Farbe und
-  Label für `MAINTENANCE`; kein Dialog (React ist Ziel).
+- New components (own files under `src/ui/`): `MaintenanceDialog` (create override:
+  duration preset 30/60/120/240 min, reason; optionally recurring window weekly/once) and
+  `OverridesPanel` (active overrides with "End"). Hook-up: button in `HostCardDetail`
+  (519), `SplitView` (771), toolbar (873) for multi-select, panel next to `HeaderCard`.
+- NiceGUI (`app/ui/styles.py:8-27`, `widget.py:25`, `_components/host_card.py`): color and
+  label for `MAINTENANCE`; no dialog (React is the target).
 
 ## 9. Cluster
 
-- Prober-Lease unverändert; der Outage-Job hängt an `start()`/`stop()` wie die anderen
-  Housekeeping-Jobs. Standby-Instanzen halten den Cache für API-Antworten aktuell (Reload über
-  `monitors_changed reason=maintenance`), werten aber nicht aus.
-- DB-Writes der Handler mit `_rc_session` + `_retrying`; `replace_windows` in einer kurzen
-  Transaktion; IntegrityError = „Peer war schneller".
-- `_FakeCtx.emit` in den Tests bekommt `cluster=False`, damit der `cluster=True`-Pfad getestet
-  wird (heute über den `TypeError`-Zweig 485-488 verdeckt).
+- Prober lease unchanged; the outage job hangs on `start()`/`stop()` like the other
+  housekeeping jobs. Standby instances keep the cache current for API responses (reload via
+  `monitors_changed reason=maintenance`), but do not evaluate.
+- DB writes of the handlers with `_rc_session` + `_retrying`; `replace_windows` in a short
+  transaction; IntegrityError = "peer was faster".
+- `_FakeCtx.emit` in the tests gets `cluster=False`, so that the `cluster=True` path is tested
+  (today hidden behind the `TypeError` branch 485-488).
 
-## 10. Tests (`tests/`, Rezept in `analysis-monitoring.md` §7)
+## 10. Tests (`tests/`, recipe in `analysis-monitoring.md` §7)
 
-- `test_maintenance.py` (bestehende Datei behandelt Plugin-Pflege → neue Datei
-  `test_maintenance_windows.py`): Fenster ersetzen je `source`; Override-Start/Ende/Linger/Ablauf;
-  Cache-Reload bei `monitors_changed reason=maintenance`; manuelle Fenster emittieren mit
-  `source=monitoring` und werden vom eigenen Handler ignoriert; Validierungsfehler 400.
-- `test_store_heartbeat_maintenance.py`: DOWN im Fenster → `MAINTENANCE` gespeichert, Aggregat
-  `maintenance_samples`, Uptime-Nenner; UP im Fenster bleibt UP; Outage-Zeile wird angelegt,
-  `suppressed_until` fortgeschrieben, bei UP gelöscht; passive Ergebnisse gleich behandelt;
-  `PassiveResult` mit `MAINTENANCE` → 400.
-- `test_outage_rule.py` mit Fake-Uhr (`monkeypatch` auf `models._utc_now` und die
-  Maintenance-Uhr): persistiert nach `offline_minutes` außerhalb Fenster; nicht innerhalb;
-  Uhr startet nach Fensterende neu; Regelkaskade Service-CI → Host-CI → Settings; Notschalter
-  je Kind; ohne `ci_id` kein Event; doppelte Auswertung liefert genau einen Emit (bedingtes
-  UPDATE); Recovery emittiert nach Commit mit `duration_s`; Payload-Felder vollständig.
-- `test_inventory_ci_id.py`: Ingest übernimmt `ci_id`/`host_ci_id`; Änderung der `ci_id`
-  ändert `config_hash`.
+- `test_maintenance.py` (existing file covers plugin maintenance → new file
+  `test_maintenance_windows.py`): windows replace per `source`; override start/end/linger/expiry;
+  cache reload on `monitors_changed reason=maintenance`; manual windows emit with
+  `source=monitoring` and are ignored by own handler; validation errors 400.
+- `test_store_heartbeat_maintenance.py`: DOWN in window → `MAINTENANCE` stored, aggregate
+  `maintenance_samples`, uptime denominator; UP in window stays UP; outage row is created,
+  `suppressed_until` advanced, deleted on UP; passive results handled the same;
+  `PassiveResult` with `MAINTENANCE` → 400.
+- `test_outage_rule.py` with fake clock (`monkeypatch` on `models._utc_now` and the
+  maintenance clock): persisted after `offline_minutes` outside window; not inside; clock
+  restarts after window end; rule cascade service CI → host CI → settings; emergency switch
+  per kind; without `ci_id` no event; double evaluation yields exactly one emit (conditional
+  UPDATE); recovery emits after commit with `duration_s`; payload fields complete.
+- `test_inventory_ci_id.py`: ingest takes over `ci_id`/`host_ci_id`; change of `ci_id`
+  changes `config_hash`.
 
-## 11. Doku und Abnahme
+## 11. Docs and acceptance
 
-- `documentation.md` (DE): Abschnitt „Events" (ab 185) neu schreiben (Ist-Zustand plus neue
-  Topics), neuer Abschnitt „Wartungsfenster, Overrides und Outage-Regel", Settings-Tabelle;
-  `docs/index.md:8` korrigieren; `.claude/skills/run-state-monitoring/SKILL.md` React-Route
-  richtigstellen; CHANGELOG 1.7.0.
-- Abnahme: `00-ergebnis-p0.md` Abschnitt 7, Schritte 3–6. `ruff`, `black --check`, `mypy`;
-  Bundle neu gebaut; Commit auf `feature/maintenance-windows`; Tags `v1.7.0`/`1.7.0` nach
-  Freigabe.
+- `documentation.md` (DE): rewrite section "Events" (from 185) (current state plus new
+  topics), new section "Maintenance windows, overrides and outage rule", settings table;
+  correct `docs/index.md:8`; correct the React route in `.claude/skills/run-state-monitoring/SKILL.md`; CHANGELOG 1.7.0.
+- Acceptance: `00-ergebnis-p0.md` section 7, steps 3–6. `ruff`, `black --check`, `mypy`;
+  bundle rebuilt; commit on `feature/maintenance-windows`; tags `v1.7.0`/`1.7.0` after
+  approval.
